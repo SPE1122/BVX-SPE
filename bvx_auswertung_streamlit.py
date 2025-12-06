@@ -93,9 +93,9 @@ class BVXParser:
         for i, (attrs, content) in enumerate(zip(part_tags_content, part_sections) if part_sections else []):
             full_tag = f'<RectangularPart{attrs}>'
             name = self._extract_xml_attribute(full_tag, 'Name') or f'Bauteil_{i+1}'
-            dim_x = float(self._extract_xml_attribute(full_tag, 'DimensionX') or '0')
-            dim_y = float(self._extract_xml_attribute(full_tag, 'DimensionY') or '0')
-            dim_z = float(self._extract_xml_attribute(full_tag, 'DimensionZ') or '0')
+            dim_x = self._safe_float(self._extract_xml_attribute(full_tag, 'DimensionX'))
+            dim_y = self._safe_float(self._extract_xml_attribute(full_tag, 'DimensionY'))
+            dim_z = self._safe_float(self._extract_xml_attribute(full_tag, 'DimensionZ'))
             
             parts.append(Part(name=name, length=dim_x, width=dim_y, height=dim_z))
             
@@ -131,9 +131,9 @@ class BVXParser:
         for i, attrs in enumerate(self_closing_parts):
             full_tag = f'<RectangularPart{attrs}/>'
             name = self._extract_xml_attribute(full_tag, 'Name') or f'Bauteil_{len(parts)+1}'
-            dim_x = float(self._extract_xml_attribute(full_tag, 'DimensionX') or '0')
-            dim_y = float(self._extract_xml_attribute(full_tag, 'DimensionY') or '0')
-            dim_z = float(self._extract_xml_attribute(full_tag, 'DimensionZ') or '0')
+            dim_x = self._safe_float(self._extract_xml_attribute(full_tag, 'DimensionX'))
+            dim_y = self._safe_float(self._extract_xml_attribute(full_tag, 'DimensionY'))
+            dim_z = self._safe_float(self._extract_xml_attribute(full_tag, 'DimensionZ'))
             parts.append(Part(name=name, length=dim_x, width=dim_y, height=dim_z))
         
         # Parse global Operations section
@@ -147,18 +147,27 @@ class BVXParser:
         
         return self._build_result(file_name, parts, operations)
     
+    def _safe_float(self, value: Optional[str], default: float = 0.0) -> float:
+        """Sicher einen String zu Float konvertieren"""
+        if value is None:
+            return default
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            return default
+    
     def _parse_operation(self, op_type: str, tag: str) -> Dict:
         """Parst einzelne Operation aus XML-Tag"""
-        x = float(self._extract_xml_attribute(tag, 'X') or '0')
-        y = float(self._extract_xml_attribute(tag, 'Y') or '0')
-        z = float(self._extract_xml_attribute(tag, 'Z') or '0')
+        x = self._safe_float(self._extract_xml_attribute(tag, 'X'))
+        y = self._safe_float(self._extract_xml_attribute(tag, 'Y'))
+        z = self._safe_float(self._extract_xml_attribute(tag, 'Z'))
         
-        drill_diam = float(self._extract_xml_attribute(tag, 'DrillDiam') or '0')
-        hole_depth = float(self._extract_xml_attribute(tag, 'HoleDepth') or '0')
-        dim_x = float(self._extract_xml_attribute(tag, 'DimensionX') or '0')
-        dim_y = float(self._extract_xml_attribute(tag, 'DimensionY') or '0')
-        dim_z = float(self._extract_xml_attribute(tag, 'DimensionZ') or '0')
-        depth_attr = float(self._extract_xml_attribute(tag, 'Depth') or '0')
+        drill_diam = self._safe_float(self._extract_xml_attribute(tag, 'DrillDiam'))
+        hole_depth = self._safe_float(self._extract_xml_attribute(tag, 'HoleDepth'))
+        dim_x = self._safe_float(self._extract_xml_attribute(tag, 'DimensionX'))
+        dim_y = self._safe_float(self._extract_xml_attribute(tag, 'DimensionY'))
+        dim_z = self._safe_float(self._extract_xml_attribute(tag, 'DimensionZ'))
+        depth_attr = self._safe_float(self._extract_xml_attribute(tag, 'Depth'))
         prod_state = self._extract_xml_attribute(tag, 'ProductionState')
         plunge = self._extract_xml_attribute(tag, 'PlungeType') or self._extract_xml_attribute(tag, 'PocketPlungeType')
         
