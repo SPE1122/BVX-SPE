@@ -1161,13 +1161,12 @@ def create_loading_excel(
 
 
 def draw_loading_view(placements_df: pd.DataFrame, platforms_df: pd.DataFrame, platform_name: str, view: str) -> go.Figure:
-    platform_row = platforms_df[platforms_df['Pritsche'] == platform_name].iloc[0]
-    eff_length = float(platform_row['Länge_mm']) + float(platform_row['Überhang_vorne_mm']) + float(platform_row['Überhang_hinten_mm'])
-    width = float(platform_row['Breite_mm'])
-    max_height = float(platform_row['Max_Höhe_mm'])
+    """Zeichnet Draufsicht, Seitenansicht oder Rückansicht der ausgewählten Pritsche.
 
-    loaded = placements_df[placements_df['Pritsche'] == platform_name].copy()
-    loaded = loaded[loaded['X_mm'].notna() & loaded['Y_mm'].notna() & loaded['Z_mm'].notna()].copy()
+    Wichtig: Plotly skaliert Achsen nicht zuverlässig nur anhand von Shapes.
+    Deshalb werden die Achsbereiche hier fest gesetzt, damit die Rechtecke sichtbar sind.
+    """
+    platform_match = platforms_df[platforms_df['Pritsche'].astype(str) == str(platform_name)]
     fig = go.Figure()
 
     title_prefix = {
@@ -1176,35 +1175,86 @@ def draw_loading_view(placements_df: pd.DataFrame, platforms_df: pd.DataFrame, p
         'back': 'Rückansicht',
     }.get(view, 'Ansicht')
 
+    if platform_match.empty:
+        fig.update_layout(
+            title=f'{title_prefix} - keine Pritsche gefunden',
+            height=450,
+            margin=dict(l=20, r=20, t=50, b=20),
+        )
+        fig.add_annotation(text='Keine Pritschendaten vorhanden', x=0.5, y=0.5, xref='paper', yref='paper', showarrow=False)
+        return fig
+
+    platform_row = platform_match.iloc[0]
+    eff_length = float(platform_row['Länge_mm']) + float(platform_row['Überhang_vorne_mm']) + float(platform_row['Überhang_hinten_mm'])
+    width = float(platform_row['Breite_mm'])
+    max_height = float(platform_row['Max_Höhe_mm'])
+    base_wood = float(platform_row.get('Kantholz_erste_Lage_mm', 0) or 0)
+
+    loaded = placements_df[placements_df['Pritsche'].astype(str) == str(platform_name)].copy()
+    loaded = loaded[loaded['X_mm'].notna() & loaded['Y_mm'].notna() & loaded['Z_mm'].notna()].copy()
+
+    # Unsichtbarer Punkt erzwingt, dass Plotly die Grafikfläche überhaupt aufspannt.
+    fig.add_trace(go.Scatter(x=[0], y=[0], mode='markers', marker=dict(size=1, opacity=0), hoverinfo='skip', showlegend=False))
+
     if view == 'top':
-        fig.update_layout(title=f'{title_prefix} - {platform_name}', xaxis_title='Länge X (mm)', yaxis_title='Breite Y (mm)')
+        fig.update_layout(
+            title=f'{title_prefix} - {platform_name}',
+            xaxis_title='Länge X (mm)',
+            yaxis_title='Breite Y (mm)',
+        )
         fig.add_shape(type='rect', x0=0, y0=0, x1=eff_length, y1=width, line=dict(width=2, dash='dash'))
         for _, row in loaded.iterrows():
             x0, y0 = float(row['X_mm']), float(row['Y_mm'])
             x1, y1 = x0 + float(row['Länge_mm']), y0 + float(row['Breite_mm'])
-            fig.add_shape(type='rect', x0=x0, y0=y0, x1=x1, y1=y1, line=dict(width=1), fillcolor='rgba(100,100,100,0.18)')
-            fig.add_annotation(x=(x0+x1)/2, y=(y0+y1)/2, text=str(row['Einheit_ID']), showarrow=False, font=dict(size=10))
-        fig.update_yaxes(scaleanchor='x', scaleratio=1)
+            fig.add_shape(type='rect', x0=x0, y0=y0, x1=x1, y1=y1, line=dict(width=1), fillcolor='rgba(100,100,100,0.28)')
+            fig.add_annotation(x=(x0 + x1) / 2, y=(y0 + y1) / 2, text=str(row['Einheit_ID']), showarrow=False, font=dict(size=10))
+        fig.update_xaxes(range=[0, max(eff_length, 1)], constrain='domain')
+        fig.update_yaxes(range=[0, max(width, 1)], scaleanchor='x', scaleratio=1)
 
     elif view == 'side':
-        fig.update_layout(title=f'{title_prefix} - {platform_name}', xaxis_title='Länge X (mm)', yaxis_title='Höhe Z (mm)')
+        fig.update_layout(
+            title=f'{title_prefix} - {platform_name}',
+            xaxis_title='Länge X (mm)',
+            yaxis_title='Höhe Z (mm)',
+        )
         fig.add_shape(type='rect', x0=0, y0=0, x1=eff_length, y1=max_height, line=dict(width=2, dash='dash'))
-        fig.add_shape(type='line', x0=0, y0=float(platform_row.get('Kantholz_erste_Lage_mm', 0)), x1=eff_length, y1=float(platform_row.get('Kantholz_erste_Lage_mm', 0)), line=dict(width=1, dash='dot'))
+        if base_wood > 0:
+            fig.add_shape(type='line', x0=0, y0=base_wood, x1=eff_length, y1=base_wood, line=dict(width=1, dash='dot'))
         for _, row in loaded.iterrows():
             x0, z0 = float(row['X_mm']), float(row['Z_mm'])
             x1, z1 = x0 + float(row['Länge_mm']), z0 + float(row['Höhe_mm'])
-            fig.add_shape(type='rect', x0=x0, y0=z0, x1=x1, y1=z1, line=dict(width=1), fillcolor='rgba(100,100,100,0.18)')
-            fig.add_annotation(x=(x0+x1)/2, y=(z0+z1)/2, text=str(row['Einheit_ID']), showarrow=False, font=dict(size=10))
+            fig.add_shape(type='rect', x0=x0, y0=z0, x1=x1, y1=z1, line=dict(width=1), fillcolor='rgba(100,100,100,0.28)')
+            fig.add_annotation(x=(x0 + x1) / 2, y=(z0 + z1) / 2, text=str(row['Einheit_ID']), showarrow=False, font=dict(size=10))
+        fig.update_xaxes(range=[0, max(eff_length, 1)], constrain='domain')
+        fig.update_yaxes(range=[0, max(max_height, 1)])
 
     else:
-        fig.update_layout(title=f'{title_prefix} - {platform_name}', xaxis_title='Breite Y (mm)', yaxis_title='Höhe Z (mm)')
+        fig.update_layout(
+            title=f'{title_prefix} - {platform_name}',
+            xaxis_title='Breite Y (mm)',
+            yaxis_title='Höhe Z (mm)',
+        )
         fig.add_shape(type='rect', x0=0, y0=0, x1=width, y1=max_height, line=dict(width=2, dash='dash'))
-        fig.add_shape(type='line', x0=0, y0=float(platform_row.get('Kantholz_erste_Lage_mm', 0)), x1=width, y1=float(platform_row.get('Kantholz_erste_Lage_mm', 0)), line=dict(width=1, dash='dot'))
+        if base_wood > 0:
+            fig.add_shape(type='line', x0=0, y0=base_wood, x1=width, y1=base_wood, line=dict(width=1, dash='dot'))
         for _, row in loaded.iterrows():
             y0, z0 = float(row['Y_mm']), float(row['Z_mm'])
             y1, z1 = y0 + float(row['Breite_mm']), z0 + float(row['Höhe_mm'])
-            fig.add_shape(type='rect', x0=y0, y0=z0, x1=y1, y1=z1, line=dict(width=1), fillcolor='rgba(100,100,100,0.18)')
-            fig.add_annotation(x=(y0+y1)/2, y=(z0+z1)/2, text=str(row['Einheit_ID']), showarrow=False, font=dict(size=10))
+            fig.add_shape(type='rect', x0=y0, y0=z0, x1=y1, y1=z1, line=dict(width=1), fillcolor='rgba(100,100,100,0.28)')
+            fig.add_annotation(x=(y0 + y1) / 2, y=(z0 + z1) / 2, text=str(row['Einheit_ID']), showarrow=False, font=dict(size=10))
+        fig.update_xaxes(range=[0, max(width, 1)], constrain='domain')
+        fig.update_yaxes(range=[0, max(max_height, 1)])
+
+    if loaded.empty:
+        fig.add_annotation(
+            text='Auf dieser Pritsche sind keine Einheiten platziert',
+            x=0.5,
+            y=0.5,
+            xref='paper',
+            yref='paper',
+            showarrow=False,
+            font=dict(size=14),
+        )
 
     fig.update_layout(height=450, showlegend=False, margin=dict(l=20, r=20, t=50, b=20))
     return fig
