@@ -545,30 +545,157 @@ def sort_parts_dataframe(
 # Verladeplanung
 # =============================================================================
 
+def yes_no_to_bool(value: Any) -> bool:
+    """Wandelt JA/NEIN, True/False, 1/0 robust in Bool."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)) and not pd.isna(value):
+        return value != 0
+    text = str(value).strip().lower()
+    return text in {'ja', 'j', 'yes', 'y', 'true', 'wahr', '1', 'x'}
+
+
+def safe_number(value: Any, default: float = 0.0) -> float:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return default
+    try:
+        return float(str(value).replace(',', '.'))
+    except (TypeError, ValueError):
+        return default
+
+
 def get_transport_presets() -> Dict[str, List[Dict[str, Any]]]:
-    """Beispiel-Stammdaten. Müssen intern geprüft und angepasst werden."""
+    """Fallback-Stammdaten, falls keine Excel-Vorlage geladen wird."""
     return {
         'LKW solo': [
-            {'Freigabe': True, 'Pritsche': 'LKW', 'Länge_mm': 9000, 'Breite_mm': 2550, 'Max_Höhe_mm': 2600,
-             'Überhang_vorne_mm': 0, 'Überhang_hinten_mm': 500, 'Max_Gewicht_kg': 12000},
+            {'Freigabe': True, 'Pritsche': 'LKW', 'Pritschenname': 'LKW', 'Fuhrenoption': 'LKW solo', 'Pritschen_Reihenfolge': 1,
+             'Länge_mm': 9300, 'Breite_mm': 2450, 'Max_Höhe_mm': 2600, 'Überhang_vorne_mm': 0,
+             'Überhang_hinten_mm': 300, 'Max_Gewicht_kg': 15000, 'Kantholz_erste_Lage_mm': 80,
+             'Einlage_zwischen_Lagen_mm': 40, 'Drehen_90_erlaubt': False},
         ],
         'LKW mit Anhänger': [
-            {'Freigabe': True, 'Pritsche': 'LKW', 'Länge_mm': 7300, 'Breite_mm': 2550, 'Max_Höhe_mm': 2600,
-             'Überhang_vorne_mm': 0, 'Überhang_hinten_mm': 500, 'Max_Gewicht_kg': 10000},
-            {'Freigabe': True, 'Pritsche': 'Anhänger', 'Länge_mm': 8000, 'Breite_mm': 2550, 'Max_Höhe_mm': 2600,
-             'Überhang_vorne_mm': 0, 'Überhang_hinten_mm': 500, 'Max_Gewicht_kg': 10000},
+            {'Freigabe': True, 'Pritsche': 'LKW', 'Pritschenname': 'LKW', 'Fuhrenoption': 'LKW mit Anhänger', 'Pritschen_Reihenfolge': 1,
+             'Länge_mm': 9300, 'Breite_mm': 2450, 'Max_Höhe_mm': 2600, 'Überhang_vorne_mm': 0,
+             'Überhang_hinten_mm': 300, 'Max_Gewicht_kg': 15000, 'Kantholz_erste_Lage_mm': 80,
+             'Einlage_zwischen_Lagen_mm': 40, 'Drehen_90_erlaubt': False},
+            {'Freigabe': True, 'Pritsche': 'Anhänger', 'Pritschenname': 'Anhänger', 'Fuhrenoption': 'LKW mit Anhänger', 'Pritschen_Reihenfolge': 2,
+             'Länge_mm': 8200, 'Breite_mm': 2450, 'Max_Höhe_mm': 2600, 'Überhang_vorne_mm': 0,
+             'Überhang_hinten_mm': 300, 'Max_Gewicht_kg': 12000, 'Kantholz_erste_Lage_mm': 80,
+             'Einlage_zwischen_Lagen_mm': 40, 'Drehen_90_erlaubt': False},
         ],
         'Anhängerzug': [
-            {'Freigabe': True, 'Pritsche': 'Motorwagen', 'Länge_mm': 7300, 'Breite_mm': 2550, 'Max_Höhe_mm': 2600,
-             'Überhang_vorne_mm': 0, 'Überhang_hinten_mm': 500, 'Max_Gewicht_kg': 10000},
-            {'Freigabe': True, 'Pritsche': 'Anhänger', 'Länge_mm': 8000, 'Breite_mm': 2550, 'Max_Höhe_mm': 2600,
-             'Überhang_vorne_mm': 0, 'Überhang_hinten_mm': 500, 'Max_Gewicht_kg': 10000},
+            {'Freigabe': True, 'Pritsche': 'LKW', 'Pritschenname': 'LKW', 'Fuhrenoption': 'Anhängerzug', 'Pritschen_Reihenfolge': 1,
+             'Länge_mm': 7600, 'Breite_mm': 2450, 'Max_Höhe_mm': 2600, 'Überhang_vorne_mm': 0,
+             'Überhang_hinten_mm': 300, 'Max_Gewicht_kg': 12000, 'Kantholz_erste_Lage_mm': 80,
+             'Einlage_zwischen_Lagen_mm': 40, 'Drehen_90_erlaubt': False},
+            {'Freigabe': True, 'Pritsche': 'Anhänger', 'Pritschenname': 'Anhänger', 'Fuhrenoption': 'Anhängerzug', 'Pritschen_Reihenfolge': 2,
+             'Länge_mm': 8200, 'Breite_mm': 2450, 'Max_Höhe_mm': 2600, 'Überhang_vorne_mm': 0,
+             'Überhang_hinten_mm': 300, 'Max_Gewicht_kg': 12000, 'Kantholz_erste_Lage_mm': 80,
+             'Einlage_zwischen_Lagen_mm': 40, 'Drehen_90_erlaubt': False},
         ],
         'Tiefbettauflieger': [
-            {'Freigabe': True, 'Pritsche': 'Tiefbett', 'Länge_mm': 13600, 'Breite_mm': 2550, 'Max_Höhe_mm': 3500,
-             'Überhang_vorne_mm': 0, 'Überhang_hinten_mm': 1000, 'Max_Gewicht_kg': 24000},
+            {'Freigabe': True, 'Pritsche': 'Tiefbett', 'Pritschenname': 'Tiefbett', 'Fuhrenoption': 'Tiefbettauflieger', 'Pritschen_Reihenfolge': 1,
+             'Länge_mm': 13000, 'Breite_mm': 2550, 'Max_Höhe_mm': 3200, 'Überhang_vorne_mm': 500,
+             'Überhang_hinten_mm': 1000, 'Max_Gewicht_kg': 24000, 'Kantholz_erste_Lage_mm': 100,
+             'Einlage_zwischen_Lagen_mm': 40, 'Drehen_90_erlaubt': True},
         ],
     }
+
+
+def read_transport_config_excel(uploaded_excel) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, Any], List[str]]:
+    """Liest die Excel-Stammdaten für Fuhrenoptionen, Pritschen und Standards."""
+    messages: List[str] = []
+    standards: Dict[str, Any] = {
+        'Holzdichte': 500.0,
+        'Max_Bundgewicht': 1000.0,
+        'Standard_Kantholz_erste_Lage': 80.0,
+        'Standard_Einlage_zwischen_Lagen': 40.0,
+        'Längenversatz_je_Lage': 100.0,
+        'Abstand_zwischen_Einheiten': 0.0,
+        'Sichtseite_nach_unten': 'JA',
+        'Plane_Folie': 'JA',
+    }
+
+    if uploaded_excel is None:
+        options = pd.DataFrame([
+            {'Freigegeben': True, 'Priorität': 1, 'Fuhrenoption': 'LKW solo', 'Wiederholen_bis_alles_verladen': True, 'Strategie': 'Variante A'},
+        ])
+        preset = get_transport_presets()['LKW solo']
+        pritschen = pd.DataFrame(preset)
+        return options, pritschen, standards, ['Keine Excel-Stammdaten geladen. Fallback LKW solo wird verwendet.']
+
+    try:
+        xls = pd.ExcelFile(uploaded_excel)
+        options_raw = pd.read_excel(xls, sheet_name='Fuhrenoptionen')
+        pritschen_raw = pd.read_excel(xls, sheet_name='Pritschen')
+        standards_raw = pd.read_excel(xls, sheet_name='Standards')
+    except Exception as exc:
+        preset = get_transport_presets()['LKW solo']
+        options = pd.DataFrame([
+            {'Freigegeben': True, 'Priorität': 1, 'Fuhrenoption': 'LKW solo', 'Wiederholen_bis_alles_verladen': True, 'Strategie': 'Variante A'},
+        ])
+        pritschen = pd.DataFrame(preset)
+        return options, pritschen, standards, [f'Excel konnte nicht gelesen werden: {exc}. Fallback LKW solo wird verwendet.']
+
+    if {'Parameter', 'Wert'}.issubset(set(standards_raw.columns)):
+        for _, row in standards_raw.dropna(how='all').iterrows():
+            key = str(row.get('Parameter', '')).strip()
+            if not key:
+                continue
+            value = row.get('Wert')
+            if key in ['Sichtseite_nach_unten', 'Plane_Folie']:
+                standards[key] = value
+            else:
+                standards[key] = safe_number(value, standards.get(key, 0.0))
+
+    options = options_raw.dropna(how='all').copy()
+    needed_options = ['Freigegeben', 'Priorität', 'Fuhrenoption']
+    for col in needed_options:
+        if col not in options.columns:
+            options[col] = ''
+    options = options[options['Fuhrenoption'].notna() & (options['Fuhrenoption'].astype(str).str.strip() != '')].copy()
+    options['Freigegeben'] = options['Freigegeben'].apply(yes_no_to_bool)
+    options['Priorität'] = options['Priorität'].apply(lambda v: int(safe_number(v, 999)))
+    if 'Wiederholen_bis_alles_verladen' not in options.columns:
+        options['Wiederholen_bis_alles_verladen'] = True
+    options['Wiederholen_bis_alles_verladen'] = options['Wiederholen_bis_alles_verladen'].apply(yes_no_to_bool)
+    if 'Strategie' not in options.columns:
+        options['Strategie'] = 'Variante A'
+
+    p = pritschen_raw.dropna(how='all').copy()
+    rename_map = {
+        'Pritschenname': 'Pritschenname',
+        'Max_Ladehöhe_mm': 'Max_Höhe_mm',
+        'Max_Höhe_mm': 'Max_Höhe_mm',
+        'Aktiv': 'Freigabe',
+        'Drehen_90_erlaubt': 'Drehen_90_erlaubt',
+    }
+    p = p.rename(columns={k: v for k, v in rename_map.items() if k in p.columns})
+
+    required_cols = [
+        'Fuhrenoption', 'Pritschen_Reihenfolge', 'Pritschenname', 'Freigabe', 'Länge_mm', 'Breite_mm',
+        'Max_Höhe_mm', 'Max_Gewicht_kg', 'Überhang_vorne_mm', 'Überhang_hinten_mm',
+        'Kantholz_erste_Lage_mm', 'Einlage_zwischen_Lagen_mm', 'Drehen_90_erlaubt'
+    ]
+    for col in required_cols:
+        if col not in p.columns:
+            p[col] = ''
+
+    p = p[p['Fuhrenoption'].notna() & (p['Fuhrenoption'].astype(str).str.strip() != '')].copy()
+    p['Freigabe'] = p['Freigabe'].apply(yes_no_to_bool)
+    p['Drehen_90_erlaubt'] = p['Drehen_90_erlaubt'].apply(yes_no_to_bool)
+    p['Pritschen_Reihenfolge'] = p['Pritschen_Reihenfolge'].apply(lambda v: int(safe_number(v, 999)))
+    for col in ['Länge_mm', 'Breite_mm', 'Max_Höhe_mm', 'Max_Gewicht_kg', 'Überhang_vorne_mm', 'Überhang_hinten_mm', 'Kantholz_erste_Lage_mm', 'Einlage_zwischen_Lagen_mm']:
+        p[col] = p[col].apply(lambda v: safe_number(v, 0.0))
+    p['Pritsche'] = p['Pritschenname'].astype(str)
+
+    if options.empty:
+        messages.append('Keine gültigen Fuhrenoptionen in der Excel gefunden.')
+    if p.empty:
+        messages.append('Keine gültigen Pritschen in der Excel gefunden.')
+    return options, p, standards, messages
 
 
 def make_bundle_signature(row: pd.Series, same_height: bool, same_width: bool, same_quality: bool, same_profile: bool) -> Tuple[Any, ...]:
@@ -664,7 +791,12 @@ def build_loading_units(
 
 
 def init_platform_state(row: pd.Series, base_wood_height: float, layer_spacer_height: float, gap_length: float) -> Dict[str, Any]:
+    base_height = safe_number(row.get('Kantholz_erste_Lage_mm'), base_wood_height)
+    layer_height = safe_number(row.get('Einlage_zwischen_Lagen_mm'), layer_spacer_height)
     return {
+        'Fuhre_Nr': int(row.get('Fuhre_Nr', 1)) if not pd.isna(row.get('Fuhre_Nr', 1)) else 1,
+        'Fuhrenoption': str(row.get('Fuhrenoption', '')),
+        'Pritschenname': str(row.get('Pritschenname', row.get('Pritsche', 'Pritsche'))),
         'Pritsche': str(row['Pritsche']),
         'Länge_mm': float(row['Länge_mm']),
         'Breite_mm': float(row['Breite_mm']),
@@ -673,17 +805,18 @@ def init_platform_state(row: pd.Series, base_wood_height: float, layer_spacer_he
         'Überhang_hinten_mm': float(row['Überhang_hinten_mm']),
         'Max_Gewicht_kg': float(row['Max_Gewicht_kg']),
         'Eff_Länge_mm': float(row['Länge_mm']) + float(row['Überhang_vorne_mm']) + float(row['Überhang_hinten_mm']),
-        'base_wood_height': float(base_wood_height),
-        'layer_spacer_height': float(layer_spacer_height),
+        'base_wood_height': float(base_height),
+        'layer_spacer_height': float(layer_height),
         'gap_length': float(gap_length),
+        'allow_rotation_platform': yes_no_to_bool(row.get('Drehen_90_erlaubt', False)),
         'current_x': 0.0,
         'current_y': 0.0,
-        'current_z': float(base_wood_height),
+        'current_z': float(base_height),
         'row_max_width': 0.0,
         'layer_max_height': 0.0,
         'used_length': 0.0,
         'used_width': 0.0,
-        'used_height': float(base_wood_height),
+        'used_height': float(base_height),
         'total_weight': 0.0,
         'placements': [],
     }
@@ -714,6 +847,9 @@ def commit_place(
     mode: str,
 ) -> Dict[str, Any]:
     placement = {
+        'Fuhre_Nr': state['Fuhre_Nr'],
+        'Fuhrenoption': state['Fuhrenoption'],
+        'Pritschenname': state['Pritschenname'],
         'Pritsche': state['Pritsche'],
         'Einheit_ID': unit['Einheit_ID'],
         'Typ': unit['Typ'],
@@ -754,8 +890,9 @@ def try_place_unit(
     height = float(unit['Höhe_mm'])
     weight = float(unit['Gewicht_kg'])
 
+    rotation_allowed = bool(allow_rotation and state.get('allow_rotation_platform', False))
     orientations = [(length, width, 0)]
-    if allow_rotation and length != width:
+    if rotation_allowed and length != width:
         orientations.append((width, length, 90))
 
     for use_length, use_width, rotation in orientations:
@@ -803,10 +940,12 @@ def create_loading_plan(
     allow_stack: bool,
     allow_rotation: bool,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Greedy-Verladevorschlag auf Basis von X/Y/Z."""
+    """Greedy-Verladevorschlag für eine einzelne Fuhre."""
+    if units.empty or platforms.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
     active_platforms = platforms[platforms['Freigabe'] == True].copy()
     states = [init_platform_state(row, base_wood_height, layer_spacer_height, gap_length) for _, row in active_platforms.iterrows()]
-
     not_loaded: List[Dict[str, Any]] = []
 
     for _, unit in units.iterrows():
@@ -824,6 +963,9 @@ def create_loading_plan(
                 break
         if not placed:
             not_loaded.append({
+                'Fuhre_Nr': None,
+                'Fuhrenoption': '',
+                'Pritschenname': '',
                 'Pritsche': 'NICHT VERLADEN',
                 'Einheit_ID': unit['Einheit_ID'],
                 'Typ': unit['Typ'],
@@ -845,6 +987,9 @@ def create_loading_plan(
     for state in states:
         placements.extend(state['placements'])
         summary.append({
+            'Fuhre_Nr': state['Fuhre_Nr'],
+            'Fuhrenoption': state['Fuhrenoption'],
+            'Pritschenname': state['Pritschenname'],
             'Pritsche': state['Pritsche'],
             'Länge genutzt_mm': round(state['used_length'], 1),
             'Breite genutzt_mm': round(state['used_width'], 1),
@@ -860,14 +1005,158 @@ def create_loading_plan(
     return pd.DataFrame(placements), pd.DataFrame(summary)
 
 
-def create_loading_excel(parts_df: pd.DataFrame, units_df: pd.DataFrame, placements_df: pd.DataFrame, platforms_df: pd.DataFrame, summary_df: pd.DataFrame) -> bytes:
+def build_trip_platforms(pritschen_df: pd.DataFrame, fuhrenoption: str, fuhre_nr: int) -> pd.DataFrame:
+    rows = pritschen_df[
+        (pritschen_df['Fuhrenoption'].astype(str) == str(fuhrenoption)) &
+        (pritschen_df['Freigabe'] == True)
+    ].copy()
+    if rows.empty:
+        return rows
+    rows = rows.sort_values('Pritschen_Reihenfolge', kind='stable').reset_index(drop=True)
+    rows['Fuhre_Nr'] = fuhre_nr
+    rows['Pritschenname'] = rows['Pritschenname'].astype(str)
+    rows['Pritsche'] = rows.apply(lambda r: f"F{fuhre_nr:02d} {r['Pritschenname']}", axis=1)
+    return rows
+
+
+def create_variant_a_loading_plan(
+    units: pd.DataFrame,
+    options_df: pd.DataFrame,
+    pritschen_df: pd.DataFrame,
+    standards: Dict[str, Any],
+    allow_beside: bool,
+    allow_stack: bool,
+    allow_rotation: bool,
+    max_fuhren: int = 50,
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Variante A: erste freigegebene passende Fuhrenoption wird wiederholt, bis alles verladen ist."""
+    if units.empty:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    enabled_options = options_df[options_df['Freigegeben'] == True].copy()
+    enabled_options = enabled_options.sort_values('Priorität', kind='stable').reset_index(drop=True)
+
+    remaining = units.copy().reset_index(drop=True)
+    all_placements: List[pd.DataFrame] = []
+    all_summary: List[pd.DataFrame] = []
+    all_platforms: List[pd.DataFrame] = []
+    fuhren_log: List[Dict[str, Any]] = []
+
+    base_default = safe_number(standards.get('Standard_Kantholz_erste_Lage'), 80.0)
+    layer_default = safe_number(standards.get('Standard_Einlage_zwischen_Lagen'), 40.0)
+    # Im Moment nutzen wir den Versatz als X-Abstand/Versatzwert. Der freie Abstand kann später separat geführt werden.
+    gap_default = safe_number(standards.get('Längenversatz_je_Lage'), 100.0)
+
+    fuhre_nr = 1
+    if enabled_options.empty:
+        not_loaded = remaining.copy()
+        not_loaded['Fuhre_Nr'] = None
+        not_loaded['Fuhrenoption'] = ''
+        not_loaded['Pritschenname'] = ''
+        not_loaded['Pritsche'] = 'NICHT VERLADEN'
+        not_loaded['X_mm'] = None
+        not_loaded['Y_mm'] = None
+        not_loaded['Z_mm'] = None
+        not_loaded['Drehung'] = None
+        not_loaded['Ebene'] = 'keine Fuhrenoption freigegeben'
+        return not_loaded, pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    while not remaining.empty and fuhre_nr <= max_fuhren:
+        progress = False
+
+        for _, option_row in enabled_options.iterrows():
+            option_name = str(option_row['Fuhrenoption'])
+            trip_platforms = build_trip_platforms(pritschen_df, option_name, fuhre_nr)
+            if trip_platforms.empty:
+                continue
+
+            placements_try, summary_try = create_loading_plan(
+                remaining,
+                trip_platforms,
+                base_wood_height=base_default,
+                layer_spacer_height=layer_default,
+                gap_length=gap_default,
+                allow_beside=allow_beside,
+                allow_stack=allow_stack,
+                allow_rotation=allow_rotation,
+            )
+
+            if placements_try.empty:
+                continue
+
+            loaded_try = placements_try[placements_try['Pritsche'] != 'NICHT VERLADEN'].copy()
+            loaded_ids = loaded_try['Einheit_ID'].dropna().astype(str).unique().tolist() if not loaded_try.empty else []
+
+            if loaded_ids:
+                all_placements.append(loaded_try)
+                all_summary.append(summary_try)
+                all_platforms.append(trip_platforms)
+                fuhren_log.append({
+                    'Fuhre_Nr': fuhre_nr,
+                    'Fuhrenoption': option_name,
+                    'Verladeeinheiten': len(loaded_ids),
+                    'Gewicht_kg': round(float(loaded_try['Gewicht_kg'].sum()), 2),
+                    'Pritschen': ', '.join(trip_platforms['Pritschenname'].astype(str).tolist()),
+                })
+                remaining = remaining[~remaining['Einheit_ID'].astype(str).isin(loaded_ids)].copy().reset_index(drop=True)
+                progress = True
+                fuhre_nr += 1
+                break
+
+        if not progress:
+            break
+
+    if not remaining.empty:
+        not_loaded_rows = []
+        for _, unit in remaining.iterrows():
+            not_loaded_rows.append({
+                'Fuhre_Nr': None,
+                'Fuhrenoption': '',
+                'Pritschenname': '',
+                'Pritsche': 'NICHT VERLADEN',
+                'Einheit_ID': unit['Einheit_ID'],
+                'Typ': unit['Typ'],
+                'Anzahl_Bauteile': int(unit['Anzahl_Bauteile']),
+                'Bauteile': unit['Bauteile'],
+                'X_mm': None,
+                'Y_mm': None,
+                'Z_mm': None,
+                'Länge_mm': unit['Länge_mm'],
+                'Breite_mm': unit['Breite_mm'],
+                'Höhe_mm': unit['Höhe_mm'],
+                'Drehung': None,
+                'Ebene': 'passt in keine freigegebene Fuhrenoption',
+                'Gewicht_kg': round(float(unit['Gewicht_kg']), 2),
+            })
+        all_placements.append(pd.DataFrame(not_loaded_rows))
+
+    placements_df = pd.concat(all_placements, ignore_index=True) if all_placements else pd.DataFrame()
+    summary_df = pd.concat(all_summary, ignore_index=True) if all_summary else pd.DataFrame()
+    platforms_used_df = pd.concat(all_platforms, ignore_index=True) if all_platforms else pd.DataFrame()
+    fuhren_log_df = pd.DataFrame(fuhren_log)
+    return placements_df, summary_df, platforms_used_df, fuhren_log_df
+
+
+def create_loading_excel(
+    parts_df: pd.DataFrame,
+    units_df: pd.DataFrame,
+    placements_df: pd.DataFrame,
+    platforms_df: pd.DataFrame,
+    summary_df: pd.DataFrame,
+    options_df: Optional[pd.DataFrame] = None,
+    fuhren_log_df: Optional[pd.DataFrame] = None,
+) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         parts_df.to_excel(writer, sheet_name='Bauteile', index=False)
         units_df.to_excel(writer, sheet_name='Verladeeinheiten', index=False)
         placements_df.to_excel(writer, sheet_name='Platzierung', index=False)
-        platforms_df.to_excel(writer, sheet_name='Pritschen', index=False)
-        summary_df.to_excel(writer, sheet_name='Zusammenfassung', index=False)
+        platforms_df.to_excel(writer, sheet_name='Pritschen_verwendet', index=False)
+        summary_df.to_excel(writer, sheet_name='Pritschen_Summary', index=False)
+        if options_df is not None and not options_df.empty:
+            options_df.to_excel(writer, sheet_name='Fuhrenoptionen', index=False)
+        if fuhren_log_df is not None and not fuhren_log_df.empty:
+            fuhren_log_df.to_excel(writer, sheet_name='Fuhrenübersicht', index=False)
     return output.getvalue()
 
 
@@ -878,10 +1167,17 @@ def draw_loading_view(placements_df: pd.DataFrame, platforms_df: pd.DataFrame, p
     max_height = float(platform_row['Max_Höhe_mm'])
 
     loaded = placements_df[placements_df['Pritsche'] == platform_name].copy()
+    loaded = loaded[loaded['X_mm'].notna() & loaded['Y_mm'].notna() & loaded['Z_mm'].notna()].copy()
     fig = go.Figure()
 
+    title_prefix = {
+        'top': 'Draufsicht',
+        'side': 'Seitenansicht',
+        'back': 'Rückansicht',
+    }.get(view, 'Ansicht')
+
     if view == 'top':
-        fig.update_layout(title=f'Draufsicht - {platform_name}', xaxis_title='Länge X (mm)', yaxis_title='Breite Y (mm)')
+        fig.update_layout(title=f'{title_prefix} - {platform_name}', xaxis_title='Länge X (mm)', yaxis_title='Breite Y (mm)')
         fig.add_shape(type='rect', x0=0, y0=0, x1=eff_length, y1=width, line=dict(width=2, dash='dash'))
         for _, row in loaded.iterrows():
             x0, y0 = float(row['X_mm']), float(row['Y_mm'])
@@ -891,8 +1187,9 @@ def draw_loading_view(placements_df: pd.DataFrame, platforms_df: pd.DataFrame, p
         fig.update_yaxes(scaleanchor='x', scaleratio=1)
 
     elif view == 'side':
-        fig.update_layout(title=f'Seitenansicht - {platform_name}', xaxis_title='Länge X (mm)', yaxis_title='Höhe Z (mm)')
+        fig.update_layout(title=f'{title_prefix} - {platform_name}', xaxis_title='Länge X (mm)', yaxis_title='Höhe Z (mm)')
         fig.add_shape(type='rect', x0=0, y0=0, x1=eff_length, y1=max_height, line=dict(width=2, dash='dash'))
+        fig.add_shape(type='line', x0=0, y0=float(platform_row.get('Kantholz_erste_Lage_mm', 0)), x1=eff_length, y1=float(platform_row.get('Kantholz_erste_Lage_mm', 0)), line=dict(width=1, dash='dot'))
         for _, row in loaded.iterrows():
             x0, z0 = float(row['X_mm']), float(row['Z_mm'])
             x1, z1 = x0 + float(row['Länge_mm']), z0 + float(row['Höhe_mm'])
@@ -900,8 +1197,9 @@ def draw_loading_view(placements_df: pd.DataFrame, platforms_df: pd.DataFrame, p
             fig.add_annotation(x=(x0+x1)/2, y=(z0+z1)/2, text=str(row['Einheit_ID']), showarrow=False, font=dict(size=10))
 
     else:
-        fig.update_layout(title=f'Rückansicht - {platform_name}', xaxis_title='Breite Y (mm)', yaxis_title='Höhe Z (mm)')
+        fig.update_layout(title=f'{title_prefix} - {platform_name}', xaxis_title='Breite Y (mm)', yaxis_title='Höhe Z (mm)')
         fig.add_shape(type='rect', x0=0, y0=0, x1=width, y1=max_height, line=dict(width=2, dash='dash'))
+        fig.add_shape(type='line', x0=0, y0=float(platform_row.get('Kantholz_erste_Lage_mm', 0)), x1=width, y1=float(platform_row.get('Kantholz_erste_Lage_mm', 0)), line=dict(width=1, dash='dot'))
         for _, row in loaded.iterrows():
             y0, z0 = float(row['Y_mm']), float(row['Z_mm'])
             y1, z1 = y0 + float(row['Breite_mm']), z0 + float(row['Höhe_mm'])
@@ -1090,28 +1388,49 @@ def render_analysis_module(uploaded_file) -> None:
             )
 
 
-def render_loading_module(uploaded_file) -> None:
+def render_loading_module(uploaded_file, transport_excel_file=None) -> None:
     st.header('Verladeplanung')
 
     if uploaded_file is None:
         st.info('Bitte laden Sie links eine BVX-Datei für die Verladeplanung hoch.')
         st.markdown('''
         Die Verladeplanung ist getrennt von der normalen BVX-Auswertung aufgebaut.
-        Sie arbeitet mit Bauteilen, Verladeeinheiten, Bunden, Pritschen und Positionen.
+        Sie arbeitet mit Bauteilen, Verladeeinheiten, Bunden, Fuhrenoptionen, Pritschen und Positionen.
         ''')
         return
+
+    options_df, pritschen_df, standards, config_messages = read_transport_config_excel(transport_excel_file)
+    for msg in config_messages:
+        st.warning(msg)
+
+    if transport_excel_file is not None:
+        st.success(f'Pritschen-/Fuhren-Stammdaten geladen: {transport_excel_file.name}')
+    else:
+        st.info('Noch keine Excel-Stammdaten geladen. Es werden nur Beispielwerte verwendet.')
 
     content = read_uploaded_text(uploaded_file)
     parser = BVXParser()
     result = parser.parse(content, uploaded_file.name)
 
-    st.subheader('1. Grunddaten')
+    st.subheader('1. Grunddaten aus BVX und Excel')
+    default_density = safe_number(standards.get('Holzdichte'), 500.0)
+    default_bundle_weight = safe_number(standards.get('Max_Bundgewicht'), 1000.0)
+    default_base_wood = safe_number(standards.get('Standard_Kantholz_erste_Lage'), 80.0)
+    default_layer_spacer = safe_number(standards.get('Standard_Einlage_zwischen_Lagen'), 40.0)
+    default_gap = safe_number(standards.get('Längenversatz_je_Lage'), 100.0)
+
     col1, col2, col3 = st.columns(3)
-    density = col1.number_input('Holzdichte kg/m³', min_value=100.0, max_value=1000.0, value=500.0, step=10.0)
-    max_bundle_weight = col2.number_input('Max. Bundgewicht kg', min_value=100.0, max_value=5000.0, value=1000.0, step=50.0)
+    density = col1.number_input('Holzdichte kg/m³', min_value=100.0, max_value=1000.0, value=float(default_density), step=10.0)
+    max_bundle_weight = col2.number_input('Max. Bundgewicht kg', min_value=100.0, max_value=5000.0, value=float(default_bundle_weight), step=50.0)
     use_bundles = col3.checkbox('Bunde automatisch bilden', value=True)
 
     parts_df = parts_to_dataframe(result.parts, density_kg_m3=density)
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric('Bauteile', len(parts_df))
+    col2.metric('Gesamtvolumen', f"{parts_df['Volumen_m3'].sum():.3f} m³")
+    col3.metric('Gesamtgewicht', f"{parts_df['Gewicht_kg'].sum():.0f} kg")
+    col4.metric('Excel-Fuhrenoptionen', int(options_df['Freigegeben'].sum()) if not options_df.empty else 0)
 
     st.subheader('2. Sortierung')
     sort_options = [
@@ -1136,11 +1455,17 @@ def render_loading_module(uploaded_file) -> None:
         st.dataframe(sorted_parts, use_container_width=True, hide_index=True)
 
     st.subheader('3. Bund- und Unterlegholz-Einstellungen')
-    col1, col2, col3, col4 = st.columns(4)
-    base_wood_height = col1.number_input('Kantholz auf Pritsche mm', min_value=0.0, max_value=300.0, value=80.0, step=5.0)
-    bundle_spacer_height = col2.number_input('Bundeinlage / Lagenholz mm', min_value=0.0, max_value=200.0, value=40.0, step=5.0)
-    gap_length = col3.number_input('Längenversatz / Abstand mm', min_value=0.0, max_value=500.0, value=100.0, step=10.0)
-    allow_rotation = col4.checkbox('Drehung 90° erlauben', value=False)
+    col1, col2, col3 = st.columns(3)
+    base_wood_height = col1.number_input('Standard Kantholz erste Lage mm', min_value=0.0, max_value=300.0, value=float(default_base_wood), step=5.0)
+    bundle_spacer_height = col2.number_input('Standard Bundeinlage / Lagenholz mm', min_value=0.0, max_value=200.0, value=float(default_layer_spacer), step=5.0)
+    gap_length = col3.number_input('Längenversatz je Lage mm', min_value=0.0, max_value=500.0, value=float(default_gap), step=10.0)
+
+    # Standards werden für die Berechnung aktualisiert. Pritschenwerte aus Excel überschreiben diese Defaults pro Pritsche.
+    standards['Holzdichte'] = density
+    standards['Max_Bundgewicht'] = max_bundle_weight
+    standards['Standard_Kantholz_erste_Lage'] = base_wood_height
+    standards['Standard_Einlage_zwischen_Lagen'] = bundle_spacer_height
+    standards['Längenversatz_je_Lage'] = gap_length
 
     col1, col2, col3, col4 = st.columns(4)
     same_height = col1.checkbox('Nur gleiche Höhe im Bund', value=True)
@@ -1159,55 +1484,69 @@ def render_loading_module(uploaded_file) -> None:
         same_profile=same_profile,
     )
 
-    st.subheader('4. Transportmittel / Pritschen')
-    presets = get_transport_presets()
-    transport_type = st.selectbox('Transportart', list(presets.keys()), index=0)
+    st.subheader('4. Fuhrenoptionen und Pritschen aus Excel')
+    st.caption('Variante A: Die freigegebenen Fuhrenoptionen werden nach Priorität geprüft. Die erste passende Option wird wiederholt, bis alles verladen ist.')
 
-    preset_df = pd.DataFrame(presets[transport_type])
-    platforms_df = st.data_editor(
-        preset_df,
-        use_container_width=True,
-        hide_index=True,
-        num_rows='dynamic',
-        column_config={
-            'Freigabe': st.column_config.CheckboxColumn('Freigabe'),
-            'Pritsche': st.column_config.TextColumn('Pritsche'),
-            'Länge_mm': st.column_config.NumberColumn('Länge mm'),
-            'Breite_mm': st.column_config.NumberColumn('Breite mm'),
-            'Max_Höhe_mm': st.column_config.NumberColumn('Max. Höhe mm'),
-            'Überhang_vorne_mm': st.column_config.NumberColumn('Überhang vorne mm'),
-            'Überhang_hinten_mm': st.column_config.NumberColumn('Überhang hinten mm'),
-            'Max_Gewicht_kg': st.column_config.NumberColumn('Max. Gewicht kg'),
-        },
-        key='platforms_editor',
-    )
+    fcol1, fcol2 = st.columns([1, 2])
+    with fcol1:
+        options_edit = st.data_editor(
+            options_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                'Freigegeben': st.column_config.CheckboxColumn('Freigegeben'),
+                'Wiederholen_bis_alles_verladen': st.column_config.CheckboxColumn('Wiederholen'),
+                'Priorität': st.column_config.NumberColumn('Priorität'),
+            },
+            key='fuhrenoptionen_editor',
+        )
+    with fcol2:
+        pritschen_edit = st.data_editor(
+            pritschen_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                'Freigabe': st.column_config.CheckboxColumn('Aktiv'),
+                'Drehen_90_erlaubt': st.column_config.CheckboxColumn('Drehen 90°'),
+                'Pritschen_Reihenfolge': st.column_config.NumberColumn('Reihenfolge'),
+                'Länge_mm': st.column_config.NumberColumn('Länge mm'),
+                'Breite_mm': st.column_config.NumberColumn('Breite mm'),
+                'Max_Höhe_mm': st.column_config.NumberColumn('Max. Höhe mm'),
+                'Max_Gewicht_kg': st.column_config.NumberColumn('Max. Gewicht kg'),
+            },
+            key='pritschen_editor_excel',
+        )
 
-    st.subheader('5. Platzierung')
-    col1, col2 = st.columns(2)
-    allow_beside = col1.checkbox('Nebeneinander verladen erlauben', value=True)
-    allow_stack = col2.checkbox('Übereinander verladen erlauben', value=True)
+    st.subheader('5. Platzierung / Automatik')
+    col1, col2, col3, col4 = st.columns(4)
+    allow_beside = col1.checkbox('Nebeneinander erlauben', value=True)
+    allow_stack = col2.checkbox('Übereinander erlauben', value=True)
+    allow_rotation = col3.checkbox('90° drehen erlauben, wenn Pritsche es erlaubt', value=False)
+    max_fuhren = col4.number_input('Max. Fuhren Sicherheitslimit', min_value=1, max_value=200, value=50, step=1)
 
-    placements_df, summary_df = create_loading_plan(
+    placements_df, summary_df, platforms_used_df, fuhren_log_df = create_variant_a_loading_plan(
         units_df,
-        platforms_df,
-        base_wood_height=base_wood_height,
-        layer_spacer_height=bundle_spacer_height,
-        gap_length=gap_length,
+        options_edit,
+        pritschen_edit,
+        standards=standards,
         allow_beside=allow_beside,
         allow_stack=allow_stack,
         allow_rotation=allow_rotation,
+        max_fuhren=int(max_fuhren),
     )
 
-    loaded_count = int((placements_df['Pritsche'] != 'NICHT VERLADEN').sum()) if not placements_df.empty else 0
-    not_loaded_count = int((placements_df['Pritsche'] == 'NICHT VERLADEN').sum()) if not placements_df.empty else 0
+    loaded_count = int((placements_df['Pritsche'] != 'NICHT VERLADEN').sum()) if not placements_df.empty and 'Pritsche' in placements_df.columns else 0
+    not_loaded_count = int((placements_df['Pritsche'] == 'NICHT VERLADEN').sum()) if not placements_df.empty and 'Pritsche' in placements_df.columns else 0
+    fuhren_count = int(fuhren_log_df['Fuhre_Nr'].nunique()) if not fuhren_log_df.empty else 0
 
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric('Bauteile', len(parts_df))
-    col2.metric('Verladeeinheiten', len(units_df))
+    col1, col2, col3, col4, col5 = st.columns(5)
+    col1.metric('Verladeeinheiten', len(units_df))
+    col2.metric('Fuhren erzeugt', fuhren_count)
     col3.metric('Verladen', loaded_count)
     col4.metric('Nicht verladen', not_loaded_count)
+    col5.metric('Pritschen genutzt', len(platforms_used_df) if not platforms_used_df.empty else 0)
 
-    tab1, tab2, tab3, tab4 = st.tabs(['Verladeeinheiten', 'Platzierung', 'Ansichten', 'Export'])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(['Verladeeinheiten', 'Fuhrenübersicht', 'Platzierung', 'Ansichten', 'Export'])
 
     with tab1:
         st.dataframe(units_df, use_container_width=True, hide_index=True)
@@ -1217,28 +1556,50 @@ def render_loading_module(uploaded_file) -> None:
             st.dataframe(warnings_df, use_container_width=True, hide_index=True)
 
     with tab2:
+        if not fuhren_log_df.empty:
+            st.dataframe(fuhren_log_df, use_container_width=True, hide_index=True)
+        else:
+            st.warning('Es wurde keine Fuhre erzeugt.')
         st.markdown('**Pritschen-Zusammenfassung**')
         st.dataframe(summary_df, use_container_width=True, hide_index=True)
+
+    with tab3:
         st.markdown('**Platzierung der Verladeeinheiten**')
         st.dataframe(placements_df, use_container_width=True, hide_index=True)
         if not_loaded_count:
-            st.error('Nicht alle Verladeeinheiten konnten automatisch platziert werden. Werte oder manuelle Verladung prüfen.')
-
-    with tab3:
-        active_platforms = platforms_df[platforms_df['Freigabe'] == True]
-        if active_platforms.empty:
-            st.warning('Keine Pritsche freigegeben.')
-        else:
-            selected_platform = st.selectbox('Pritsche für Ansicht', active_platforms['Pritsche'].tolist())
-            col1, col2 = st.columns(2)
-            with col1:
-                st.plotly_chart(draw_loading_view(placements_df, platforms_df, selected_platform, 'side'), use_container_width=True)
-            with col2:
-                st.plotly_chart(draw_loading_view(placements_df, platforms_df, selected_platform, 'back'), use_container_width=True)
-            st.plotly_chart(draw_loading_view(placements_df, platforms_df, selected_platform, 'top'), use_container_width=True)
+            st.error('Nicht alle Verladeeinheiten konnten automatisch platziert werden. Freigegebene Fuhrenoptionen, Pritschenmaße oder Bundbildung prüfen.')
 
     with tab4:
-        excel_data = create_loading_excel(sorted_parts, units_df, placements_df, platforms_df, summary_df)
+        if platforms_used_df.empty:
+            st.warning('Keine Pritsche für die Ansicht vorhanden.')
+        else:
+            selected_platform = st.selectbox('Fuhre / Pritsche für Ansicht', platforms_used_df['Pritsche'].tolist())
+            info_row = summary_df[summary_df['Pritsche'] == selected_platform]
+            if not info_row.empty:
+                row = info_row.iloc[0]
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric('Länge genutzt', f"{row['Länge genutzt_mm']:.0f} mm")
+                c2.metric('Breite genutzt', f"{row['Breite genutzt_mm']:.0f} mm")
+                c3.metric('Höhe genutzt', f"{row['Höhe genutzt_mm']:.0f} mm")
+                c4.metric('Gewicht', f"{row['Gewicht genutzt_kg']:.0f} kg")
+
+            col1, col2 = st.columns(2)
+            with col1:
+                st.plotly_chart(draw_loading_view(placements_df, platforms_used_df, selected_platform, 'side'), use_container_width=True)
+            with col2:
+                st.plotly_chart(draw_loading_view(placements_df, platforms_used_df, selected_platform, 'back'), use_container_width=True)
+            st.plotly_chart(draw_loading_view(placements_df, platforms_used_df, selected_platform, 'top'), use_container_width=True)
+
+    with tab5:
+        excel_data = create_loading_excel(
+            sorted_parts,
+            units_df,
+            placements_df,
+            platforms_used_df,
+            summary_df,
+            options_df=options_edit,
+            fuhren_log_df=fuhren_log_df,
+        )
         st.download_button(
             label='Verladeplanung als Excel herunterladen',
             data=excel_data,
@@ -1247,8 +1608,8 @@ def render_loading_module(uploaded_file) -> None:
         )
 
         st.markdown('''
-        **Hinweis:** Diese Version erstellt einen automatischen Grobvorschlag.
-        Manuelles Umplatzieren per Tabelle/Drag-and-drop ist als nächster Ausbauschritt vorgesehen.
+        **Hinweis:** Diese Version erstellt einen automatischen Grobvorschlag mit Variante A.
+        Manuelles Umplatzieren per Tabelle/Drag-and-drop ist der nächste Ausbauschritt.
         ''')
 
 
@@ -1297,14 +1658,22 @@ def main():
                 key='loading_upload',
                 help='Eigenständiger Import für Verladeplanung.'
             )
+            transport_excel_file = st.file_uploader(
+                'Excel Pritschen/Fuhren laden',
+                type=['xlsx'],
+                key='transport_excel_upload',
+                help='Stammdaten mit Fuhrenoptionen, Pritschen und Standards.'
+            )
             analysis_file = None
             if loading_file:
-                st.success(f'{loading_file.name}')
+                st.success(f'BVX: {loading_file.name}')
+            if transport_excel_file:
+                st.success(f'Excel: {transport_excel_file.name}')
 
     if module == 'BVX Auswertung':
         render_analysis_module(analysis_file)
     else:
-        render_loading_module(loading_file)
+        render_loading_module(loading_file, transport_excel_file)
 
 
 if __name__ == '__main__':
