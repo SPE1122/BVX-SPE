@@ -2,7 +2,7 @@
 BVX Auswertung + Verladeplanung - Streamlit Version
 
 Installation:
-    pip install streamlit pandas plotly openpyxl
+    pip install streamlit pandas plotly openpyxl reportlab
 
 Ausführen:
     streamlit run bvx_auswertung_streamlit_verladung.py
@@ -22,6 +22,7 @@ import io
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Tuple
 from collections import Counter
+from datetime import datetime
 
 
 # =============================================================================
@@ -566,6 +567,13 @@ def safe_number(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Entfernt unsichtbare Leerzeichen aus Excel-Spaltennamen."""
+    result = df.copy()
+    result.columns = [str(col).strip().replace('\n', ' ') for col in result.columns]
+    return result
+
+
 def get_transport_presets() -> Dict[str, List[Dict[str, Any]]]:
     """Fallback-Stammdaten, falls keine Excel-Vorlage geladen wird."""
     return {
@@ -628,9 +636,9 @@ def read_transport_config_excel(uploaded_excel) -> Tuple[pd.DataFrame, pd.DataFr
 
     try:
         xls = pd.ExcelFile(uploaded_excel)
-        options_raw = pd.read_excel(xls, sheet_name='Fuhrenoptionen')
-        pritschen_raw = pd.read_excel(xls, sheet_name='Pritschen')
-        standards_raw = pd.read_excel(xls, sheet_name='Standards')
+        options_raw = normalize_columns(pd.read_excel(xls, sheet_name='Fuhrenoptionen'))
+        pritschen_raw = normalize_columns(pd.read_excel(xls, sheet_name='Pritschen'))
+        standards_raw = normalize_columns(pd.read_excel(xls, sheet_name='Standards'))
     except Exception as exc:
         preset = get_transport_presets()['LKW solo']
         options = pd.DataFrame([
@@ -1145,6 +1153,7 @@ def create_loading_excel(
     summary_df: pd.DataFrame,
     options_df: Optional[pd.DataFrame] = None,
     fuhren_log_df: Optional[pd.DataFrame] = None,
+    warnings_df: Optional[pd.DataFrame] = None,
 ) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -1157,6 +1166,8 @@ def create_loading_excel(
             options_df.to_excel(writer, sheet_name='Fuhrenoptionen', index=False)
         if fuhren_log_df is not None and not fuhren_log_df.empty:
             fuhren_log_df.to_excel(writer, sheet_name='Fuhrenübersicht', index=False)
+        if warnings_df is not None and not warnings_df.empty:
+            warnings_df.to_excel(writer, sheet_name='Warnungen', index=False)
     return output.getvalue()
 
 
@@ -1258,6 +1269,275 @@ def draw_loading_view(placements_df: pd.DataFrame, platforms_df: pd.DataFrame, p
 
     fig.update_layout(height=450, showlegend=False, margin=dict(l=20, r=20, t=50, b=20))
     return fig
+
+
+
+def clean_placements_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """Konvertiert manuell bearbeitete Platzierungswerte wieder in saubere Zahlen."""
+    result = df.copy()
+    numeric_cols = ['Fuhre_Nr', 'Anzahl_Bauteile', 'X_mm', 'Y_mm', 'Z_mm', 'Länge_mm', 'Breite_mm', 'Höhe_mm', 'Drehung', 'Gewicht_kg']
+    for col in numeric_cols:
+        if col in result.columns:
+            result[col] = pd.to_numeric(result[col], errors='coerce')
+    if 'Pritsche' in result.columns:
+        result['Pritsche'] = result['Pritsche'].fillna('').astype(str)
+    if 'Einheit_ID' in result.columns:
+        result['Einheit_ID'] = result['Einheit_ID'].fillna('').astype(str)
+    return result
+
+
+def compute_loading_warnings(placements_df: pd.DataFrame, platforms_df: pd.DataFrame) -> pd.DataFrame:
+    """Prüft Länge, Breite, Höhe, Gewicht, negative Positionen und nicht verladen."""
+    warnings: List[Dict[str, Any]] = []
+    if placements_df is None or placements_df.empty:
+        return pd.DataFrame([{'Typ': 'Info', 'Pritsche': '', 'Einheit_ID': '', 'Warnung': 'Keine Platzierung vorhanden', 'Details': ''}])
+
+    platform_lookup: Dict[str, Dict[str, float]] = {}
+    if platforms_df is not None and not platforms_df.empty:
+        for _, row in platforms_df.iterrows():
+            name = str(row.get('Pritsche', ''))
+            platform_lookup[name] = {
+                'eff_length': safe_number(row.get('Länge_mm')) + safe_number(row.get('Überhang_vorne_mm')) + safe_number(row.get('Überhang_hinten_mm')),
+                'width': safe_number(row.get('Breite_mm')),
+                'max_height': safe_number(row.get('Max_Höhe_mm')),
+                'max_weight': safe_number(row.get('Max_Gewicht_kg')),
+            }
+
+    for _, row in placements_df.iterrows():
+        pritsche = str(row.get('Pritsche', ''))
+        einheit = str(row.get('Einheit_ID', ''))
+
+        if pritsche == 'NICHT VERLADEN':
+            warnings.append({'Typ': 'Nicht verladen', 'Pritsche': pritsche, 'Einheit_ID': einheit, 'Warnung': 'Einheit wurde nicht platziert', 'Details': str(row.get('Ebene', ''))})
+            continue
+
+        if pritsche not in platform_lookup:
+            warnings.append({'Typ': 'Pritsche', 'Pritsche': pritsche, 'Einheit_ID': einheit, 'Warnung': 'Pritsche nicht in Stammdaten gefunden', 'Details': 'Name der Pritsche prüfen'})
+            continue
+
+        limits = platform_lookup[pritsche]
+        x = safe_number(row.get('X_mm'), 0.0)
+        y = safe_number(row.get('Y_mm'), 0.0)
+        z = safe_number(row.get('Z_mm'), 0.0)
+        length = safe_number(row.get('Länge_mm'), 0.0)
+        width = safe_number(row.get('Breite_mm'), 0.0)
+        height = safe_number(row.get('Höhe_mm'), 0.0)
+
+        if x < 0 or y < 0 or z < 0:
+            warnings.append({'Typ': 'Position', 'Pritsche': pritsche, 'Einheit_ID': einheit, 'Warnung': 'Negative Position', 'Details': f'X={x:.0f}, Y={y:.0f}, Z={z:.0f}'})
+        if x + length > limits['eff_length']:
+            warnings.append({'Typ': 'Länge', 'Pritsche': pritsche, 'Einheit_ID': einheit, 'Warnung': 'Länge / Überhang überschritten', 'Details': f'{x + length:.0f} mm > {limits["eff_length"]:.0f} mm'})
+        if y + width > limits['width']:
+            warnings.append({'Typ': 'Breite', 'Pritsche': pritsche, 'Einheit_ID': einheit, 'Warnung': 'Breite überschritten', 'Details': f'{y + width:.0f} mm > {limits["width"]:.0f} mm'})
+        if z + height > limits['max_height']:
+            warnings.append({'Typ': 'Höhe', 'Pritsche': pritsche, 'Einheit_ID': einheit, 'Warnung': 'Höhe überschritten', 'Details': f'{z + height:.0f} mm > {limits["max_height"]:.0f} mm'})
+
+    if platforms_df is not None and not platforms_df.empty:
+        for platform_name, group in placements_df[placements_df['Pritsche'] != 'NICHT VERLADEN'].groupby('Pritsche'):
+            name = str(platform_name)
+            if name not in platform_lookup:
+                continue
+            total_weight = pd.to_numeric(group.get('Gewicht_kg'), errors='coerce').fillna(0).sum()
+            max_weight = platform_lookup[name]['max_weight']
+            if total_weight > max_weight:
+                warnings.append({'Typ': 'Gewicht', 'Pritsche': name, 'Einheit_ID': '', 'Warnung': 'Max. Gewicht überschritten', 'Details': f'{total_weight:.0f} kg > {max_weight:.0f} kg'})
+
+    return pd.DataFrame(warnings)
+
+
+def recompute_summary_from_placements(placements_df: pd.DataFrame, platforms_df: pd.DataFrame) -> pd.DataFrame:
+    """Erstellt die Pritschen-Zusammenfassung neu, damit manuelle Änderungen berücksichtigt werden."""
+    rows: List[Dict[str, Any]] = []
+    if platforms_df is None or platforms_df.empty:
+        return pd.DataFrame()
+
+    for _, prow in platforms_df.iterrows():
+        pname = str(prow.get('Pritsche', ''))
+        group = placements_df[placements_df.get('Pritsche', pd.Series(dtype=str)).astype(str) == pname] if not placements_df.empty else pd.DataFrame()
+        group = group[group.get('X_mm', pd.Series(dtype=float)).notna()] if not group.empty else group
+        used_length = float((group['X_mm'] + group['Länge_mm']).max()) if not group.empty else 0.0
+        used_width = float((group['Y_mm'] + group['Breite_mm']).max()) if not group.empty else 0.0
+        used_height = float((group['Z_mm'] + group['Höhe_mm']).max()) if not group.empty else safe_number(prow.get('Kantholz_erste_Lage_mm'), 0.0)
+        used_weight = float(pd.to_numeric(group.get('Gewicht_kg'), errors='coerce').fillna(0).sum()) if not group.empty else 0.0
+        rows.append({
+            'Fuhre_Nr': prow.get('Fuhre_Nr'),
+            'Fuhrenoption': prow.get('Fuhrenoption'),
+            'Pritschenname': prow.get('Pritschenname'),
+            'Pritsche': pname,
+            'Länge genutzt_mm': round(used_length, 1),
+            'Breite genutzt_mm': round(used_width, 1),
+            'Höhe genutzt_mm': round(used_height, 1),
+            'Gewicht genutzt_kg': round(used_weight, 2),
+            'Max Länge effektiv_mm': round(safe_number(prow.get('Länge_mm')) + safe_number(prow.get('Überhang_vorne_mm')) + safe_number(prow.get('Überhang_hinten_mm')), 1),
+            'Max Breite_mm': round(safe_number(prow.get('Breite_mm')), 1),
+            'Max Höhe_mm': round(safe_number(prow.get('Max_Höhe_mm')), 1),
+            'Max Gewicht_kg': round(safe_number(prow.get('Max_Gewicht_kg')), 1),
+        })
+    return pd.DataFrame(rows)
+
+
+def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y: float, w: float, h: float, view: str, title: str) -> None:
+    """Einfache PDF-Zeichnung ohne zusätzliche Plotly/Kaleido-Abhängigkeit."""
+    from reportlab.lib import colors
+
+    eff_length = safe_number(platform.get('Länge_mm')) + safe_number(platform.get('Überhang_vorne_mm')) + safe_number(platform.get('Überhang_hinten_mm'))
+    width = safe_number(platform.get('Breite_mm'))
+    max_height = safe_number(platform.get('Max_Höhe_mm'))
+
+    c.setStrokeColor(colors.black)
+    c.setFont('Helvetica-Bold', 8)
+    c.drawString(x, y + h + 10, title)
+
+    if view == 'top':
+        data_w, data_h = max(eff_length, 1), max(width, 1)
+        x_label, y_label = 'X Länge', 'Y Breite'
+    elif view == 'side':
+        data_w, data_h = max(eff_length, 1), max(max_height, 1)
+        x_label, y_label = 'X Länge', 'Z Höhe'
+    else:
+        data_w, data_h = max(width, 1), max(max_height, 1)
+        x_label, y_label = 'Y Breite', 'Z Höhe'
+
+    scale = min(w / data_w, h / data_h)
+    draw_w = data_w * scale
+    draw_h = data_h * scale
+    ox = x
+    oy = y
+
+    c.setStrokeColor(colors.black)
+    c.rect(ox, oy, draw_w, draw_h, stroke=1, fill=0)
+    c.setFont('Helvetica', 6)
+    c.drawString(ox, oy - 10, x_label)
+    c.saveState()
+    c.translate(ox - 12, oy)
+    c.rotate(90)
+    c.drawString(0, 0, y_label)
+    c.restoreState()
+
+    rows = placements[placements['Pritsche'].astype(str) == str(platform.get('Pritsche', ''))].copy()
+    rows = rows[rows['X_mm'].notna() & rows['Y_mm'].notna() & rows['Z_mm'].notna()].copy()
+    c.setFillColor(colors.lightgrey)
+    c.setStrokeColor(colors.darkgrey)
+    for _, row in rows.iterrows():
+        if view == 'top':
+            rx = ox + safe_number(row.get('X_mm')) * scale
+            ry = oy + safe_number(row.get('Y_mm')) * scale
+            rw = safe_number(row.get('Länge_mm')) * scale
+            rh = safe_number(row.get('Breite_mm')) * scale
+        elif view == 'side':
+            rx = ox + safe_number(row.get('X_mm')) * scale
+            ry = oy + safe_number(row.get('Z_mm')) * scale
+            rw = safe_number(row.get('Länge_mm')) * scale
+            rh = safe_number(row.get('Höhe_mm')) * scale
+        else:
+            rx = ox + safe_number(row.get('Y_mm')) * scale
+            ry = oy + safe_number(row.get('Z_mm')) * scale
+            rw = safe_number(row.get('Breite_mm')) * scale
+            rh = safe_number(row.get('Höhe_mm')) * scale
+        if rw <= 0 or rh <= 0:
+            continue
+        c.setFillColor(colors.lightgrey)
+        c.rect(rx, ry, rw, rh, stroke=1, fill=1)
+        c.setFillColor(colors.black)
+        c.setFont('Helvetica', 5)
+        label = str(row.get('Einheit_ID', ''))[:12]
+        c.drawCentredString(rx + rw / 2, ry + rh / 2, label)
+
+
+def create_loading_pdf(
+    placements_df: pd.DataFrame,
+    platforms_df: pd.DataFrame,
+    summary_df: pd.DataFrame,
+    warnings_df: pd.DataFrame,
+    project_name: str = 'BVX Verladeplanung',
+) -> bytes:
+    """Erstellt einen einfachen A3-Pritschenplan als PDF pro Pritsche."""
+    try:
+        from reportlab.lib.pagesizes import A3, landscape
+        from reportlab.pdfgen import canvas
+        from reportlab.lib import colors
+    except ImportError as exc:
+        raise RuntimeError('Für den PDF-Export muss reportlab installiert sein: pip install reportlab') from exc
+
+    output = io.BytesIO()
+    c = canvas.Canvas(output, pagesize=landscape(A3))
+    page_w, page_h = landscape(A3)
+    margin = 24
+
+    if platforms_df is None or platforms_df.empty:
+        c.drawString(margin, page_h - margin, 'Keine Pritschen vorhanden')
+        c.save()
+        return output.getvalue()
+
+    for _, platform in platforms_df.iterrows():
+        pname = str(platform.get('Pritsche', 'Pritsche'))
+        srow = summary_df[summary_df['Pritsche'].astype(str) == pname]
+        srow = srow.iloc[0] if not srow.empty else pd.Series(dtype=object)
+
+        c.setFont('Helvetica-Bold', 16)
+        c.drawString(margin, page_h - 36, f'Pritschenplan - {pname}')
+        c.setFont('Helvetica', 9)
+        c.drawString(margin, page_h - 54, f'Projekt / Datei: {project_name}')
+        c.drawString(margin, page_h - 70, f'Erstellt: {datetime.now().strftime("%d.%m.%Y %H:%M")}')
+
+        info_x = page_w - 290
+        info_y = page_h - 40
+        c.setFont('Helvetica-Bold', 10)
+        c.drawString(info_x, info_y, 'Info Pritsche')
+        c.setFont('Helvetica', 8)
+        info_lines = [
+            f'Fuhrenoption: {platform.get("Fuhrenoption", "")}',
+            f'Länge genutzt: {safe_number(srow.get("Länge genutzt_mm")):.0f} / {safe_number(srow.get("Max Länge effektiv_mm")):.0f} mm',
+            f'Breite genutzt: {safe_number(srow.get("Breite genutzt_mm")):.0f} / {safe_number(srow.get("Max Breite_mm")):.0f} mm',
+            f'Höhe genutzt: {safe_number(srow.get("Höhe genutzt_mm")):.0f} / {safe_number(srow.get("Max Höhe_mm")):.0f} mm',
+            f'Gewicht: {safe_number(srow.get("Gewicht genutzt_kg")):.0f} / {safe_number(srow.get("Max Gewicht_kg")):.0f} kg',
+        ]
+        for i, line in enumerate(info_lines):
+            c.drawString(info_x, info_y - 16 - i * 13, line)
+
+        hint_x = margin
+        hint_y = page_h - 105
+        c.setFont('Helvetica-Bold', 9)
+        c.drawString(hint_x, hint_y, 'Infos zur Verladung')
+        c.setFont('Helvetica', 8)
+        hints = [
+            '- Unterleghölzer gemäss Einstellung einlegen',
+            '- Bunde / Bauteile gemäss Plan laden',
+            '- Sichtseite / Schutz gemäss Projektvorgabe beachten',
+            '- Ladung sichern und Verladereihenfolge prüfen',
+        ]
+        for i, line in enumerate(hints):
+            c.drawString(hint_x, hint_y - 14 - i * 12, line)
+
+        # Zeichnungsbereiche
+        top_y = 205
+        _pdf_draw_view(c, placements_df, platform, margin, top_y, 520, 280, 'side', 'Seitenansicht')
+        _pdf_draw_view(c, placements_df, platform, margin + 550, top_y, 210, 280, 'back', 'Rückansicht')
+        _pdf_draw_view(c, placements_df, platform, margin, 35, 760, 135, 'top', 'Draufsicht')
+
+        # Warnungen
+        pwarnings = warnings_df[warnings_df['Pritsche'].astype(str) == pname] if warnings_df is not None and not warnings_df.empty else pd.DataFrame()
+        c.setFont('Helvetica-Bold', 8)
+        c.drawString(page_w - 290, 150, 'Warnungen')
+        c.setFont('Helvetica', 7)
+        if pwarnings.empty:
+            c.drawString(page_w - 290, 136, 'Keine Warnungen')
+        else:
+            for i, (_, wrn) in enumerate(pwarnings.head(8).iterrows()):
+                c.drawString(page_w - 290, 136 - i * 11, f"- {wrn.get('Einheit_ID','')}: {wrn.get('Warnung','')}")
+
+        # QS Feld
+        c.setStrokeColor(colors.black)
+        c.rect(page_w - 290, 35, 250, 60, stroke=1, fill=0)
+        c.setFont('Helvetica', 8)
+        c.drawString(page_w - 280, 78, 'Qualitätssicherung')
+        c.drawString(page_w - 280, 58, 'Datum: __________________')
+        c.drawString(page_w - 140, 58, 'Unterschrift: __________________')
+
+        c.showPage()
+
+    c.save()
+    return output.getvalue()
 
 
 # =============================================================================
@@ -1596,7 +1876,11 @@ def render_loading_module(uploaded_file, transport_excel_file=None) -> None:
     col4.metric('Nicht verladen', not_loaded_count)
     col5.metric('Pritschen genutzt', len(platforms_used_df) if not platforms_used_df.empty else 0)
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(['Verladeeinheiten', 'Fuhrenübersicht', 'Platzierung', 'Ansichten', 'Export'])
+    edited_placements_df = clean_placements_dataframe(placements_df)
+    edited_summary_df = recompute_summary_from_placements(edited_placements_df, platforms_used_df) if not platforms_used_df.empty else summary_df
+    warnings_plan_df = compute_loading_warnings(edited_placements_df, platforms_used_df)
+
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(['Verladeeinheiten', 'Fuhrenübersicht', 'Platzierung / manuell', 'Warnungen', 'Ansichten', 'Export'])
 
     with tab1:
         st.dataframe(units_df, use_container_width=True, hide_index=True)
@@ -1611,20 +1895,49 @@ def render_loading_module(uploaded_file, transport_excel_file=None) -> None:
         else:
             st.warning('Es wurde keine Fuhre erzeugt.')
         st.markdown('**Pritschen-Zusammenfassung**')
-        st.dataframe(summary_df, use_container_width=True, hide_index=True)
+        st.dataframe(edited_summary_df, use_container_width=True, hide_index=True)
 
     with tab3:
         st.markdown('**Platzierung der Verladeeinheiten**')
-        st.dataframe(placements_df, use_container_width=True, hide_index=True)
+        st.caption('Hier können Positionen manuell angepasst werden. Für die Ansicht und den Export werden die geänderten Werte verwendet.')
+        edited_placements_df = st.data_editor(
+            edited_placements_df,
+            use_container_width=True,
+            hide_index=True,
+            num_rows='fixed',
+            column_config={
+                'Fuhre_Nr': st.column_config.NumberColumn('Fuhre'),
+                'X_mm': st.column_config.NumberColumn('X mm'),
+                'Y_mm': st.column_config.NumberColumn('Y mm'),
+                'Z_mm': st.column_config.NumberColumn('Z mm'),
+                'Länge_mm': st.column_config.NumberColumn('Länge mm'),
+                'Breite_mm': st.column_config.NumberColumn('Breite mm'),
+                'Höhe_mm': st.column_config.NumberColumn('Höhe mm'),
+                'Drehung': st.column_config.NumberColumn('Drehung'),
+                'Gewicht_kg': st.column_config.NumberColumn('Gewicht kg'),
+            },
+            key='placements_manual_editor',
+        )
+        edited_placements_df = clean_placements_dataframe(edited_placements_df)
+        edited_summary_df = recompute_summary_from_placements(edited_placements_df, platforms_used_df) if not platforms_used_df.empty else summary_df
+        warnings_plan_df = compute_loading_warnings(edited_placements_df, platforms_used_df)
         if not_loaded_count:
             st.error('Nicht alle Verladeeinheiten konnten automatisch platziert werden. Freigegebene Fuhrenoptionen, Pritschenmaße oder Bundbildung prüfen.')
 
     with tab4:
+        if warnings_plan_df.empty:
+            st.success('Keine Warnungen gefunden.')
+        else:
+            severe_count = len(warnings_plan_df)
+            st.warning(f'{severe_count} Warnung(en) gefunden.')
+            st.dataframe(warnings_plan_df, use_container_width=True, hide_index=True)
+
+    with tab5:
         if platforms_used_df.empty:
             st.warning('Keine Pritsche für die Ansicht vorhanden.')
         else:
             selected_platform = st.selectbox('Fuhre / Pritsche für Ansicht', platforms_used_df['Pritsche'].tolist())
-            info_row = summary_df[summary_df['Pritsche'] == selected_platform]
+            info_row = edited_summary_df[edited_summary_df['Pritsche'] == selected_platform]
             if not info_row.empty:
                 row = info_row.iloc[0]
                 c1, c2, c3, c4 = st.columns(4)
@@ -1635,20 +1948,21 @@ def render_loading_module(uploaded_file, transport_excel_file=None) -> None:
 
             col1, col2 = st.columns(2)
             with col1:
-                st.plotly_chart(draw_loading_view(placements_df, platforms_used_df, selected_platform, 'side'), use_container_width=True)
+                st.plotly_chart(draw_loading_view(edited_placements_df, platforms_used_df, selected_platform, 'side'), use_container_width=True)
             with col2:
-                st.plotly_chart(draw_loading_view(placements_df, platforms_used_df, selected_platform, 'back'), use_container_width=True)
-            st.plotly_chart(draw_loading_view(placements_df, platforms_used_df, selected_platform, 'top'), use_container_width=True)
+                st.plotly_chart(draw_loading_view(edited_placements_df, platforms_used_df, selected_platform, 'back'), use_container_width=True)
+            st.plotly_chart(draw_loading_view(edited_placements_df, platforms_used_df, selected_platform, 'top'), use_container_width=True)
 
-    with tab5:
+    with tab6:
         excel_data = create_loading_excel(
             sorted_parts,
             units_df,
-            placements_df,
+            edited_placements_df,
             platforms_used_df,
-            summary_df,
+            edited_summary_df,
             options_df=options_edit,
             fuhren_log_df=fuhren_log_df,
+            warnings_df=warnings_plan_df,
         )
         st.download_button(
             label='Verladeplanung als Excel herunterladen',
@@ -1657,9 +1971,26 @@ def render_loading_module(uploaded_file, transport_excel_file=None) -> None:
             mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         )
 
+        try:
+            pdf_data = create_loading_pdf(
+                edited_placements_df,
+                platforms_used_df,
+                edited_summary_df,
+                warnings_plan_df,
+                project_name=uploaded_file.name,
+            )
+            st.download_button(
+                label='A3-Pritschenplan als PDF herunterladen',
+                data=pdf_data,
+                file_name=f"{uploaded_file.name.replace('.bvx', '').replace('.BVX', '')}_pritschenplan.pdf",
+                mime='application/pdf',
+            )
+        except RuntimeError as exc:
+            st.warning(str(exc))
+
         st.markdown('''
         **Hinweis:** Diese Version erstellt einen automatischen Grobvorschlag mit Variante A.
-        Manuelles Umplatzieren per Tabelle/Drag-and-drop ist der nächste Ausbauschritt.
+        Manuelles Umplatzieren erfolgt über die Platzierungstabelle. Drag-and-drop ist nicht enthalten.
         ''')
 
 
