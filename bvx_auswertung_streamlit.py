@@ -2,7 +2,7 @@
 BVX Auswertung + Verladeplanung - Streamlit Version
 
 Installation:
-    pip install streamlit pandas plotly openpyxl
+    pip install streamlit pandas plotly openpyxl matplotlib pillow
 
 Ausführen:
     streamlit run bvx_auswertung_streamlit_verladung_varianteA_excel_hauptausgabe.py
@@ -10,6 +10,7 @@ Ausführen:
 Hinweis:
     Die Verladeplanung ist als grober, eigenständiger Modulbereich aufgebaut.
     Hauptausgabe ist der Excel-Verladeplan im BSD-/Pritschenzettel-Stil.
+    Zusätzlich werden pro Pritsche grafische Excel-Ansichten erzeugt.
     PDF ist nur optional und benötigt reportlab.
     Die Transportabmessungen sind Beispiel-/Stammdaten und müssen intern geprüft und angepasst werden.
 """
@@ -1734,15 +1735,235 @@ def create_loading_excel(
             ws.page_setup.fitToWidth = 1
             ws.page_setup.fitToHeight = 1
 
+
+        def add_visual_view_sheet(header: pd.Series):
+            """Erzeugt pro Pritsche ein zusätzliches Excel-Blatt mit grafischen Ansichten.
+
+            Dieses Blatt ersetzt die bisherige PDF-Ansicht in der Hauptausgabe:
+            Seitenansicht, Rückansicht, Draufsicht und Vorderansicht werden als
+            Bilder in Excel eingebettet. Der kleine BSD-/Pritschenzettel bleibt
+            zusätzlich als eigenes Blatt erhalten.
+            """
+            pname = str(val(header, 'Pritsche', 'Pritsche'))
+            ws = wb.create_sheet(unique_sheet_name(f'Ansicht_{pname}'))
+            ws.sheet_view.showGridLines = False
+
+            # Layout A3 Querformat.
+            for col_idx in range(1, 19):
+                ws.column_dimensions[get_column_letter(col_idx)].width = 10
+            for row_idx in range(1, 67):
+                ws.row_dimensions[row_idx].height = 18
+
+            ws.merge_cells('A1:R1')
+            ws['A1'] = f'Pritschenplan / Ansichten - {pname}'
+            ws['A1'].font = Font(name='Arial', size=16, bold=True)
+            ws['A1'].alignment = Alignment(horizontal='center', vertical='center')
+            ws['A1'].fill = fill_lightgray
+            style_range(ws, 'A1:R1', border=border_thin)
+
+            # Linker Kopfbereich.
+            set_box(ws, 'A3:F10')
+            write_label(ws, 'A3', 'Objekt:')
+            ws.merge_cells('C3:F3')
+            ws['C3'] = str(val(header, 'Objekt_Name', ''))
+            write_label(ws, 'A4', 'Transport:')
+            ws.merge_cells('C4:F4')
+            ws['C4'] = str(val(header, 'Transport_Name', '') or val(header, 'Fuhrenoption', ''))
+            write_label(ws, 'A5', 'Pritsche:')
+            ws.merge_cells('C5:F5')
+            ws['C5'] = pname
+            ws['C5'].fill = fill_cyan
+            write_label(ws, 'A6', 'Decke:')
+            ws.merge_cells('C6:F6')
+            ws['C6'] = str(val(header, 'Decke', ''))
+            write_label(ws, 'A7', 'Bauabschnitt:')
+            ws.merge_cells('C7:F7')
+            ws['C7'] = str(val(header, 'Bauabschnitt', ''))
+            write_label(ws, 'A8', 'Sachbearbeiter:')
+            ws.merge_cells('C8:F8')
+            ws['C8'] = str(val(header, 'Sachbearbeiter', ''))
+            write_label(ws, 'A9', 'Datum:')
+            ws.merge_cells('C9:F9')
+            ws['C9'] = str(val(header, 'Datum', datetime.now().strftime('%d.%m.%Y')))
+
+            # Rechter Infoblock ähnlich PDF-Vorlage.
+            set_box(ws, 'H3:R10')
+            ws.merge_cells('H3:R3')
+            ws['H3'] = 'Info Pritsche'
+            ws['H3'].font = font_title
+            ws['H3'].alignment = Alignment(horizontal='center')
+            fields = [
+                ('H4', 'Gewicht:', 'K4', fmt_t(val(header, 'Ladegewicht_kg', 0)), 'L4', 'to'),
+                ('H5', 'Breite:', 'K5', fmt_mm(val(header, 'Breite_gesamt_mm', 0)), 'L5', 'mm'),
+                ('H6', 'Höhe:', 'K6', fmt_mm(val(header, 'Frachthöhe_mm', 0)), 'L6', 'mm'),
+                ('H7', 'Länge:', 'K7', fmt_mm(val(header, 'Länge_gesamt_mm', 0)), 'L7', 'mm'),
+                ('H8', 'Max. Breite:', 'K8', fmt_mm(val(header, 'Pritschenbreite_mm', 0)), 'L8', 'mm'),
+                ('H9', 'Max. Ladehöhe:', 'K9', fmt_mm(val(header, 'Pritschenhöhe_mm', 0)), 'L9', 'mm'),
+                ('H10', 'Warnungen:', 'K10', str(val(header, 'Warnungen', 0)), 'L10', ''),
+            ]
+            for lab_cell, lab, val_cell, value, unit_cell, unit in fields:
+                write_label(ws, lab_cell, lab)
+                ws[val_cell] = value
+                ws[val_cell].font = font_head
+                ws[val_cell].alignment = Alignment(horizontal='right')
+                ws[unit_cell] = unit
+
+            # Plattformdaten und Verladedaten.
+            platform_match = platforms_df[platforms_df['Pritsche'].astype(str) == pname] if platforms_df is not None and not platforms_df.empty else pd.DataFrame()
+            if platform_match.empty:
+                ws['A13'] = 'Keine Pritschendaten für grafische Ansicht vorhanden.'
+                return
+            platform_row = platform_match.iloc[0]
+            loaded = placements_df[placements_df['Pritsche'].astype(str) == pname].copy() if placements_df is not None and not placements_df.empty else pd.DataFrame()
+            if not loaded.empty:
+                loaded = loaded[loaded['X_mm'].notna() & loaded['Y_mm'].notna() & loaded['Z_mm'].notna()].copy()
+
+            def make_view_png(view: str, title: str) -> Optional[io.BytesIO]:
+                try:
+                    import matplotlib
+                    matplotlib.use('Agg')
+                    import matplotlib.pyplot as plt
+                    from matplotlib.patches import Rectangle
+                except Exception:
+                    return None
+
+                eff_length = safe_number(platform_row.get('Länge_mm')) + safe_number(platform_row.get('Überhang_vorne_mm')) + safe_number(platform_row.get('Überhang_hinten_mm'))
+                width = safe_number(platform_row.get('Breite_mm'))
+                max_height = safe_number(platform_row.get('Max_Höhe_mm'))
+                base_wood = safe_number(platform_row.get('Kantholz_erste_Lage_mm'))
+                used_length = safe_number(val(header, 'Länge_gesamt_mm', 0))
+                used_width = safe_number(val(header, 'Breite_gesamt_mm', 0))
+                used_height = safe_number(val(header, 'Frachthöhe_mm', 0))
+
+                fig, ax = plt.subplots(figsize=(7.1, 3.0), dpi=160)
+                ax.set_title(title, fontsize=10, fontweight='bold', pad=6)
+                ax.grid(True, linewidth=0.25, alpha=0.35)
+                ax.tick_params(labelsize=7)
+                ax.set_facecolor('#fbfbfb')
+
+                if view == 'top':
+                    ax.set_xlabel('Länge X (mm)', fontsize=7)
+                    ax.set_ylabel('Breite Y (mm)', fontsize=7)
+                    ax.add_patch(Rectangle((0, 0), eff_length, width, fill=False, edgecolor='black', linestyle='--', linewidth=1.5))
+                    for _, row in loaded.iterrows():
+                        x0 = safe_number(row.get('X_mm'))
+                        y0 = safe_number(row.get('Y_mm'))
+                        lx = safe_number(row.get('Länge_mm'))
+                        by = safe_number(row.get('Breite_mm'))
+                        ax.add_patch(Rectangle((x0, y0), lx, by, facecolor='#c9d6df', edgecolor='black', linewidth=0.5))
+                        label = _view_label(row).replace('<br>', '\n')
+                        ax.text(x0 + lx / 2, y0 + by / 2, label, ha='center', va='center', fontsize=5.5)
+                    ax.set_xlim(0, max(eff_length, 1))
+                    ax.set_ylim(0, max(width, 1))
+
+                elif view == 'side':
+                    ax.set_xlabel('Länge X (mm)', fontsize=7)
+                    ax.set_ylabel('Höhe Z (mm)', fontsize=7)
+                    ax.add_patch(Rectangle((0, 0), eff_length, max_height, fill=False, edgecolor='black', linestyle='--', linewidth=1.5))
+                    ax.plot([0, eff_length], [0, 0], color='black', linewidth=2)
+                    if base_wood > 0:
+                        ax.plot([0, eff_length], [base_wood, base_wood], color='black', linestyle=':', linewidth=0.8)
+                        ax.text(eff_length * 0.01, base_wood + 8, f'Kantholz {base_wood:.0f}', fontsize=6, va='bottom')
+                    for _, row in loaded.iterrows():
+                        x0 = safe_number(row.get('X_mm'))
+                        z0 = safe_number(row.get('Z_mm'))
+                        lx = safe_number(row.get('Länge_mm'))
+                        hz = safe_number(row.get('Höhe_mm'))
+                        ax.add_patch(Rectangle((x0, z0), lx, hz, facecolor='#c9d6df', edgecolor='black', linewidth=0.5))
+                        label = _view_label(row).replace('<br>', '\n')
+                        ax.text(x0 + lx / 2, z0 + hz / 2, label, ha='center', va='center', fontsize=5.5)
+                    ax.set_xlim(0, max(eff_length, 1))
+                    ax.set_ylim(0, max(max_height, used_height, 1))
+
+                elif view in ('back', 'front'):
+                    ax.set_xlabel('Breite Y (mm)', fontsize=7)
+                    ax.set_ylabel('Höhe Z (mm)', fontsize=7)
+                    ax.add_patch(Rectangle((0, 0), width, max_height, fill=False, edgecolor='black', linestyle='--', linewidth=1.5))
+                    ax.plot([0, width], [0, 0], color='black', linewidth=2)
+                    if base_wood > 0:
+                        ax.plot([0, width], [base_wood, base_wood], color='black', linestyle=':', linewidth=0.8)
+                    for _, row in loaded.iterrows():
+                        y = safe_number(row.get('Y_mm'))
+                        z0 = safe_number(row.get('Z_mm'))
+                        by = safe_number(row.get('Breite_mm'))
+                        hz = safe_number(row.get('Höhe_mm'))
+                        x0 = width - y - by if view == 'front' else y
+                        ax.add_patch(Rectangle((x0, z0), by, hz, facecolor='#c9d6df', edgecolor='black', linewidth=0.5))
+                        label = _view_label(row).replace('<br>', '\n')
+                        ax.text(x0 + by / 2, z0 + hz / 2, label, ha='center', va='center', fontsize=5.5)
+                    ax.set_xlim(0, max(width, 1))
+                    ax.set_ylim(0, max(max_height, used_height, 1))
+                    if view == 'front':
+                        ax.text(width * 0.5, max(max_height, used_height, 1) * 0.98, 'Vorne', ha='center', va='top', fontsize=7)
+                    else:
+                        ax.text(width * 0.5, max(max_height, used_height, 1) * 0.98, 'Hinten', ha='center', va='top', fontsize=7)
+
+                dim_text = f'Belegt: L {used_length:.0f} mm / B {used_width:.0f} mm / H {used_height:.0f} mm'
+                ax.text(0.01, -0.18, dim_text, transform=ax.transAxes, fontsize=7, ha='left', va='top')
+                fig.tight_layout(pad=1.0)
+                buf = io.BytesIO()
+                fig.savefig(buf, format='png', bbox_inches='tight')
+                plt.close(fig)
+                buf.seek(0)
+                return buf
+
+            try:
+                from openpyxl.drawing.image import Image as XLImage
+            except Exception:
+                ws['A13'] = 'Grafische Excel-Ansichten konnten nicht eingebettet werden, weil Pillow fehlt.'
+                ws['A14'] = 'Installieren: pip install pillow matplotlib'
+                return
+
+            if not hasattr(wb, '_verladeplan_image_buffers'):
+                wb._verladeplan_image_buffers = []
+
+            view_defs = [
+                ('B13', 'B14', 'side', 'Seitenansicht'),
+                ('K13', 'K14', 'back', 'Rückansicht'),
+                ('B36', 'B37', 'top', 'Draufsicht'),
+                ('K36', 'K37', 'front', 'Vorderansicht'),
+            ]
+            for title_anchor, image_anchor, view, title in view_defs:
+                ws[title_anchor] = title
+                ws[title_anchor].font = font_head
+                ws[title_anchor].alignment = Alignment(horizontal='center')
+                img_buf = make_view_png(view, f'{title} - {pname}')
+                if img_buf is None:
+                    ws[image_anchor] = 'Grafik nicht erzeugt. Installieren: pip install matplotlib pillow'
+                    continue
+                wb._verladeplan_image_buffers.append(img_buf)
+                img = XLImage(img_buf)
+                img.width = 560
+                img.height = 240
+                ws.add_image(img, image_anchor)
+
+            # Kurze Legende / Hinweise.
+            ws.merge_cells('A61:R62')
+            ws['A61'] = 'Hinweis: Dieses Blatt enthält die grafischen Verladeansichten für die Pritsche. Die kleinen Ladeplan-BSD/Pritschenzettel bleiben als separate BSD-Blätter erhalten.'
+            ws['A61'].font = font_small
+            ws['A61'].alignment = Alignment(horizontal='left', vertical='top', wrap_text=True)
+
+            ws.page_setup.orientation = 'landscape'
+            ws.page_setup.paperSize = ws.PAPERSIZE_A3
+            ws.page_margins.left = 0.25
+            ws.page_margins.right = 0.25
+            ws.page_margins.top = 0.25
+            ws.page_margins.bottom = 0.25
+            ws.print_area = 'A1:R62'
+            ws.sheet_properties.pageSetUpPr.fitToPage = True
+            ws.page_setup.fitToWidth = 1
+            ws.page_setup.fitToHeight = 1
+
         if bsd_header_df is not None and not bsd_header_df.empty and bsd_matrix_df is not None and not bsd_matrix_df.empty:
             for _, header in bsd_header_df.iterrows():
                 pname = str(val(header, 'Pritsche', ''))
                 matrix = bsd_matrix_df[bsd_matrix_df['Pritsche'].astype(str) == pname].copy()
                 add_styled_bsd_sheet(header, matrix)
+                add_visual_view_sheet(header)
 
         # Rohdatenblätter etwas lesbarer machen.
         for ws in wb.worksheets:
-            if ws.title.startswith('BSD_'):
+            if ws.title.startswith('BSD_') or ws.title.startswith('Ansicht_'):
                 continue
             for col in ws.columns:
                 max_len = 0
@@ -1792,6 +2013,7 @@ def draw_loading_view(placements_df: pd.DataFrame, platforms_df: pd.DataFrame, p
         'top': 'Draufsicht',
         'side': 'Seitenansicht',
         'back': 'Rückansicht',
+        'front': 'Vorderansicht',
     }.get(view, 'Ansicht')
 
     if platform_match.empty:
@@ -1847,7 +2069,7 @@ def draw_loading_view(placements_df: pd.DataFrame, platforms_df: pd.DataFrame, p
         fig.update_xaxes(range=[0, max(eff_length, 1)], constrain='domain')
         fig.update_yaxes(range=[0, max(max_height, 1)])
 
-    else:
+    elif view == 'back':
         fig.update_layout(
             title=f'{title_prefix} - {platform_name}',
             xaxis_title='Breite Y (mm)',
@@ -1859,6 +2081,26 @@ def draw_loading_view(placements_df: pd.DataFrame, platforms_df: pd.DataFrame, p
         for _, row in loaded.iterrows():
             y0, z0 = float(row['Y_mm']), float(row['Z_mm'])
             y1, z1 = y0 + float(row['Breite_mm']), z0 + float(row['Höhe_mm'])
+            fig.add_shape(type='rect', x0=y0, y0=z0, x1=y1, y1=z1, line=dict(width=1), fillcolor='rgba(100,100,100,0.28)')
+            fig.add_annotation(x=(y0 + y1) / 2, y=(z0 + z1) / 2, text=_view_label(row), showarrow=False, font=dict(size=10))
+        fig.update_xaxes(range=[0, max(width, 1)], constrain='domain')
+        fig.update_yaxes(range=[0, max(max_height, 1)])
+
+    else:
+        # Vorderansicht: gleiche Projektion wie Rückansicht, aber links/rechts gespiegelt.
+        fig.update_layout(
+            title=f'{title_prefix} - {platform_name}',
+            xaxis_title='Breite Y gespiegelt (mm)',
+            yaxis_title='Höhe Z (mm)',
+        )
+        fig.add_shape(type='rect', x0=0, y0=0, x1=width, y1=max_height, line=dict(width=2, dash='dash'))
+        if base_wood > 0:
+            fig.add_shape(type='line', x0=0, y0=base_wood, x1=width, y1=base_wood, line=dict(width=1, dash='dot'))
+        for _, row in loaded.iterrows():
+            y0_raw, z0 = float(row['Y_mm']), float(row['Z_mm'])
+            b = float(row['Breite_mm'])
+            y0 = width - y0_raw - b
+            y1, z1 = y0 + b, z0 + float(row['Höhe_mm'])
             fig.add_shape(type='rect', x0=y0, y0=z0, x1=y1, y1=z1, line=dict(width=1), fillcolor='rgba(100,100,100,0.28)')
             fig.add_annotation(x=(y0 + y1) / 2, y=(z0 + z1) / 2, text=_view_label(row), showarrow=False, font=dict(size=10))
         fig.update_xaxes(range=[0, max(width, 1)], constrain='domain')
@@ -3096,7 +3338,11 @@ def render_loading_module(uploaded_file, transport_excel_file=None) -> None:
                 st.plotly_chart(draw_loading_view(edited_placements_df, platforms_used_df, selected_platform, 'side'), use_container_width=True)
             with col2:
                 st.plotly_chart(draw_loading_view(edited_placements_df, platforms_used_df, selected_platform, 'back'), use_container_width=True)
-            st.plotly_chart(draw_loading_view(edited_placements_df, platforms_used_df, selected_platform, 'top'), use_container_width=True)
+            col3, col4 = st.columns(2)
+            with col3:
+                st.plotly_chart(draw_loading_view(edited_placements_df, platforms_used_df, selected_platform, 'top'), use_container_width=True)
+            with col4:
+                st.plotly_chart(draw_loading_view(edited_placements_df, platforms_used_df, selected_platform, 'front'), use_container_width=True)
 
     with tab7:
         # Falls der Ladeplan-BSD-Tab nicht angezeigt wurde, trotzdem für den Export erstellen.
@@ -3106,7 +3352,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None) -> None:
         st.subheader('Excel-Verladeplan')
         st.info(
             'Hauptausgabe ist der Excel-Verladeplan. Pro belegter Pritsche wird ein eigenes '
-            'optisches BSD-/Pritschenzettel-Blatt erzeugt. Die Datei kann in Excel geöffnet, '
+            'optisches BSD-/Pritschenzettel-Blatt und ein grafisches Ansichten-Blatt erzeugt. Die Datei kann in Excel geöffnet, '
             'bearbeitet und direkt gedruckt oder über Excel als PDF gespeichert werden.'
         )
 
