@@ -1013,6 +1013,87 @@ def create_loading_plan(
     return pd.DataFrame(placements), pd.DataFrame(summary)
 
 
+def center_placements_geometrically(placements_df: pd.DataFrame, platforms_df: pd.DataFrame) -> pd.DataFrame:
+    """Richtet platzierte Einheiten geometrisch mittig auf der Pritsche aus.
+
+    Wichtig: Das ist bewusst keine Gewichts- oder Schwerpunktoptimierung.
+    Die bestehende Reihenfolge und Stapellogik bleibt erhalten. Es wird nur die
+    fertige Platzierung je Lage in X- und Y-Richtung in die Mitte der jeweiligen
+    Pritsche verschoben.
+    """
+    if placements_df.empty or platforms_df.empty:
+        return placements_df
+
+    result = placements_df.copy()
+    if 'Pritsche' not in result.columns:
+        return result
+
+    # Nur sauber platzierte Zeilen ausrichten. Nicht-verladene Zeilen bleiben unverändert.
+    numeric_cols = ['X_mm', 'Y_mm', 'Z_mm', 'Länge_mm', 'Breite_mm', 'Höhe_mm']
+    for col in numeric_cols:
+        if col in result.columns:
+            result[col] = pd.to_numeric(result[col], errors='coerce')
+
+    platform_lookup = {
+        str(row.get('Pritsche', '')): row
+        for _, row in platforms_df.iterrows()
+    }
+
+    for platform_name, platform_row in platform_lookup.items():
+        if not platform_name or platform_name == 'NICHT VERLADEN':
+            continue
+
+        eff_length = (
+            safe_number(platform_row.get('Länge_mm'))
+            + safe_number(platform_row.get('Überhang_vorne_mm'))
+            + safe_number(platform_row.get('Überhang_hinten_mm'))
+        )
+        platform_width = safe_number(platform_row.get('Breite_mm'))
+        if eff_length <= 0 or platform_width <= 0:
+            continue
+
+        mask_platform = (
+            result['Pritsche'].astype(str).eq(platform_name)
+            & result['X_mm'].notna()
+            & result['Y_mm'].notna()
+            & result['Z_mm'].notna()
+            & result['Länge_mm'].notna()
+            & result['Breite_mm'].notna()
+        )
+        if not mask_platform.any():
+            continue
+
+        # Je Lage mittig ausrichten. Eine Lage ist hier die gleiche Z-Position.
+        layer_keys = result.loc[mask_platform, 'Z_mm'].round(1).unique().tolist()
+        for layer_key in layer_keys:
+            layer_mask = mask_platform & result['Z_mm'].round(1).eq(layer_key)
+            if not layer_mask.any():
+                continue
+
+            x0 = result.loc[layer_mask, 'X_mm'].min()
+            x1 = (result.loc[layer_mask, 'X_mm'] + result.loc[layer_mask, 'Länge_mm']).max()
+            y0 = result.loc[layer_mask, 'Y_mm'].min()
+            y1 = (result.loc[layer_mask, 'Y_mm'] + result.loc[layer_mask, 'Breite_mm']).max()
+
+            span_x = x1 - x0
+            span_y = y1 - y0
+
+            if 0 < span_x <= eff_length:
+                shift_x = (eff_length - span_x) / 2 - x0
+                result.loc[layer_mask, 'X_mm'] = (result.loc[layer_mask, 'X_mm'] + shift_x).round(1)
+
+            if 0 < span_y <= platform_width:
+                shift_y = (platform_width - span_y) / 2 - y0
+                result.loc[layer_mask, 'Y_mm'] = (result.loc[layer_mask, 'Y_mm'] + shift_y).round(1)
+
+            if 'Ebene' in result.columns:
+                result.loc[layer_mask, 'Ebene'] = result.loc[layer_mask, 'Ebene'].astype(str).apply(
+                    lambda v: v if 'mittig' in v.lower() else f'{v} / geometrisch mittig'
+                )
+
+    return result
+
+
 def build_trip_platforms(pritschen_df: pd.DataFrame, fuhrenoption: str, fuhre_nr: int) -> pd.DataFrame:
     rows = pritschen_df[
         (pritschen_df['Fuhrenoption'].astype(str) == str(fuhrenoption)) &
@@ -1035,6 +1116,7 @@ def create_variant_a_loading_plan(
     allow_beside: bool,
     allow_stack: bool,
     allow_rotation: bool,
+    center_geometric: bool = True,
     max_fuhren: int = 50,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Variante A: erste freigegebene passende Fuhrenoption wird wiederholt, bis alles verladen ist."""
@@ -1141,6 +1223,11 @@ def create_variant_a_loading_plan(
     placements_df = pd.concat(all_placements, ignore_index=True) if all_placements else pd.DataFrame()
     summary_df = pd.concat(all_summary, ignore_index=True) if all_summary else pd.DataFrame()
     platforms_used_df = pd.concat(all_platforms, ignore_index=True) if all_platforms else pd.DataFrame()
+
+    if center_geometric and not placements_df.empty and not platforms_used_df.empty:
+        placements_df = center_placements_geometrically(placements_df, platforms_used_df)
+        summary_df = recompute_summary_from_placements(placements_df, platforms_used_df)
+
     fuhren_log_df = pd.DataFrame(fuhren_log)
     return placements_df, summary_df, platforms_used_df, fuhren_log_df
 
@@ -1848,10 +1935,12 @@ def render_loading_module(uploaded_file, transport_excel_file=None) -> None:
         )
 
     st.subheader('5. Platzierung / Automatik')
+    st.caption('Geometrisch mittige Ausrichtung ist fest aktiv. Die fertige Lage wird in X/Y mittig auf der Pritsche verschoben. Keine Gewichts-/Schwerpunktoptimierung.')
     col1, col2, col3, col4 = st.columns(4)
     allow_beside = col1.checkbox('Nebeneinander erlauben', value=True)
     allow_stack = col2.checkbox('Übereinander erlauben', value=True)
     allow_rotation = col3.checkbox('90° drehen erlauben, wenn Pritsche es erlaubt', value=False)
+    center_geometric = True
     max_fuhren = col4.number_input('Max. Fuhren Sicherheitslimit', min_value=1, max_value=200, value=50, step=1)
 
     placements_df, summary_df, platforms_used_df, fuhren_log_df = create_variant_a_loading_plan(
@@ -1862,6 +1951,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None) -> None:
         allow_beside=allow_beside,
         allow_stack=allow_stack,
         allow_rotation=allow_rotation,
+        center_geometric=center_geometric,
         max_fuhren=int(max_fuhren),
     )
 
