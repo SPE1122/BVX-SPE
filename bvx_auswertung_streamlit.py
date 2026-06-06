@@ -1244,8 +1244,16 @@ def create_loading_excel(
     bsd_header_df: Optional[pd.DataFrame] = None,
     bsd_matrix_df: Optional[pd.DataFrame] = None,
 ) -> bytes:
+    """Erstellt den Excel-Export.
+
+    Neben den Rohdaten wird pro belegter Pritsche ein optischer Ladeplan-BSD
+    als eigenes Excel-Blatt erzeugt. Dieses Blatt ist bewusst an die gelieferte
+    PB6-Vorlage angelehnt: Kopfbereich, Kontrolle, Ladeplan-Matrix,
+    Ladehöhe, Material/Bemerkungen und Gewichts-Etikette.
+    """
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        # Rohdatenblätter bleiben erhalten.
         parts_df.to_excel(writer, sheet_name='Bauteile', index=False)
         units_df.to_excel(writer, sheet_name='Verladeeinheiten', index=False)
         placements_df.to_excel(writer, sheet_name='Platzierung', index=False)
@@ -1258,9 +1266,327 @@ def create_loading_excel(
         if bsd_header_df is not None and not bsd_header_df.empty:
             bsd_header_df.to_excel(writer, sheet_name='Ladeplan_BSD_Kopf', index=False)
         if bsd_matrix_df is not None and not bsd_matrix_df.empty:
-            bsd_matrix_df.to_excel(writer, sheet_name='Ladeplan_BSD', index=False)
+            bsd_matrix_df.to_excel(writer, sheet_name='Ladeplan_BSD_Daten', index=False)
         if warnings_df is not None and not warnings_df.empty:
             warnings_df.to_excel(writer, sheet_name='Warnungen', index=False)
+
+        # Optische Ladeplan-BSD-Blätter erzeugen.
+        try:
+            from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
+            from openpyxl.utils import get_column_letter
+        except Exception:
+            # Falls openpyxl lokal nicht verfügbar ist, bleiben zumindest die Rohdaten erhalten.
+            return output.getvalue()
+
+        wb = writer.book
+
+        def sheet_safe_name(value: str) -> str:
+            cleaned = re.sub(r'[\\/*?:\[\]]', '_', str(value or 'Pritsche')).strip()
+            cleaned = cleaned.replace(' ', '_')
+            return cleaned[:31] or 'Pritsche'
+
+        def unique_sheet_name(base: str) -> str:
+            base = sheet_safe_name(base)
+            if base not in wb.sheetnames:
+                return base
+            for i in range(2, 100):
+                suffix = f'_{i}'
+                candidate = f'{base[:31-len(suffix)]}{suffix}'
+                if candidate not in wb.sheetnames:
+                    return candidate
+            return base[:28] + '_x'
+
+        def val(row: pd.Series, key: str, default: Any = '') -> Any:
+            try:
+                v = row.get(key, default)
+                if pd.isna(v):
+                    return default
+                return v
+            except Exception:
+                return default
+
+        def fmt_mm(value: Any) -> str:
+            try:
+                return f'{float(value):.0f}'
+            except Exception:
+                return '0'
+
+        def fmt_t(value_kg: Any) -> str:
+            try:
+                return f'{float(value_kg) / 1000:.2f}'
+            except Exception:
+                return '0.00'
+
+        # Farben ähnlich der Vorlage.
+        fill_cyan = PatternFill('solid', fgColor='CCFFFF')
+        fill_yellow = PatternFill('solid', fgColor='FFFF99')
+        fill_gray = PatternFill('solid', fgColor='C0C0C0')
+        fill_lightgray = PatternFill('solid', fgColor='E7E6E6')
+        fill_white = PatternFill('solid', fgColor='FFFFFF')
+        fill_hatch = PatternFill('darkTrellis', fgColor='999999', bgColor='FFFFFF')
+        thin = Side(style='thin', color='000000')
+        dotted = Side(style='dotted', color='000000')
+        border_thin = Border(left=thin, right=thin, top=thin, bottom=thin)
+        border_dotted = Border(left=dotted, right=dotted, top=dotted, bottom=dotted)
+        font_title = Font(name='Arial', size=14, bold=True)
+        font_head = Font(name='Arial', size=10, bold=True)
+        font_body = Font(name='Arial', size=9)
+        font_small = Font(name='Arial', size=8)
+
+        def style_range(ws, cell_range: str, fill=None, border=None, font=None, align=None):
+            for row_cells in ws[cell_range]:
+                for cell in row_cells:
+                    if fill is not None:
+                        cell.fill = fill
+                    if border is not None:
+                        cell.border = border
+                    if font is not None:
+                        cell.font = font
+                    if align is not None:
+                        cell.alignment = align
+
+        def set_box(ws, cell_range: str, fill=None):
+            style_range(
+                ws,
+                cell_range,
+                fill=fill,
+                border=border_thin,
+                font=font_body,
+                align=Alignment(horizontal='left', vertical='center', wrap_text=True),
+            )
+
+        def write_label(ws, cell: str, label: str, bold: bool = True):
+            ws[cell] = label
+            ws[cell].font = font_head if bold else font_body
+            ws[cell].alignment = Alignment(horizontal='left', vertical='center')
+
+        def add_styled_bsd_sheet(header: pd.Series, matrix: pd.DataFrame):
+            pname = str(val(header, 'Pritsche', 'Pritsche'))
+            ws = wb.create_sheet(unique_sheet_name(f'BSD_{pname}'))
+            ws.sheet_view.showGridLines = True
+            ws.freeze_panes = 'A13'
+
+            # Spaltenbreiten wie breiter Excel-Ladeplan.
+            widths = {
+                'A': 10, 'B': 10, 'C': 10, 'D': 10,
+                'E': 12, 'F': 12, 'G': 12, 'H': 12,
+                'I': 11, 'J': 11, 'K': 12,
+                'L': 2, 'M': 14, 'N': 14, 'O': 14, 'P': 14,
+            }
+            for col, width in widths.items():
+                ws.column_dimensions[col].width = width
+            for r in range(1, 45):
+                ws.row_dimensions[r].height = 18
+
+            # Kopf links.
+            ws.merge_cells('A2:B2')
+            ws.merge_cells('C2:D2')
+            ws.merge_cells('C3:D3')
+            set_box(ws, 'A2:D8')
+            write_label(ws, 'A2', 'Pritsche:')
+            ws['C2'] = pname
+            ws['C2'].font = font_title
+            ws['C2'].fill = fill_cyan
+            ws['C3'] = str(val(header, 'Pritschenname', '') or val(header, 'Fuhrenoption', ''))
+            ws['C3'].font = font_title
+            ws['C3'].fill = fill_yellow
+            write_label(ws, 'A6', 'Decke:')
+            ws['C6'] = ''
+            ws['C6'].fill = fill_cyan
+            write_label(ws, 'A7', 'Bauabschnitt:')
+            ws['C7'] = ''
+            ws['C7'].fill = fill_cyan
+            write_label(ws, 'A9', 'Sachbearbeiter:')
+            ws['C9'] = ''
+            write_label(ws, 'A10', 'Datum:')
+            ws['C10'] = datetime.now().strftime('%d.%m.%Y')
+            set_box(ws, 'A9:D10')
+
+            # Kopf Mitte.
+            set_box(ws, 'F2:K10')
+            write_label(ws, 'F2', 'Unternehmer:')
+            ws.merge_cells('I2:K2')
+            ws['I2'] = ''
+            ws['I2'].fill = fill_yellow
+            write_label(ws, 'F4', 'Pritschenhöhe:')
+            ws['I4'] = fmt_mm(val(header, 'Pritschenhöhe_mm', 0))
+            ws['I4'].fill = fill_cyan
+            ws['J4'] = 'mm'
+            write_label(ws, 'F5', 'Pritschenbreite:')
+            ws['I5'] = fmt_mm(val(header, 'Pritschenbreite_mm', 0))
+            ws['I5'].fill = fill_cyan
+            ws['J5'] = 'mm'
+            write_label(ws, 'F7', 'Frachthöhe:')
+            ws['I7'] = fmt_mm(val(header, 'Frachthöhe_mm', 0)); ws['J7'] = 'mm'
+            write_label(ws, 'F8', 'Höhe (gesamt):')
+            ws['I8'] = fmt_mm(val(header, 'Höhe_gesamt_mm', 0)); ws['J8'] = 'mm'
+            write_label(ws, 'F9', 'Länge (gesamt):')
+            ws['I9'] = fmt_mm(val(header, 'Länge_gesamt_mm', 0)); ws['J9'] = 'mm'
+            write_label(ws, 'F10', 'Breite (gesamt):')
+            ws['I10'] = fmt_mm(val(header, 'Breite_gesamt_mm', 0)); ws['J10'] = 'mm'
+            write_label(ws, 'F11', 'Ladegewicht (gesamt):')
+            ws['I11'] = fmt_t(val(header, 'Ladegewicht_kg', 0)); ws['J11'] = 'to'
+            set_box(ws, 'F11:K11')
+
+            # Kontrolle rechts.
+            set_box(ws, 'M2:P10')
+            ws.merge_cells('M2:P2')
+            ws['M2'] = 'Kontrolle Root'
+            ws['M2'].font = font_title
+            write_label(ws, 'M4', 'Datum / Visum:')
+            write_label(ws, 'M7', 'Frachthöhe:')
+            write_label(ws, 'M8', 'Überhang vorne:')
+            write_label(ws, 'M9', 'Länge (gesamt):')
+            write_label(ws, 'M10', 'Überhang hinten:')
+            write_label(ws, 'M11', 'Überbreite:')
+            set_box(ws, 'M11:P11')
+            for r in range(7, 12):
+                ws[f'P{r}'] = 'mm'
+
+            # Matrix Kopf.
+            start_row = 14
+            ws.merge_cells(start_row=13, start_column=1, end_row=13, end_column=4)
+            ws.cell(13, 1).value = 'Je 2 Elemente nebeneinander angeordnet'
+            ws.cell(13, 1).font = font_head
+            ws.cell(13, 1).alignment = Alignment(horizontal='center')
+
+            headers = [
+                'Vorne links', 'Vorne rechts', 'Hinten links', 'Hinten rechts',
+                'Bemerkung\nVorne links', 'Bemerkung\nVorne rechts', 'Bemerkung\nHinten links', 'Bemerkung\nHinten rechts',
+                'Höhe (mm)', 'Breite (mm)', 'Gesamtlänge'
+            ]
+            for idx, h in enumerate(headers, start=1):
+                c = ws.cell(start_row, idx)
+                c.value = h
+                c.font = font_small if idx <= 8 else font_head
+                c.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+                c.border = border_thin
+                c.fill = fill_yellow if idx in [1, 2, 3, 4, 9] else fill_white
+            ws.row_dimensions[start_row].height = 28
+
+            # Etwas leere Rasterfläche oberhalb der tatsächlichen Lagen wie in Vorlage.
+            data_row = start_row + 1
+            max_rows = max(18, len(matrix) + 8)
+            for r in range(data_row, data_row + max_rows):
+                for c in range(1, 12):
+                    ws.cell(r, c).border = border_dotted
+                    ws.cell(r, c).font = font_small
+                    ws.cell(r, c).alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+                    if c <= 4:
+                        ws.cell(r, c).fill = fill_yellow
+                    elif c <= 8:
+                        ws.cell(r, c).fill = fill_white
+                    else:
+                        ws.cell(r, c).fill = fill_white
+
+            # Matrixdaten an den unteren Teil setzen, dadurch ähnelt es dem Beispiel optisch.
+            write_start = data_row + max(0, max_rows - len(matrix) - 1)
+            if matrix is not None and not matrix.empty:
+                for i, (_, mrow) in enumerate(matrix.iterrows(), start=write_start):
+                    row_values = [
+                        mrow.get('Vorne links', ''), mrow.get('Vorne rechts', ''),
+                        mrow.get('Hinten links', ''), mrow.get('Hinten rechts', ''),
+                        mrow.get('Bemerkung vorne links', ''), mrow.get('Bemerkung vorne rechts', ''),
+                        mrow.get('Bemerkung hinten links', ''), mrow.get('Bemerkung hinten rechts', ''),
+                        fmt_mm(mrow.get('Höhe_mm', 0)), fmt_mm(mrow.get('Breite_mm', 0)), fmt_mm(mrow.get('Gesamtlänge_mm', 0)),
+                    ]
+                    for c, value in enumerate(row_values, start=1):
+                        cell = ws.cell(i, c)
+                        cell.value = value
+                        cell.font = Font(name='Arial', size=8, bold=(c <= 4))
+                        cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+                        cell.border = border_dotted
+                    ws.row_dimensions[i].height = 22
+
+            # Ladehöhe/Statuszeile.
+            footer_row = data_row + max_rows
+            ws.cell(footer_row, 1).value = 'Ladehöhe:'
+            ws.cell(footer_row, 1).font = font_head
+            for c in range(2, 5):
+                ws.cell(footer_row, c).value = fmt_mm(val(header, 'Frachthöhe_mm', 0))
+            ws.merge_cells(start_row=footer_row, start_column=5, end_row=footer_row, end_column=8)
+            ws.cell(footer_row, 5).value = f"Gesamtgewicht ca.: {fmt_t(val(header, 'Ladegewicht_kg', 0))} Tonnen"
+            ws.cell(footer_row, 5).font = font_head
+            ws.cell(footer_row, 9).value = fmt_mm(val(header, 'Höhe_gesamt_mm', 0))
+            ws.cell(footer_row, 10).value = fmt_mm(val(header, 'Breite_gesamt_mm', 0))
+            ws.cell(footer_row, 11).value = fmt_mm(val(header, 'Länge_gesamt_mm', 0))
+            style_range(ws, f'A{footer_row}:K{footer_row}', fill=fill_gray, border=border_thin, font=font_small, align=Alignment(horizontal='center'))
+
+            # Graue Ladehöhen-Kästchen.
+            box_top = footer_row + 1
+            for c1, c2 in [(2, 2), (9, 9)]:
+                ws.merge_cells(start_row=box_top, start_column=c1, end_row=box_top + 2, end_column=c2)
+                cell = ws.cell(box_top, c1)
+                cell.value = fmt_mm(val(header, 'Frachthöhe_mm', 0))
+                cell.fill = fill_gray
+                cell.border = border_thin
+                cell.alignment = Alignment(horizontal='center', vertical='top')
+
+            # Untere Bereiche.
+            lower_top = footer_row + 4
+            ws.merge_cells(start_row=lower_top, start_column=1, end_row=lower_top, end_column=4)
+            ws.cell(lower_top, 1).value = 'Zusätzliches Verlade-Material:'
+            ws.cell(lower_top, 1).font = font_head
+            ws.merge_cells(start_row=lower_top, start_column=6, end_row=lower_top, end_column=11)
+            ws.cell(lower_top, 6).value = 'Bemerkungen:'
+            ws.cell(lower_top, 6).font = font_head
+            for r in range(lower_top, lower_top + 7):
+                for c in range(1, 12):
+                    ws.cell(r, c).border = border_thin if r == lower_top else border_dotted
+
+            # Gewichtsetikette rechts unten.
+            ws.merge_cells(start_row=15, start_column=13, end_row=footer_row + 3, end_column=16)
+            ws.cell(15, 13).fill = fill_hatch
+            ws.cell(15, 13).border = border_thin
+            ws.merge_cells(start_row=footer_row + 4, start_column=13, end_row=footer_row + 4, end_column=16)
+            ws.cell(footer_row + 4, 13).value = 'Gewichts-Etikette:'
+            ws.cell(footer_row + 4, 13).font = font_head
+            ws.cell(footer_row + 4, 13).alignment = Alignment(horizontal='center')
+            ws.merge_cells(start_row=footer_row + 5, start_column=13, end_row=lower_top + 6, end_column=16)
+            ws.cell(footer_row + 5, 13).fill = fill_hatch
+            ws.cell(footer_row + 5, 13).border = border_thin
+
+            # Rahmen / allgemeine Formatierung.
+            for row in ws.iter_rows(min_row=1, max_row=lower_top + 6, min_col=1, max_col=16):
+                for cell in row:
+                    if cell.font == Font():
+                        cell.font = font_body
+            ws.page_setup.orientation = 'landscape'
+            ws.page_setup.paperSize = ws.PAPERSIZE_A3
+            ws.page_margins.left = 0.25
+            ws.page_margins.right = 0.25
+            ws.page_margins.top = 0.25
+            ws.page_margins.bottom = 0.25
+            ws.print_area = f'A1:P{lower_top + 6}'
+            ws.sheet_properties.pageSetUpPr.fitToPage = True
+            ws.page_setup.fitToWidth = 1
+            ws.page_setup.fitToHeight = 1
+
+        if bsd_header_df is not None and not bsd_header_df.empty and bsd_matrix_df is not None and not bsd_matrix_df.empty:
+            for _, header in bsd_header_df.iterrows():
+                pname = str(val(header, 'Pritsche', ''))
+                matrix = bsd_matrix_df[bsd_matrix_df['Pritsche'].astype(str) == pname].copy()
+                add_styled_bsd_sheet(header, matrix)
+
+        # Rohdatenblätter etwas lesbarer machen.
+        for ws in wb.worksheets:
+            if ws.title.startswith('BSD_'):
+                continue
+            for col in ws.columns:
+                max_len = 0
+                col_letter = get_column_letter(col[0].column)
+                for cell in col[:50]:
+                    try:
+                        max_len = max(max_len, len(str(cell.value)) if cell.value is not None else 0)
+                    except Exception:
+                        pass
+                ws.column_dimensions[col_letter].width = min(max(max_len + 2, 10), 40)
+            if ws.max_row >= 1:
+                for cell in ws[1]:
+                    cell.font = font_head
+                    cell.fill = fill_lightgray
+                    cell.border = border_thin
+
     return output.getvalue()
 
 
