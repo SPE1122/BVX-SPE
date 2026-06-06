@@ -2,13 +2,15 @@
 BVX Auswertung + Verladeplanung - Streamlit Version
 
 Installation:
-    pip install streamlit pandas plotly openpyxl reportlab
+    pip install streamlit pandas plotly openpyxl
 
 Ausführen:
-    streamlit run bvx_auswertung_streamlit_verladung.py
+    streamlit run bvx_auswertung_streamlit_verladung_varianteA_excel_hauptausgabe.py
 
 Hinweis:
     Die Verladeplanung ist als grober, eigenständiger Modulbereich aufgebaut.
+    Hauptausgabe ist der Excel-Verladeplan im BSD-/Pritschenzettel-Stil.
+    PDF ist nur optional und benötigt reportlab.
     Die Transportabmessungen sind Beispiel-/Stammdaten und müssen intern geprüft und angepasst werden.
 """
 
@@ -2640,7 +2642,7 @@ def render_analysis_module(uploaded_file) -> None:
         col2.info(f"**Breite:** {dims['width']:.1f} mm")
         col3.info(f"**Höhe:** {dims['height']:.1f} mm")
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(['Bauteile', 'Operationstabelle', 'Diagramme', 'Positionsübersicht', 'Export'])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(['Bauteile', 'Operationstabelle', 'Diagramme', 'Positionsübersicht', 'Excel Export'])
 
     with tab1:
         st.subheader('Bauteilliste')
@@ -2985,7 +2987,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None) -> None:
     edited_summary_df = recompute_summary_from_placements(edited_placements_df, platforms_used_df) if not platforms_used_df.empty else summary_df
     warnings_plan_df = compute_loading_warnings(edited_placements_df, platforms_used_df)
 
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(['Verladeeinheiten', 'Fuhrenübersicht', 'Platzierung / manuell', 'Ladeplan BSD', 'Warnungen', 'Ansichten', 'Export'])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(['Verladeeinheiten', 'Fuhrenübersicht', 'Platzierung / manuell', 'Ladeplan BSD', 'Warnungen', 'Ansichten', 'Excel Export'])
 
     with tab1:
         st.dataframe(units_df, use_container_width=True, hide_index=True)
@@ -3101,6 +3103,13 @@ def render_loading_module(uploaded_file, transport_excel_file=None) -> None:
         if 'bsd_header_df' not in locals() or 'bsd_matrix_df' not in locals():
             bsd_header_df, bsd_matrix_df = create_all_bsd_matrices(edited_placements_df, platforms_used_df, edited_summary_df, warnings_plan_df, project_meta=project_meta)
 
+        st.subheader('Excel-Verladeplan')
+        st.info(
+            'Hauptausgabe ist der Excel-Verladeplan. Pro belegter Pritsche wird ein eigenes '
+            'optisches BSD-/Pritschenzettel-Blatt erzeugt. Die Datei kann in Excel geöffnet, '
+            'bearbeitet und direkt gedruckt oder über Excel als PDF gespeichert werden.'
+        )
+
         excel_data = create_loading_excel(
             sorted_parts,
             units_df,
@@ -3115,33 +3124,38 @@ def render_loading_module(uploaded_file, transport_excel_file=None) -> None:
             project_meta=project_meta,
         )
         st.download_button(
-            label='Verladeplanung als Excel herunterladen',
+            label='Excel-Verladeplan herunterladen',
             data=excel_data,
-            file_name=f"{uploaded_file.name.replace('.bvx', '').replace('.BVX', '')}_verladeplanung.xlsx",
+            file_name=f"{uploaded_file.name.replace('.bvx', '').replace('.BVX', '')}_verladeplan_bsd.xlsx",
             mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            type='primary',
         )
 
-        try:
-            pdf_data = create_loading_pdf(
-                edited_placements_df,
-                platforms_used_df,
-                edited_summary_df,
-                warnings_plan_df,
-                project_name=uploaded_file.name,
-                project_meta=project_meta,
-            )
-            st.download_button(
-                label='A3-Pritschenplan als PDF herunterladen',
-                data=pdf_data,
-                file_name=f"{uploaded_file.name.replace('.bvx', '').replace('.BVX', '')}_pritschenplan.pdf",
-                mime='application/pdf',
-            )
-        except RuntimeError as exc:
-            st.warning(str(exc))
+        with st.expander('Optional: PDF-Export', expanded=False):
+            st.caption('PDF ist nicht die Hauptausgabe. Dafür muss reportlab installiert sein: pip install reportlab')
+            if st.button('PDF jetzt erzeugen'):
+                try:
+                    pdf_data = create_loading_pdf(
+                        edited_placements_df,
+                        platforms_used_df,
+                        edited_summary_df,
+                        warnings_plan_df,
+                        project_name=uploaded_file.name,
+                        project_meta=project_meta,
+                    )
+                    st.download_button(
+                        label='A3-Pritschenplan als PDF herunterladen',
+                        data=pdf_data,
+                        file_name=f"{uploaded_file.name.replace('.bvx', '').replace('.BVX', '')}_pritschenplan.pdf",
+                        mime='application/pdf',
+                    )
+                except RuntimeError as exc:
+                    st.warning(str(exc))
 
         st.markdown('''
-        **Hinweis:** Diese Version erstellt einen automatischen Grobvorschlag mit Variante A.
-        Manuelles Umplatzieren erfolgt über die Platzierungstabelle. Drag-and-drop ist nicht enthalten.
+        **Hinweis:** Diese Version erstellt den Excel-Verladeplan als Hauptausgabe.
+        Die PDF-Ausgabe ist nur optional. Manuelles Umplatzieren erfolgt über die Platzierungstabelle.
+        Drag-and-drop ist nicht enthalten.
         ''')
 
 
