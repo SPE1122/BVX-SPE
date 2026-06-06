@@ -720,6 +720,36 @@ def make_bundle_signature(row: pd.Series, same_height: bool, same_width: bool, s
     return tuple(signature)
 
 
+def _format_label_value(value: Any) -> str:
+    """Formatiert Werte für die Anzeige in Ansichten und Pritschenplan."""
+    if value is None:
+        return ''
+    try:
+        if pd.isna(value):
+            return ''
+    except Exception:
+        pass
+    if isinstance(value, (int, float)):
+        val = float(value)
+        if abs(val - round(val)) < 0.001:
+            return str(int(round(val)))
+        return f'{val:.2f}'.rstrip('0').rstrip('.')
+    text = str(value).strip()
+    if text.lower() == 'nan':
+        return ''
+    return text
+
+
+def _part_display_label(row: pd.Series, label_attr: str) -> str:
+    """Liefert den Wert des ausgewählten Hauptattributes für die visuelle Ansicht."""
+    label = _format_label_value(row.get(label_attr)) if label_attr else ''
+    if not label:
+        label = _format_label_value(row.get('Bauteilnummer'))
+    if not label:
+        label = _format_label_value(row.get('Name'))
+    return label or 'Bauteil'
+
+
 def build_loading_units(
     sorted_parts: pd.DataFrame,
     use_bundles: bool,
@@ -730,6 +760,7 @@ def build_loading_units(
     same_width: bool,
     same_quality: bool,
     same_profile: bool,
+    label_attr: str = 'Bauteilnummer',
 ) -> pd.DataFrame:
     """Erzeugt Verladeeinheiten: einzelnes Bauteil oder Bund."""
     if sorted_parts.empty:
@@ -739,12 +770,17 @@ def build_loading_units(
 
     if not use_bundles:
         for idx, row in sorted_parts.iterrows():
+            default_label = str(row.get('Bauteilnummer') or row.get('Name'))
+            view_label = _part_display_label(row, label_attr)
             units.append({
                 'Einheit_ID': f'E{idx + 1:03d}',
                 'Typ': 'Bauteil',
                 'Anzahl_Bauteile': 1,
-                'Bauteile': row.get('Bauteilnummer') or row.get('Name'),
-                'Bauteile_Liste': str(row.get('Bauteilnummer') or row.get('Name')),
+                'Bauteile': default_label,
+                'Bauteile_Liste': default_label,
+                'Ansicht_Attribut': label_attr,
+                'Ansicht_Label': view_label,
+                'Ansicht_Liste': view_label,
                 'Einzellängen_mm': str(row['Länge_mm']),
                 'Einzelbreiten_mm': str(row['Breite_mm']),
                 'Einzelhöhen_mm': str(row['Höhe_mm']),
@@ -774,6 +810,12 @@ def build_loading_units(
         volume = sum(float(r['Volumen_m3']) for r in current_rows)
         weight = sum(float(r['Gewicht_kg']) for r in current_rows)
         part_labels = [str(r.get('Bauteilnummer') or r.get('Name')) for r in current_rows]
+        view_labels = [_part_display_label(r, label_attr) for r in current_rows]
+        view_list = '|'.join(view_labels)
+        if len(view_labels) <= 3:
+            view_label = ', '.join(view_labels)
+        else:
+            view_label = ', '.join(view_labels[:3]) + ' ...'
         part_lengths = [str(float(r['Länge_mm'])) for r in current_rows]
         part_widths = [str(float(r['Breite_mm'])) for r in current_rows]
         part_heights = [str(float(r['Höhe_mm'])) for r in current_rows]
@@ -783,6 +825,9 @@ def build_loading_units(
             'Anzahl_Bauteile': count,
             'Bauteile': ', '.join(part_labels),
             'Bauteile_Liste': '|'.join(part_labels),
+            'Ansicht_Attribut': label_attr,
+            'Ansicht_Label': view_label,
+            'Ansicht_Liste': view_list,
             'Einzellängen_mm': '|'.join(part_lengths),
             'Einzelbreiten_mm': '|'.join(part_widths),
             'Einzelhöhen_mm': '|'.join(part_heights),
@@ -833,6 +878,7 @@ def init_platform_state(row: pd.Series, base_wood_height: float, layer_spacer_he
         'Eff_Länge_mm': float(row['Länge_mm']) + float(row['Überhang_vorne_mm']) + float(row['Überhang_hinten_mm']),
         'base_wood_height': float(base_height),
         'layer_spacer_height': float(layer_height),
+        'general_spacer_height': float(row.get('Einlage_allgemein_mm', 0.0) or 0.0),
         'gap_length': float(gap_length),
         'allow_rotation_platform': yes_no_to_bool(row.get('Drehen_90_erlaubt', False)),
         'current_x': 0.0,
@@ -882,6 +928,9 @@ def commit_place(
         'Anzahl_Bauteile': int(unit['Anzahl_Bauteile']),
         'Bauteile': unit['Bauteile'],
         'Bauteile_Liste': unit.get('Bauteile_Liste', unit.get('Bauteile', '')),
+        'Ansicht_Attribut': unit.get('Ansicht_Attribut', ''),
+        'Ansicht_Label': unit.get('Ansicht_Label', unit.get('Einheit_ID', '')),
+        'Ansicht_Liste': unit.get('Ansicht_Liste', unit.get('Ansicht_Label', '')),
         'Einzellängen_mm': unit.get('Einzellängen_mm', ''),
         'Einzelbreiten_mm': unit.get('Einzelbreiten_mm', ''),
         'Einzelhöhen_mm': unit.get('Einzelhöhen_mm', ''),
@@ -950,7 +999,8 @@ def try_place_unit(
         if allow_stack and state['layer_max_height'] > 0:
             x = 0.0
             y = 0.0
-            z = state['current_z'] + state['layer_max_height'] + state['layer_spacer_height']
+            effective_layer_spacer = max(float(state.get('layer_spacer_height', 0.0)), float(state.get('general_spacer_height', 0.0)))
+            z = state['current_z'] + state['layer_max_height'] + effective_layer_spacer
             if can_place(state, x, y, z, use_length, use_width, height, weight):
                 state['current_x'] = 0.0
                 state['current_y'] = 0.0
@@ -1004,6 +1054,9 @@ def create_loading_plan(
                 'Anzahl_Bauteile': int(unit['Anzahl_Bauteile']),
                 'Bauteile': unit['Bauteile'],
                 'Bauteile_Liste': unit.get('Bauteile_Liste', unit.get('Bauteile', '')),
+                'Ansicht_Attribut': unit.get('Ansicht_Attribut', ''),
+                'Ansicht_Label': unit.get('Ansicht_Label', unit.get('Einheit_ID', '')),
+                'Ansicht_Liste': unit.get('Ansicht_Liste', unit.get('Ansicht_Label', '')),
                 'Einzellängen_mm': unit.get('Einzellängen_mm', ''),
                 'Einzelbreiten_mm': unit.get('Einzelbreiten_mm', ''),
                 'Einzelhöhen_mm': unit.get('Einzelhöhen_mm', ''),
@@ -1191,10 +1244,11 @@ def create_variant_a_loading_plan(
             if trip_platforms.empty:
                 continue
             trip_platforms = trip_platforms.copy()
-            if 'Einlage_allgemein_mm' not in trip_platforms.columns:
-                trip_platforms['Einlage_allgemein_mm'] = general_default
-            else:
-                trip_platforms['Einlage_allgemein_mm'] = trip_platforms['Einlage_allgemein_mm'].apply(lambda v: safe_number(v, general_default))
+            # Die aktuellen App-Einstellungen sind führend. Damit erscheinen keine alten
+            # Einlagewerte aus einer Excel-Stammdatendatei im Pritschenzettel.
+            trip_platforms['Kantholz_erste_Lage_mm'] = base_default
+            trip_platforms['Einlage_zwischen_Lagen_mm'] = layer_default
+            trip_platforms['Einlage_allgemein_mm'] = general_default
 
             placements_try, summary_try = create_loading_plan(
                 remaining,
@@ -1245,6 +1299,9 @@ def create_variant_a_loading_plan(
                 'Anzahl_Bauteile': int(unit['Anzahl_Bauteile']),
                 'Bauteile': unit['Bauteile'],
                 'Bauteile_Liste': unit.get('Bauteile_Liste', unit.get('Bauteile', '')),
+                'Ansicht_Attribut': unit.get('Ansicht_Attribut', ''),
+                'Ansicht_Label': unit.get('Ansicht_Label', unit.get('Einheit_ID', '')),
+                'Ansicht_Liste': unit.get('Ansicht_Liste', unit.get('Ansicht_Label', '')),
                 'Einzellängen_mm': unit.get('Einzellängen_mm', ''),
                 'Einzelbreiten_mm': unit.get('Einzelbreiten_mm', ''),
                 'Einzelhöhen_mm': unit.get('Einzelhöhen_mm', ''),
@@ -1632,6 +1689,23 @@ def create_loading_excel(
     return output.getvalue()
 
 
+def _view_label(row: pd.Series) -> str:
+    label = _format_label_value(row.get('Ansicht_Label'))
+    if not label:
+        label = _format_label_value(row.get('Bauteile'))
+    if not label:
+        label = _format_label_value(row.get('Einheit_ID'))
+    if str(row.get('Typ', '')).strip() == 'Bund':
+        liste = _split_bsd_text_list(row.get('Ansicht_Liste', ''), label)
+        if len(liste) > 3:
+            label = ', '.join(liste[:3]) + ' ...'
+        elif liste:
+            label = ', '.join(liste)
+        # Plotly-Zeilenumbruch
+        return str(label).replace(', ', '<br>')
+    return str(label)
+
+
 def draw_loading_view(placements_df: pd.DataFrame, platforms_df: pd.DataFrame, platform_name: str, view: str) -> go.Figure:
     """Zeichnet Draufsicht, Seitenansicht oder Rückansicht der ausgewählten Pritsche.
 
@@ -1679,7 +1753,7 @@ def draw_loading_view(placements_df: pd.DataFrame, platforms_df: pd.DataFrame, p
             x0, y0 = float(row['X_mm']), float(row['Y_mm'])
             x1, y1 = x0 + float(row['Länge_mm']), y0 + float(row['Breite_mm'])
             fig.add_shape(type='rect', x0=x0, y0=y0, x1=x1, y1=y1, line=dict(width=1), fillcolor='rgba(100,100,100,0.28)')
-            fig.add_annotation(x=(x0 + x1) / 2, y=(y0 + y1) / 2, text=str(row['Einheit_ID']), showarrow=False, font=dict(size=10))
+            fig.add_annotation(x=(x0 + x1) / 2, y=(y0 + y1) / 2, text=_view_label(row), showarrow=False, font=dict(size=10))
         fig.update_xaxes(range=[0, max(eff_length, 1)], constrain='domain')
         fig.update_yaxes(range=[0, max(width, 1)], scaleanchor='x', scaleratio=1)
 
@@ -1696,7 +1770,7 @@ def draw_loading_view(placements_df: pd.DataFrame, platforms_df: pd.DataFrame, p
             x0, z0 = float(row['X_mm']), float(row['Z_mm'])
             x1, z1 = x0 + float(row['Länge_mm']), z0 + float(row['Höhe_mm'])
             fig.add_shape(type='rect', x0=x0, y0=z0, x1=x1, y1=z1, line=dict(width=1), fillcolor='rgba(100,100,100,0.28)')
-            fig.add_annotation(x=(x0 + x1) / 2, y=(z0 + z1) / 2, text=str(row['Einheit_ID']), showarrow=False, font=dict(size=10))
+            fig.add_annotation(x=(x0 + x1) / 2, y=(z0 + z1) / 2, text=_view_label(row), showarrow=False, font=dict(size=10))
         fig.update_xaxes(range=[0, max(eff_length, 1)], constrain='domain')
         fig.update_yaxes(range=[0, max(max_height, 1)])
 
@@ -1713,7 +1787,7 @@ def draw_loading_view(placements_df: pd.DataFrame, platforms_df: pd.DataFrame, p
             y0, z0 = float(row['Y_mm']), float(row['Z_mm'])
             y1, z1 = y0 + float(row['Breite_mm']), z0 + float(row['Höhe_mm'])
             fig.add_shape(type='rect', x0=y0, y0=z0, x1=y1, y1=z1, line=dict(width=1), fillcolor='rgba(100,100,100,0.28)')
-            fig.add_annotation(x=(y0 + y1) / 2, y=(z0 + z1) / 2, text=str(row['Einheit_ID']), showarrow=False, font=dict(size=10))
+            fig.add_annotation(x=(y0 + y1) / 2, y=(z0 + z1) / 2, text=_view_label(row), showarrow=False, font=dict(size=10))
         fig.update_xaxes(range=[0, max(width, 1)], constrain='domain')
         fig.update_yaxes(range=[0, max(max_height, 1)])
 
@@ -1944,7 +2018,12 @@ def _split_bsd_number_list(value: Any, count: int, fallback_total: float, spacer
 
 
 def _fmt_bsd_mm_label(prefix: str, value: float) -> str:
-    return f'{prefix} {safe_number(value):.0f}'.strip()
+    v = safe_number(value)
+    if abs(v - round(v)) < 0.001:
+        text = f'{v:.0f}'
+    else:
+        text = f'{v:.2f}'.rstrip('0').rstrip('.')
+    return f'{prefix} {text}'.strip()
 
 
 def create_bsd_matrix_for_platform(
@@ -1957,7 +2036,7 @@ def create_bsd_matrix_for_platform(
     Neu:
     - Kantholz erste Lage wird als eigene unterste Zeile angezeigt.
     - Bundeinlagen/Lagenholz werden als eigene Einlage-Zeilen angezeigt.
-    - Einlage allgemein wird zwischen jedem Bauteil im Bund angezeigt, falls > 0.
+    - Einlage allgemein wird zwischen einzelnen gestapelten Bauteilen und innerhalb eines Bundes angezeigt, falls > 0.
     - Bei Bund-Verladung werden die einzelnen Bauteile des Bundes separat angezeigt.
 
     Die Matrix teilt die Pritsche in vier Bereiche auf:
@@ -2019,7 +2098,7 @@ def create_bsd_matrix_for_platform(
             labels = [_format_bsd_cell(row)]
         if typ != 'Bund' or count <= 1:
             label = labels[0] if labels else _format_bsd_cell(row)
-            remark = f"{safe_number(row.get('Länge_mm')):.0f}x{safe_number(row.get('Breite_mm')):.0f}x{safe_number(row.get('Höhe_mm')):.0f} mm"
+            remark = ''
             add_entry(row['Z_mm'], slot, label, 'Bauteil', row['Höhe_mm'], row['Länge_mm'], row['Breite_mm'], row['Gewicht_kg'], remark)
             continue
 
@@ -2037,13 +2116,13 @@ def create_bsd_matrix_for_platform(
             ph = safe_number(part_heights[i] if i < len(part_heights) else row['Höhe_mm'])
             pl = safe_number(part_lengths[i] if i < len(part_lengths) else row['Länge_mm'])
             pw = safe_number(part_widths[i] if i < len(part_widths) else row['Breite_mm'])
-            remark = f"Bund {row.get('Einheit_ID', '')}: {pl:.0f}x{pw:.0f}x{ph:.0f} mm"
+            remark = ''
             add_entry(z_cursor, slot, label, 'Bund-Bauteil', ph, pl, pw, part_weight, remark)
             z_cursor += ph
             if i < count - 1 and internal_spacer > 0:
                 spacer_label = 'Einlage allgemein' if safe_number(row.get('Einlage_allgemein_mm'), platform_general_spacer) > 0 else 'Einlage'
                 spacer_kind = 'Einlage allgemein' if spacer_label == 'Einlage allgemein' else 'Bund-Einlage'
-                spacer_remark = 'Einlage zwischen jedem Bauteil' if spacer_label == 'Einlage allgemein' else 'Bundeinlage / Lagenholz'
+                spacer_remark = ''
                 add_entry(z_cursor, slot, _fmt_bsd_mm_label(spacer_label, internal_spacer), spacer_kind, internal_spacer, row['Länge_mm'], row['Breite_mm'], 0.0, spacer_remark)
                 z_cursor += internal_spacer
 
@@ -2051,19 +2130,22 @@ def create_bsd_matrix_for_platform(
     if base_height > 0:
         for slot, has_load in slot_has_load.items():
             if has_load:
-                add_entry(0.0, slot, _fmt_bsd_mm_label('Kantholz', base_height), 'Kantholz erste Lage', base_height, eff_length, platform_width, 0.0, 'Unterlage auf Pritsche')
+                add_entry(0.0, slot, _fmt_bsd_mm_label('Kantholz', base_height), 'Kantholz erste Lage', base_height, eff_length, platform_width, 0.0, '')
 
-    # Zusätzliche Lagenholz-Zeilen zwischen separaten Lagen anzeigen.
-    if spacer_height > 0:
+    # Zusätzliche Einlage-Zeilen zwischen separaten Lagen anzeigen.
+    effective_layer_spacer = spacer_height if spacer_height > 0 else platform_general_spacer
+    if effective_layer_spacer > 0:
         layer_z_values = sorted({round(float(v), 1) for v in rows['Z_mm'].tolist() if float(v) > base_height + 0.1})
         existing_spacer_keys = {(round(e['z'], 1), e['slot']) for e in entries if 'Einlage' in e['kind']}
+        spacer_label = 'Einlage' if spacer_height > 0 else 'Einlage allgemein'
+        spacer_kind = 'Lagenholz' if spacer_height > 0 else 'Einlage allgemein'
         for z_val in layer_z_values:
             layer_rows = rows[rows['Z_mm'].round(1) == z_val].copy()
             for _, lrow in layer_rows.iterrows():
                 slot = _position_slot_for_bsd(lrow, eff_length, platform_width)
-                z_spacer = round(max(0.0, z_val - spacer_height), 1)
+                z_spacer = round(max(0.0, z_val - effective_layer_spacer), 1)
                 if (z_spacer, slot) not in existing_spacer_keys:
-                    add_entry(z_spacer, slot, _fmt_bsd_mm_label('Einlage', spacer_height), 'Lagenholz', spacer_height, lrow['Länge_mm'], lrow['Breite_mm'], 0.0, 'Einlage zwischen Lagen')
+                    add_entry(z_spacer, slot, _fmt_bsd_mm_label(spacer_label, effective_layer_spacer), spacer_kind, effective_layer_spacer, lrow['Länge_mm'], lrow['Breite_mm'], 0.0, '')
 
     if not entries:
         return pd.DataFrame(columns=columns)
@@ -2214,7 +2296,7 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
         c.rect(rx, ry, rw, rh, stroke=1, fill=1)
         c.setFillColor(colors.black)
         c.setFont('Helvetica', 5)
-        label = str(row.get('Einheit_ID', ''))[:12]
+        label = str(_view_label(row)).replace('<br>', ' ')[:24]
         c.drawCentredString(rx + rw / 2, ry + rh / 2, label)
 
 
@@ -2664,11 +2746,11 @@ def render_loading_module(uploaded_file, transport_excel_file=None) -> None:
         st.dataframe(sorted_parts, use_container_width=True, hide_index=True)
 
     st.subheader('3. Bund- und Unterlegholz-Einstellungen')
-    st.caption('Kantholz = liegt direkt auf der Pritsche und zählt zur Frachthöhe. Bundeinlage/Lagenholz = Einlage zwischen Bunden/Lagen. Einlage allgemein = zusätzliche Einlage zwischen jedem einzelnen Bauteil im Bund.')
+    st.caption('Kantholz = liegt direkt auf der Pritsche und zählt zur Frachthöhe. Bundeinlage/Lagenholz = Einlage zwischen Bunden/Lagen. Einlage allgemein = Einlage zwischen einzelnen Bauteilen; sie wird auch bei gestapelten Einzelbauteilen berücksichtigt.')
     col1, col2, col3, col4 = st.columns(4)
     base_wood_height = col1.number_input('Standard Kantholz erste Lage mm', min_value=0.0, max_value=300.0, value=float(default_base_wood), step=5.0)
     bundle_spacer_height = col2.number_input('Standard Bundeinlage / Lagenholz mm', min_value=0.0, max_value=200.0, value=float(default_layer_spacer), step=5.0)
-    general_spacer_height = col3.number_input('Einlage allgemein zwischen jedem Bauteil mm', min_value=0.0, max_value=200.0, value=float(default_general_spacer), step=5.0, help='0 = aus. Wenn grösser 0, wird zwischen jedem Bauteil im Bund eine Einlage eingezeichnet und in der Höhe berücksichtigt.')
+    general_spacer_height = col3.number_input('Einlage allgemein zwischen jedem Bauteil mm', min_value=0.0, max_value=200.0, value=float(default_general_spacer), step=5.0, help='0 = aus. Wenn grösser 0, wird die Einlage zwischen gestapelten Einzelbauteilen und innerhalb eines Bundes eingezeichnet und in der Höhe berücksichtigt.')
     gap_length = col4.number_input('Längenversatz je Lage mm', min_value=0.0, max_value=500.0, value=float(default_gap), step=10.0)
 
     # Standards werden für die Berechnung aktualisiert. Pritschenwerte aus Excel überschreiben diese Defaults pro Pritsche.
@@ -2695,6 +2777,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None) -> None:
         same_width=same_width,
         same_quality=same_quality,
         same_profile=same_profile,
+        label_attr=main_attr,
     )
 
     st.subheader('4. Fuhrenoptionen und Pritschen aus Excel')
@@ -2732,6 +2815,14 @@ def render_loading_module(uploaded_file, transport_excel_file=None) -> None:
             },
             key='pritschen_editor_excel',
         )
+
+    # Aktuelle Unterlegholz-Einstellungen global auf alle Pritschen anwenden.
+    # Damit überschreiben die Eingabefelder veraltete Werte aus der Excel-Stammdatendatei.
+    if not pritschen_edit.empty:
+        pritschen_edit = pritschen_edit.copy()
+        pritschen_edit['Kantholz_erste_Lage_mm'] = float(base_wood_height)
+        pritschen_edit['Einlage_zwischen_Lagen_mm'] = float(bundle_spacer_height)
+        pritschen_edit['Einlage_allgemein_mm'] = float(general_spacer_height)
 
     st.subheader('5. Platzierung / Automatik')
     st.caption('Geometrisch mittige Ausrichtung ist fest aktiv. Die fertige Lage wird in X/Y mittig auf der Pritsche verschoben. Keine Gewichts-/Schwerpunktoptimierung.')
