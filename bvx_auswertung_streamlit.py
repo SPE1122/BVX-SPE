@@ -1413,10 +1413,10 @@ def create_loading_excel(
 ) -> bytes:
     """Erstellt den Excel-Export.
 
-    Neben den Rohdaten wird pro belegter Pritsche ein optischer Ladeplan-BSD
-    als eigenes Excel-Blatt erzeugt. Dieses Blatt ist bewusst an die gelieferte
-    PB6-Vorlage angelehnt: Kopfbereich, Kontrolle, Ladeplan-Matrix,
-    Ladehöhe, Material/Bemerkungen und Gewichts-Etikette.
+    Die Excel-Datei dient als Begleit-/Kontrolldatei mit Rohdatenblättern und
+    den kleinen optischen BSD-/Pritschenzetteln. Grafische Grossansichten
+    werden nicht mehr in Excel eingebettet; diese sind Hauptbestandteil der
+    A3-PDF-Ausgabe.
     """
     project_meta = project_meta or {}
     output = io.BytesIO()
@@ -1959,7 +1959,6 @@ def create_loading_excel(
                 pname = str(val(header, 'Pritsche', ''))
                 matrix = bsd_matrix_df[bsd_matrix_df['Pritsche'].astype(str) == pname].copy()
                 add_styled_bsd_sheet(header, matrix)
-                add_visual_view_sheet(header)
 
         # Rohdatenblätter etwas lesbarer machen.
         for ws in wb.worksheets:
@@ -2448,8 +2447,8 @@ def create_bsd_matrix_for_platform(
             add_entry(z_cursor, slot, label, 'Bund-Bauteil', ph, pl, pw, part_weight, remark)
             z_cursor += ph
             if i < count - 1 and internal_spacer > 0:
-                spacer_label = 'Einlage allgemein'
-                spacer_kind = 'Einlage allgemein'
+                spacer_label = 'Einlage'
+                spacer_kind = 'Einlage'
                 spacer_remark = ''
                 add_entry(z_cursor, slot, _fmt_bsd_mm_label(spacer_label, internal_spacer), spacer_kind, internal_spacer, row['Länge_mm'], row['Breite_mm'], 0.0, spacer_remark)
                 z_cursor += internal_spacer
@@ -2476,8 +2475,8 @@ def create_bsd_matrix_for_platform(
                 spacer_kind = 'Lagenholz'
             elif platform_general_spacer > 0:
                 effective_layer_spacer = platform_general_spacer
-                spacer_label = 'Einlage allgemein'
-                spacer_kind = 'Einlage allgemein'
+                spacer_label = 'Einlage'
+                spacer_kind = 'Einlage'
             else:
                 continue
             z_spacer = round(max(0.0, z_val - effective_layer_spacer), 1)
@@ -2638,11 +2637,12 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
         c.drawCentredString(rx + rw / 2, ry + rh / 2, label)
 
 
-def _pdf_draw_bsd_matrix_page(c, page_w: float, page_h: float, margin: float, platform: pd.Series, matrix_df: pd.DataFrame, header: Dict[str, Any], project_name: str) -> None:
+def _pdf_draw_bsd_matrix_page(c, page_w: float, page_h: float, margin: float, platform: pd.Series, matrix_df: pd.DataFrame, header: Dict[str, Any], project_name: str, logo_bytes: Optional[bytes] = None) -> None:
     """Zeichnet eine zweite PDF-Seite pro Pritsche mit Ladeplan-BSD-Matrix."""
     from reportlab.lib import colors
 
     pname = str(platform.get('Pritsche', 'Pritsche'))
+    _pdf_draw_logo(c, logo_bytes, page_w - margin - 95, page_h - 78, 85, 45)
     c.setFont('Helvetica-Bold', 16)
     c.drawString(margin, page_h - 36, f'Ladeplan BSD - {pname}')
     c.setFont('Helvetica', 9)
@@ -2735,6 +2735,25 @@ def _pdf_draw_bsd_matrix_page(c, page_w: float, page_h: float, margin: float, pl
             break
 
 
+
+
+def _pdf_draw_logo(c, logo_bytes: Optional[bytes], x: float, y: float, max_w: float = 90, max_h: float = 55) -> None:
+    """Zeichnet optional ein Logo in die PDF-Seite."""
+    if not logo_bytes:
+        return
+    try:
+        from reportlab.lib.utils import ImageReader
+        img = ImageReader(io.BytesIO(logo_bytes))
+        iw, ih = img.getSize()
+        if not iw or not ih:
+            return
+        scale = min(max_w / float(iw), max_h / float(ih))
+        draw_w = iw * scale
+        draw_h = ih * scale
+        c.drawImage(img, x, y, width=draw_w, height=draw_h, preserveAspectRatio=True, mask='auto')
+    except Exception:
+        return
+
 def create_loading_pdf(
     placements_df: pd.DataFrame,
     platforms_df: pd.DataFrame,
@@ -2742,6 +2761,7 @@ def create_loading_pdf(
     warnings_df: pd.DataFrame,
     project_name: str = 'BVX Verladeplanung',
     project_meta: Optional[Dict[str, Any]] = None,
+    logo_bytes: Optional[bytes] = None,
 ) -> bytes:
     """Erstellt einen einfachen A3-Pritschenplan als PDF pro Pritsche."""
     try:
@@ -2767,13 +2787,14 @@ def create_loading_pdf(
         srow = summary_df[summary_df['Pritsche'].astype(str) == pname]
         srow = srow.iloc[0] if not srow.empty else pd.Series(dtype=object)
 
+        _pdf_draw_logo(c, logo_bytes, page_w - 120, page_h - 70, 90, 50)
         c.setFont('Helvetica-Bold', 16)
         c.drawString(margin, page_h - 36, f'Pritschenplan - {pname}')
         c.setFont('Helvetica', 9)
         c.drawString(margin, page_h - 54, f'Objekt / Datei: {project_meta.get("Objekt_Name", project_name) or project_name}')
         c.drawString(margin, page_h - 70, f'Erstellt: {datetime.now().strftime("%d.%m.%Y %H:%M")}')
 
-        info_x = page_w - 290
+        info_x = page_w - 245
         info_y = page_h - 40
         c.setFont('Helvetica-Bold', 10)
         c.drawString(info_x, info_y, 'Info Pritsche')
@@ -2804,10 +2825,11 @@ def create_loading_pdf(
             c.drawString(hint_x, hint_y - 14 - i * 12, line)
 
         # Zeichnungsbereiche
-        top_y = 205
-        _pdf_draw_view(c, placements_df, platform, margin, top_y, 520, 280, 'side', 'Seitenansicht')
-        _pdf_draw_view(c, placements_df, platform, margin + 550, top_y, 210, 280, 'back', 'Rückansicht')
-        _pdf_draw_view(c, placements_df, platform, margin, 35, 760, 135, 'top', 'Draufsicht')
+        top_y = 210
+        _pdf_draw_view(c, placements_df, platform, margin, top_y, 500, 270, 'side', 'Seitenansicht')
+        _pdf_draw_view(c, placements_df, platform, margin + 520, top_y, 150, 270, 'back', 'Rückansicht')
+        _pdf_draw_view(c, placements_df, platform, margin + 685, top_y, 150, 270, 'front', 'Vorderansicht')
+        _pdf_draw_view(c, placements_df, platform, margin, 35, 810, 135, 'top', 'Draufsicht')
 
         # Warnungen
         pwarnings = warnings_df[warnings_df['Pritsche'].astype(str) == pname] if warnings_df is not None and not warnings_df.empty else pd.DataFrame()
@@ -2834,7 +2856,7 @@ def create_loading_pdf(
         matrix = create_bsd_matrix_for_platform(placements_df, platform)
         if not matrix.empty:
             header = create_bsd_header_for_platform(platform, summary_df, warnings_df, project_meta)
-            _pdf_draw_bsd_matrix_page(c, page_w, page_h, margin, platform, matrix, header, project_meta.get('Objekt_Name', project_name) or project_name)
+            _pdf_draw_bsd_matrix_page(c, page_w, page_h, margin, platform, matrix, header, project_meta.get('Objekt_Name', project_name) or project_name, logo_bytes=logo_bytes)
             c.showPage()
 
     c.save()
@@ -3019,7 +3041,7 @@ def render_analysis_module(uploaded_file) -> None:
             )
 
 
-def render_loading_module(uploaded_file, transport_excel_file=None) -> None:
+def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=None) -> None:
     st.header('Verladeplanung')
 
     if uploaded_file is None:
@@ -3091,6 +3113,19 @@ def render_loading_module(uploaded_file, transport_excel_file=None) -> None:
         'Decke_Attribut': decke_attr,
         'Bauabschnitt_Attribut': bauabschnitt_attr,
     }
+
+    logo_bytes = None
+    if logo_file is not None:
+        try:
+            logo_bytes = logo_file.getvalue()
+        except Exception:
+            logo_bytes = None
+    if logo_bytes is None:
+        try:
+            with open(r'/mnt/data/ghostwriter_images/context/4e099357-7f76-52ac-b22d-16395ad9966b.jpg', 'rb') as fh:
+                logo_bytes = fh.read()
+        except Exception:
+            logo_bytes = None
 
     st.subheader('3. Sortierung')
     sort_options = [
@@ -3349,12 +3384,36 @@ def render_loading_module(uploaded_file, transport_excel_file=None) -> None:
         if 'bsd_header_df' not in locals() or 'bsd_matrix_df' not in locals():
             bsd_header_df, bsd_matrix_df = create_all_bsd_matrices(edited_placements_df, platforms_used_df, edited_summary_df, warnings_plan_df, project_meta=project_meta)
 
-        st.subheader('Excel-Verladeplan')
+        st.subheader('A3-Pritschenplan PDF')
         st.info(
-            'Hauptausgabe ist der Excel-Verladeplan. Pro belegter Pritsche wird ein eigenes '
-            'optisches BSD-/Pritschenzettel-Blatt und ein grafisches Ansichten-Blatt erzeugt. Die Datei kann in Excel geöffnet, '
-            'bearbeitet und direkt gedruckt oder über Excel als PDF gespeichert werden.'
+            'Hauptausgabe ist wieder der A3-Pritschenplan als PDF. Die PDF enthält die grosse grafische Darstellung '
+            'mit Seitenansicht, Rückansicht, Vorderansicht, Draufsicht und den kleinen Ladeplan-BSD-Seiten je Pritsche. '
+            'Excel bleibt als Daten- und Begleitdatei mit den kleinen BSD-Zetteln erhalten.'
         )
+
+        try:
+            pdf_data = create_loading_pdf(
+                edited_placements_df,
+                platforms_used_df,
+                edited_summary_df,
+                warnings_plan_df,
+                project_name=uploaded_file.name,
+                project_meta=project_meta,
+                logo_bytes=logo_bytes,
+            )
+            st.download_button(
+                label='A3-Pritschenplan als PDF herunterladen',
+                data=pdf_data,
+                file_name=f"{uploaded_file.name.replace('.bvx', '').replace('.BVX', '')}_pritschenplan_a3.pdf",
+                mime='application/pdf',
+                type='primary',
+            )
+        except RuntimeError as exc:
+            st.warning(str(exc))
+
+        st.divider()
+        st.subheader('Excel-Daten / kleine BSD-Zettel')
+        st.caption('Die Excel-Datei enthält die kleinen BSD-/Pritschenzettel und die Datenblätter Verladeeinheiten, Platzierung, Pritschen_verwendet, Pritschen_Summary, Fuhrenübersicht und Ladeplan_BSD_Daten.')
 
         excel_data = create_loading_excel(
             sorted_parts,
@@ -3370,37 +3429,15 @@ def render_loading_module(uploaded_file, transport_excel_file=None) -> None:
             project_meta=project_meta,
         )
         st.download_button(
-            label='Excel-Verladeplan herunterladen',
+            label='Excel-Begleitdatei herunterladen',
             data=excel_data,
             file_name=f"{uploaded_file.name.replace('.bvx', '').replace('.BVX', '')}_verladeplan_bsd.xlsx",
             mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            type='primary',
         )
 
-        with st.expander('Optional: PDF-Export', expanded=False):
-            st.caption('PDF ist nicht die Hauptausgabe. Dafür muss reportlab installiert sein: pip install reportlab')
-            if st.button('PDF jetzt erzeugen'):
-                try:
-                    pdf_data = create_loading_pdf(
-                        edited_placements_df,
-                        platforms_used_df,
-                        edited_summary_df,
-                        warnings_plan_df,
-                        project_name=uploaded_file.name,
-                        project_meta=project_meta,
-                    )
-                    st.download_button(
-                        label='A3-Pritschenplan als PDF herunterladen',
-                        data=pdf_data,
-                        file_name=f"{uploaded_file.name.replace('.bvx', '').replace('.BVX', '')}_pritschenplan.pdf",
-                        mime='application/pdf',
-                    )
-                except RuntimeError as exc:
-                    st.warning(str(exc))
-
         st.markdown('''
-        **Hinweis:** Diese Version erstellt den Excel-Verladeplan als Hauptausgabe.
-        Die PDF-Ausgabe ist nur optional. Manuelles Umplatzieren erfolgt über die Platzierungstabelle.
+        **Hinweis:** Diese Version erstellt den A3-Pritschenplan als Hauptausgabe im PDF.
+        Die Excel-Datei enthält kleine BSD-Zettel und Datenregister. Manuelles Umplatzieren erfolgt über die Platzierungstabelle.
         Drag-and-drop ist nicht enthalten.
         ''')
 
@@ -3440,6 +3477,7 @@ def main():
                 help='Normale BVX-Auswertung mit Operationen und Export.'
             )
             loading_file = None
+            logo_file = None
             if analysis_file:
                 st.success(f'{analysis_file.name}')
         else:
@@ -3456,16 +3494,24 @@ def main():
                 key='transport_excel_upload',
                 help='Stammdaten mit Fuhrenoptionen, Pritschen und Standards.'
             )
+            logo_file = st.file_uploader(
+                'Logo für Pläne hochladen',
+                type=['png', 'jpg', 'jpeg'],
+                key='logo_upload',
+                help='Wird in den A3-PDF-Plänen als Logo verwendet.'
+            )
             analysis_file = None
             if loading_file:
                 st.success(f'BVX: {loading_file.name}')
             if transport_excel_file:
                 st.success(f'Excel: {transport_excel_file.name}')
+            if logo_file:
+                st.success(f'Logo: {logo_file.name}')
 
     if module == 'BVX Auswertung':
         render_analysis_module(analysis_file)
     else:
-        render_loading_module(loading_file, transport_excel_file)
+        render_loading_module(loading_file, transport_excel_file, logo_file)
 
 
 if __name__ == '__main__':
