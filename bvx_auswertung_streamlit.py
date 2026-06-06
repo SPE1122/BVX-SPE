@@ -5,7 +5,7 @@ Installation:
     pip install streamlit pandas plotly openpyxl reportlab pillow
 
 Ausführen:
-    streamlit run bvx_auswertung_streamlit_verladung_varianteA_pdf_logo_ansichten_v2.py
+    streamlit run bvx_auswertung_streamlit_verladung_varianteA_pdf_logo_ansichten_v3.py
 
 Hinweis:
     Hauptausgabe ist der A3-PDF-Pritschenplan.
@@ -2001,11 +2001,9 @@ def _view_label(row: pd.Series) -> str:
         label = _format_label_value(row.get('Einheit_ID'))
     if str(row.get('Typ', '')).strip() == 'Bund':
         liste = _split_bsd_text_list(row.get('Ansicht_Liste', ''), label)
-        if len(liste) > 3:
-            label = ', '.join(liste[:3]) + ' ...'
-        elif liste:
-            label = ', '.join(liste)
-        # Plotly-Zeilenumbruch
+        if liste:
+            # Bunde in der App ebenfalls untereinander darstellen.
+            return '<br>'.join(str(v) for v in liste)
         return str(label).replace(', ', '<br>')
     return str(label)
 
@@ -2580,8 +2578,121 @@ def create_all_bsd_matrices(
     return header_df, matrix_df
 
 
+
+def _pdf_projection_values(row: pd.Series, view: str, eff_length: float, width: float) -> Tuple[float, float, float, float, float]:
+    """Gibt projiziertes Rechteck und Tiefenwert für eine Ansicht zurück."""
+    x = safe_number(row.get('X_mm'))
+    y = safe_number(row.get('Y_mm'))
+    z = safe_number(row.get('Z_mm'))
+    lx = safe_number(row.get('Länge_mm'))
+    by = safe_number(row.get('Breite_mm'))
+    hz = safe_number(row.get('Höhe_mm'))
+
+    if view == 'top':
+        return x, y, lx, by, z + hz
+    if view in ('side', 'side_left'):
+        # Von links gesehen: kleine Y-Werte liegen vorne. Grosse Y-Werte zuerst zeichnen.
+        return x, z, lx, hz, -y
+    if view == 'side_right':
+        # Von rechts gesehen: grosse Y-Werte liegen vorne.
+        return eff_length - x - lx, z, lx, hz, y + by
+    if view == 'front':
+        # Von vorne gesehen: kleine X-Werte liegen vorne. Breite wird gespiegelt.
+        return width - y - by, z, by, hz, -x
+    # back: von hinten gesehen: grosse X-Werte liegen vorne.
+    return y, z, by, hz, x + lx
+
+
+def _pdf_visible_sort_value(row: pd.Series, view: str, eff_length: float, width: float) -> float:
+    """Sortierwert: zuerst verdeckte, zuletzt sichtbare Bauteile zeichnen."""
+    return _pdf_projection_values(row, view, eff_length, width)[4]
+
+
+def _pdf_label_lines(row: pd.Series, view: str) -> List[str]:
+    """Beschriftung für PDF-Ansichten.
+
+    Bei Bunden werden die Nummern nicht nebeneinander geschrieben, sondern
+    in der Verladereihenfolge untereinander. In der Draufsicht sieht man nur
+    die oberste Nummer eines Bundes.
+    """
+    label = _format_label_value(row.get('Ansicht_Label'))
+    if not label:
+        label = _format_label_value(row.get('Bauteile'))
+    if not label:
+        label = _format_label_value(row.get('Einheit_ID'))
+
+    if str(row.get('Typ', '')).strip() == 'Bund':
+        labels = _split_bsd_text_list(row.get('Ansicht_Liste', ''), row.get('Bauteile_Liste', label))
+        labels = [str(v).strip() for v in labels if str(v).strip()]
+        if labels:
+            if view == 'top':
+                # Draufsicht: sichtbar ist die oberste Lage im Bund.
+                return [labels[-1]]
+            return labels
+    return [str(label).replace('<br>', ' ').strip()]
+
+
+def _pdf_truncate_to_width(c, text: str, max_width: float, font_name: str, font_size: float) -> str:
+    """Kürzt Text so, dass er ungefähr in die Box passt."""
+    text = str(text or '').strip()
+    if not text:
+        return ''
+    if c.stringWidth(text, font_name, font_size) <= max_width:
+        return text
+    ell = '...'
+    available = max_width - c.stringWidth(ell, font_name, font_size)
+    if available <= 0:
+        return ''
+    result = ''
+    for ch in text:
+        if c.stringWidth(result + ch, font_name, font_size) > available:
+            break
+        result += ch
+    return result + ell if result else ''
+
+
+def _pdf_draw_label_lines(c, rx: float, ry: float, rw: float, rh: float, lines: List[str], view: str) -> None:
+    """Zeichnet Beschriftungen ohne Überlappung innerhalb eines Rechtecks."""
+    lines = [str(line).strip() for line in lines if str(line).strip()]
+    if not lines or rw < 12 or rh < 7:
+        return
+
+    from reportlab.lib import colors
+    font_name = 'Helvetica'
+    n = len(lines)
+    if n == 1:
+        font_size = max(3.8, min(5.2, rw / max(8, len(lines[0]) * 2.0), rh * 0.42))
+        c.setFont(font_name, font_size)
+        c.setFillColor(colors.black)
+        txt = _pdf_truncate_to_width(c, lines[0], max(4, rw - 4), font_name, font_size)
+        if txt:
+            c.drawCentredString(rx + rw / 2, ry + rh / 2 - font_size / 3, txt)
+        return
+
+    # Mehrere Nummern im Bund: vertikal von unten nach oben, Reihenfolge = Verladereihenfolge.
+    font_size = min(5.0, max(2.7, (rh - 3) / max(1, n) * 0.72))
+    line_step = max(font_size * 1.05, (rh - 4) / max(1, n))
+    total_h = line_step * (n - 1)
+    start_y = ry + rh / 2 - total_h / 2
+    c.setFont(font_name, font_size)
+    c.setFillColor(colors.black)
+    for i, line in enumerate(lines):
+        yy = start_y + i * line_step - font_size / 3
+        if yy < ry + 1 or yy > ry + rh - font_size:
+            continue
+        txt = _pdf_truncate_to_width(c, line, max(4, rw - 4), font_name, font_size)
+        if txt:
+            c.drawCentredString(rx + rw / 2, yy, txt)
+
+
 def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y: float, w: float, h: float, view: str, title: str) -> None:
-    """Zeichnet eine PDF-Ansicht mit Pritschen- und Ladungsabmessungen."""
+    """Zeichnet eine PDF-Ansicht mit Pritschen- und Ladungsabmessungen.
+
+    Beschriftung wurde bewusst reduziert:
+    - Bunde werden nummernweise untereinander dargestellt.
+    - Verdeckte Bauteile werden zuerst gezeichnet, sichtbare Seiten zuletzt.
+    - In der Draufsicht wird je Bund nur die oberste Nummer beschriftet.
+    """
     from reportlab.lib import colors
 
     eff_length = safe_number(platform.get('Länge_mm')) + safe_number(platform.get('Überhang_vorne_mm')) + safe_number(platform.get('Überhang_hinten_mm'))
@@ -2598,21 +2709,21 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
 
     c.setStrokeColor(colors.black)
     c.setFillColor(colors.black)
-    c.setFont('Helvetica-Bold', 9)
-    c.drawString(x, y + h + 13, title)
+    c.setFont('Helvetica-Bold', 8.5)
+    c.drawString(x, y + h + 16, title)
 
     if view == 'top':
         data_w, data_h = max(eff_length, 1), max(width, 1)
         x_label, y_label = 'Länge X', 'Breite Y'
-        dim_line = f'Pritsche: L {eff_length:.0f} / B {width:.0f} mm   Ladung: L {used_len:.0f} / B {used_wid:.0f} mm'
+        dim_line = f'Pritsche L {eff_length:.0f} / B {width:.0f} mm   Ladung L {used_len:.0f} / B {used_wid:.0f} mm'
     elif view in ('side', 'side_left', 'side_right'):
         data_w, data_h = max(eff_length, 1), max(max_height, used_hei, 1)
         x_label, y_label = 'Länge X', 'Höhe Z'
-        dim_line = f'Pritsche: L {eff_length:.0f} / H {max_height:.0f} mm   Ladung: L {used_len:.0f} / H {used_hei:.0f} mm'
+        dim_line = f'Pritsche L {eff_length:.0f} / H {max_height:.0f} mm   Ladung L {used_len:.0f} / H {used_hei:.0f} mm'
     else:
         data_w, data_h = max(width, 1), max(max_height, used_hei, 1)
         x_label, y_label = 'Breite Y', 'Höhe Z'
-        dim_line = f'Pritsche: B {width:.0f} / H {max_height:.0f} mm   Ladung: B {used_wid:.0f} / H {used_hei:.0f} mm'
+        dim_line = f'Pritsche B {width:.0f} / H {max_height:.0f} mm   Ladung B {used_wid:.0f} / H {used_hei:.0f} mm'
 
     scale = min(w / data_w, h / data_h)
     draw_w = data_w * scale
@@ -2622,76 +2733,56 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
 
     # Pritschenrahmen / Maximalbereich
     c.setStrokeColor(colors.black)
-    c.setLineWidth(0.9)
+    c.setLineWidth(0.85)
     c.rect(ox, oy, draw_w, draw_h, stroke=1, fill=0)
 
-    # Achsen- und Maßtexte ähnlich wie in der App
-    c.setFont('Helvetica', 6.5)
+    # Achsen- und Maßtexte mit Abstand, damit nichts in die Bauteile läuft.
+    c.setFont('Helvetica', 5.7)
     c.setFillColor(colors.black)
-    c.drawString(ox, oy - 10, x_label)
+    c.drawString(ox, oy - 9, x_label)
     c.saveState()
-    c.translate(ox - 14, oy + 2)
+    c.translate(ox - 12, oy + 2)
     c.rotate(90)
     c.drawString(0, 0, y_label)
     c.restoreState()
-    c.drawString(ox, oy - 22, dim_line)
+    c.setFont('Helvetica', 5.5)
+    c.drawString(ox, oy - 20, dim_line)
 
-    # einfache Maßlinie unten / links
-    c.setLineWidth(0.5)
-    c.line(ox, oy - 4, ox + draw_w, oy - 4)
-    c.line(ox, oy - 6, ox, oy - 2)
-    c.line(ox + draw_w, oy - 6, ox + draw_w, oy - 2)
+    # Maßlinie unten / links
+    c.setLineWidth(0.45)
+    c.line(ox, oy - 3.5, ox + draw_w, oy - 3.5)
+    c.line(ox, oy - 5.5, ox, oy - 1.5)
+    c.line(ox + draw_w, oy - 5.5, ox + draw_w, oy - 1.5)
     c.saveState()
-    c.translate(ox - 6, oy)
+    c.translate(ox - 5, oy)
     c.line(0, 0, 0, draw_h)
-    c.line(-2, 0, 2, 0)
-    c.line(-2, draw_h, 2, draw_h)
+    c.line(-1.8, 0, 1.8, 0)
+    c.line(-1.8, draw_h, 1.8, draw_h)
     c.restoreState()
 
-    # Null-/Grenzwerte klein anschreiben
-    c.setFont('Helvetica', 5.5)
-    c.drawRightString(ox + draw_w, oy - 11, f'{data_w:.0f}')
+    # Grenzwerte klein anschreiben
+    c.setFont('Helvetica', 5.0)
+    c.drawRightString(ox + draw_w, oy - 10, f'{data_w:.0f}')
     c.drawString(ox - 2, oy + draw_h + 2, f'{data_h:.0f}')
 
-    # Bauteile / Bunde
-    for _, row in rows.iterrows():
-        if view == 'top':
-            rx = ox + safe_number(row.get('X_mm')) * scale
-            ry = oy + safe_number(row.get('Y_mm')) * scale
-            rw = safe_number(row.get('Länge_mm')) * scale
-            rh = safe_number(row.get('Breite_mm')) * scale
-        elif view in ('side', 'side_left', 'side_right'):
-            x_val = safe_number(row.get('X_mm'))
-            l_val = safe_number(row.get('Länge_mm'))
-            if view == 'side_right':
-                x_val = eff_length - x_val - l_val
-            rx = ox + x_val * scale
-            ry = oy + safe_number(row.get('Z_mm')) * scale
-            rw = l_val * scale
-            rh = safe_number(row.get('Höhe_mm')) * scale
-        elif view == 'front':
-            y_val = width - safe_number(row.get('Y_mm')) - safe_number(row.get('Breite_mm'))
-            rx = ox + y_val * scale
-            ry = oy + safe_number(row.get('Z_mm')) * scale
-            rw = safe_number(row.get('Breite_mm')) * scale
-            rh = safe_number(row.get('Höhe_mm')) * scale
-        else:  # back
-            rx = ox + safe_number(row.get('Y_mm')) * scale
-            ry = oy + safe_number(row.get('Z_mm')) * scale
-            rw = safe_number(row.get('Breite_mm')) * scale
-            rh = safe_number(row.get('Höhe_mm')) * scale
+    # Verdeckte Bauteile zuerst, sichtbare zuletzt.
+    if not rows.empty:
+        rows['_pdf_sort'] = rows.apply(lambda r: _pdf_visible_sort_value(r, view, eff_length, width), axis=1)
+        rows = rows.sort_values(['_pdf_sort', 'Z_mm', 'X_mm', 'Y_mm'], kind='stable')
 
+    for _, row in rows.iterrows():
+        px, py, pw, ph, _depth = _pdf_projection_values(row, view, eff_length, width)
+        rx = ox + px * scale
+        ry = oy + py * scale
+        rw = pw * scale
+        rh = ph * scale
         if rw <= 0 or rh <= 0:
             continue
         c.setFillColor(colors.lightgrey)
         c.setStrokeColor(colors.darkgrey)
-        c.setLineWidth(0.45)
+        c.setLineWidth(0.38)
         c.rect(rx, ry, rw, rh, stroke=1, fill=1)
-        c.setFillColor(colors.black)
-        c.setFont('Helvetica', 5.2)
-        label = str(_view_label(row)).replace('<br>', ' ')[:32]
-        c.drawCentredString(rx + rw / 2, ry + rh / 2, label)
-
+        _pdf_draw_label_lines(c, rx, ry, rw, rh, _pdf_label_lines(row, view), view)
 def _pdf_draw_bsd_matrix_page(c, page_w: float, page_h: float, margin: float, platform: pd.Series, matrix_df: pd.DataFrame, header: Dict[str, Any], project_name: str, logo_bytes: Optional[bytes] = None) -> None:
     """Zeichnet eine zweite PDF-Seite pro Pritsche mit Ladeplan-BSD-Matrix."""
     from reportlab.lib import colors
@@ -2879,20 +2970,20 @@ def create_loading_pdf(
         for i, line in enumerate(hints):
             c.drawString(hint_x, hint_y - 14 - i * 12, line)
 
-        # Zeichnungsbereiche: grössere A3-Ansichten mit linker/rechter Seitenansicht.
-        _pdf_draw_view(c, placements_df, platform, margin, 455, 720, 230, 'side_left', 'Linke Seitenansicht')
-        _pdf_draw_view(c, placements_df, platform, margin, 205, 720, 230, 'side_right', 'Rechte Seitenansicht')
-        _pdf_draw_view(c, placements_df, platform, margin + 750, 455, 170, 230, 'back', 'Rückansicht')
-        _pdf_draw_view(c, placements_df, platform, margin + 930, 455, 170, 230, 'front', 'Vorderansicht')
-        _pdf_draw_view(c, placements_df, platform, margin, 35, 1080, 135, 'top', 'Draufsicht')
+        # Zeichnungsbereiche: A3-Ansichten mit Abstand zum Kopfbereich.
+        _pdf_draw_view(c, placements_df, platform, margin, 395, 720, 220, 'side_left', 'Linke Seitenansicht')
+        _pdf_draw_view(c, placements_df, platform, margin, 165, 720, 215, 'side_right', 'Rechte Seitenansicht')
+        _pdf_draw_view(c, placements_df, platform, margin + 750, 395, 170, 220, 'back', 'Rückansicht')
+        _pdf_draw_view(c, placements_df, platform, margin + 930, 395, 170, 220, 'front', 'Vorderansicht')
+        _pdf_draw_view(c, placements_df, platform, margin, 25, 1080, 115, 'top', 'Draufsicht')
 
-        # Qualitätssicherung kompakt oben rechts.
+        # Qualitätssicherung kompakt oben rechts, getrennt vom Infofeld.
         c.setStrokeColor(colors.black)
-        c.rect(page_w - 245, page_h - 145, 210, 52, stroke=1, fill=0)
+        c.rect(page_w - 245, page_h - 200, 210, 52, stroke=1, fill=0)
         c.setFont('Helvetica', 8)
-        c.drawString(page_w - 235, page_h - 108, 'Qualitätssicherung')
-        c.drawString(page_w - 235, page_h - 125, 'Datum: ______________')
-        c.drawString(page_w - 125, page_h - 125, 'Visum: __________')
+        c.drawString(page_w - 235, page_h - 163, 'Qualitätssicherung')
+        c.drawString(page_w - 235, page_h - 180, 'Datum: ______________')
+        c.drawString(page_w - 125, page_h - 180, 'Visum: __________')
 
         c.showPage()
 
