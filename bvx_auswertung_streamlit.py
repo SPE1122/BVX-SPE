@@ -581,33 +581,33 @@ def get_transport_presets() -> Dict[str, List[Dict[str, Any]]]:
             {'Freigabe': True, 'Pritsche': 'LKW', 'Pritschenname': 'LKW', 'Fuhrenoption': 'LKW solo', 'Pritschen_Reihenfolge': 1,
              'Länge_mm': 9300, 'Breite_mm': 2450, 'Max_Höhe_mm': 2600, 'Überhang_vorne_mm': 0,
              'Überhang_hinten_mm': 300, 'Max_Gewicht_kg': 15000, 'Kantholz_erste_Lage_mm': 80,
-             'Einlage_zwischen_Lagen_mm': 40, 'Drehen_90_erlaubt': False},
+             'Einlage_zwischen_Lagen_mm': 40, 'Einlage_allgemein_mm': 0, 'Drehen_90_erlaubt': False},
         ],
         'LKW mit Anhänger': [
             {'Freigabe': True, 'Pritsche': 'LKW', 'Pritschenname': 'LKW', 'Fuhrenoption': 'LKW mit Anhänger', 'Pritschen_Reihenfolge': 1,
              'Länge_mm': 9300, 'Breite_mm': 2450, 'Max_Höhe_mm': 2600, 'Überhang_vorne_mm': 0,
              'Überhang_hinten_mm': 300, 'Max_Gewicht_kg': 15000, 'Kantholz_erste_Lage_mm': 80,
-             'Einlage_zwischen_Lagen_mm': 40, 'Drehen_90_erlaubt': False},
+             'Einlage_zwischen_Lagen_mm': 40, 'Einlage_allgemein_mm': 0, 'Drehen_90_erlaubt': False},
             {'Freigabe': True, 'Pritsche': 'Anhänger', 'Pritschenname': 'Anhänger', 'Fuhrenoption': 'LKW mit Anhänger', 'Pritschen_Reihenfolge': 2,
              'Länge_mm': 8200, 'Breite_mm': 2450, 'Max_Höhe_mm': 2600, 'Überhang_vorne_mm': 0,
              'Überhang_hinten_mm': 300, 'Max_Gewicht_kg': 12000, 'Kantholz_erste_Lage_mm': 80,
-             'Einlage_zwischen_Lagen_mm': 40, 'Drehen_90_erlaubt': False},
+             'Einlage_zwischen_Lagen_mm': 40, 'Einlage_allgemein_mm': 0, 'Drehen_90_erlaubt': False},
         ],
         'Anhängerzug': [
             {'Freigabe': True, 'Pritsche': 'LKW', 'Pritschenname': 'LKW', 'Fuhrenoption': 'Anhängerzug', 'Pritschen_Reihenfolge': 1,
              'Länge_mm': 7600, 'Breite_mm': 2450, 'Max_Höhe_mm': 2600, 'Überhang_vorne_mm': 0,
              'Überhang_hinten_mm': 300, 'Max_Gewicht_kg': 12000, 'Kantholz_erste_Lage_mm': 80,
-             'Einlage_zwischen_Lagen_mm': 40, 'Drehen_90_erlaubt': False},
+             'Einlage_zwischen_Lagen_mm': 40, 'Einlage_allgemein_mm': 0, 'Drehen_90_erlaubt': False},
             {'Freigabe': True, 'Pritsche': 'Anhänger', 'Pritschenname': 'Anhänger', 'Fuhrenoption': 'Anhängerzug', 'Pritschen_Reihenfolge': 2,
              'Länge_mm': 8200, 'Breite_mm': 2450, 'Max_Höhe_mm': 2600, 'Überhang_vorne_mm': 0,
              'Überhang_hinten_mm': 300, 'Max_Gewicht_kg': 12000, 'Kantholz_erste_Lage_mm': 80,
-             'Einlage_zwischen_Lagen_mm': 40, 'Drehen_90_erlaubt': False},
+             'Einlage_zwischen_Lagen_mm': 40, 'Einlage_allgemein_mm': 0, 'Drehen_90_erlaubt': False},
         ],
         'Tiefbettauflieger': [
             {'Freigabe': True, 'Pritsche': 'Tiefbett', 'Pritschenname': 'Tiefbett', 'Fuhrenoption': 'Tiefbettauflieger', 'Pritschen_Reihenfolge': 1,
              'Länge_mm': 13000, 'Breite_mm': 2550, 'Max_Höhe_mm': 3200, 'Überhang_vorne_mm': 500,
              'Überhang_hinten_mm': 1000, 'Max_Gewicht_kg': 24000, 'Kantholz_erste_Lage_mm': 100,
-             'Einlage_zwischen_Lagen_mm': 40, 'Drehen_90_erlaubt': True},
+             'Einlage_zwischen_Lagen_mm': 40, 'Einlage_allgemein_mm': 0, 'Drehen_90_erlaubt': True},
         ],
     }
 
@@ -620,6 +620,7 @@ def read_transport_config_excel(uploaded_excel) -> Tuple[pd.DataFrame, pd.DataFr
         'Max_Bundgewicht': 1000.0,
         'Standard_Kantholz_erste_Lage': 80.0,
         'Standard_Einlage_zwischen_Lagen': 40.0,
+        'Standard_Einlage_allgemein': 0.0,
         'Längenversatz_je_Lage': 100.0,
         'Abstand_zwischen_Einheiten': 0.0,
         'Sichtseite_nach_unten': 'JA',
@@ -685,7 +686,7 @@ def read_transport_config_excel(uploaded_excel) -> Tuple[pd.DataFrame, pd.DataFr
     required_cols = [
         'Fuhrenoption', 'Pritschen_Reihenfolge', 'Pritschenname', 'Freigabe', 'Länge_mm', 'Breite_mm',
         'Max_Höhe_mm', 'Max_Gewicht_kg', 'Überhang_vorne_mm', 'Überhang_hinten_mm',
-        'Kantholz_erste_Lage_mm', 'Einlage_zwischen_Lagen_mm', 'Drehen_90_erlaubt'
+        'Kantholz_erste_Lage_mm', 'Einlage_zwischen_Lagen_mm', 'Einlage_allgemein_mm', 'Drehen_90_erlaubt'
     ]
     for col in required_cols:
         if col not in p.columns:
@@ -695,7 +696,7 @@ def read_transport_config_excel(uploaded_excel) -> Tuple[pd.DataFrame, pd.DataFr
     p['Freigabe'] = p['Freigabe'].apply(yes_no_to_bool)
     p['Drehen_90_erlaubt'] = p['Drehen_90_erlaubt'].apply(yes_no_to_bool)
     p['Pritschen_Reihenfolge'] = p['Pritschen_Reihenfolge'].apply(lambda v: int(safe_number(v, 999)))
-    for col in ['Länge_mm', 'Breite_mm', 'Max_Höhe_mm', 'Max_Gewicht_kg', 'Überhang_vorne_mm', 'Überhang_hinten_mm', 'Kantholz_erste_Lage_mm', 'Einlage_zwischen_Lagen_mm']:
+    for col in ['Länge_mm', 'Breite_mm', 'Max_Höhe_mm', 'Max_Gewicht_kg', 'Überhang_vorne_mm', 'Überhang_hinten_mm', 'Kantholz_erste_Lage_mm', 'Einlage_zwischen_Lagen_mm', 'Einlage_allgemein_mm']:
         p[col] = p[col].apply(lambda v: safe_number(v, 0.0))
     p['Pritsche'] = p['Pritschenname'].astype(str)
 
@@ -724,6 +725,7 @@ def build_loading_units(
     use_bundles: bool,
     max_bundle_weight: float,
     bundle_spacer_height: float,
+    general_spacer_height: float,
     same_height: bool,
     same_width: bool,
     same_quality: bool,
@@ -742,6 +744,12 @@ def build_loading_units(
                 'Typ': 'Bauteil',
                 'Anzahl_Bauteile': 1,
                 'Bauteile': row.get('Bauteilnummer') or row.get('Name'),
+                'Bauteile_Liste': str(row.get('Bauteilnummer') or row.get('Name')),
+                'Einzellängen_mm': str(row['Länge_mm']),
+                'Einzelbreiten_mm': str(row['Breite_mm']),
+                'Einzelhöhen_mm': str(row['Höhe_mm']),
+                'Einlage_allgemein_mm': float(general_spacer_height),
+                'Bundeinlage_mm': float(bundle_spacer_height),
                 'Länge_mm': row['Länge_mm'],
                 'Breite_mm': row['Breite_mm'],
                 'Höhe_mm': row['Höhe_mm'],
@@ -761,15 +769,25 @@ def build_loading_units(
         count = len(current_rows)
         length = max(float(r['Länge_mm']) for r in current_rows)
         width = max(float(r['Breite_mm']) for r in current_rows)
-        height = sum(float(r['Höhe_mm']) for r in current_rows) + max(0, count - 1) * bundle_spacer_height
+        internal_spacer = general_spacer_height if general_spacer_height > 0 else bundle_spacer_height
+        height = sum(float(r['Höhe_mm']) for r in current_rows) + max(0, count - 1) * internal_spacer
         volume = sum(float(r['Volumen_m3']) for r in current_rows)
         weight = sum(float(r['Gewicht_kg']) for r in current_rows)
         part_labels = [str(r.get('Bauteilnummer') or r.get('Name')) for r in current_rows]
+        part_lengths = [str(float(r['Länge_mm'])) for r in current_rows]
+        part_widths = [str(float(r['Breite_mm'])) for r in current_rows]
+        part_heights = [str(float(r['Höhe_mm'])) for r in current_rows]
         units.append({
             'Einheit_ID': f'B{len(units) + 1:03d}',
             'Typ': 'Bund' if count > 1 else 'Bauteil',
             'Anzahl_Bauteile': count,
             'Bauteile': ', '.join(part_labels),
+            'Bauteile_Liste': '|'.join(part_labels),
+            'Einzellängen_mm': '|'.join(part_lengths),
+            'Einzelbreiten_mm': '|'.join(part_widths),
+            'Einzelhöhen_mm': '|'.join(part_heights),
+            'Einlage_allgemein_mm': float(general_spacer_height),
+            'Bundeinlage_mm': float(bundle_spacer_height),
             'Länge_mm': length,
             'Breite_mm': width,
             'Höhe_mm': height,
@@ -863,6 +881,12 @@ def commit_place(
         'Typ': unit['Typ'],
         'Anzahl_Bauteile': int(unit['Anzahl_Bauteile']),
         'Bauteile': unit['Bauteile'],
+        'Bauteile_Liste': unit.get('Bauteile_Liste', unit.get('Bauteile', '')),
+        'Einzellängen_mm': unit.get('Einzellängen_mm', ''),
+        'Einzelbreiten_mm': unit.get('Einzelbreiten_mm', ''),
+        'Einzelhöhen_mm': unit.get('Einzelhöhen_mm', ''),
+        'Einlage_allgemein_mm': safe_number(unit.get('Einlage_allgemein_mm'), 0.0),
+        'Bundeinlage_mm': safe_number(unit.get('Bundeinlage_mm'), 0.0),
         'X_mm': round(x, 1),
         'Y_mm': round(y, 1),
         'Z_mm': round(z, 1),
@@ -979,6 +1003,12 @@ def create_loading_plan(
                 'Typ': unit['Typ'],
                 'Anzahl_Bauteile': int(unit['Anzahl_Bauteile']),
                 'Bauteile': unit['Bauteile'],
+                'Bauteile_Liste': unit.get('Bauteile_Liste', unit.get('Bauteile', '')),
+                'Einzellängen_mm': unit.get('Einzellängen_mm', ''),
+                'Einzelbreiten_mm': unit.get('Einzelbreiten_mm', ''),
+                'Einzelhöhen_mm': unit.get('Einzelhöhen_mm', ''),
+                'Einlage_allgemein_mm': safe_number(unit.get('Einlage_allgemein_mm'), 0.0),
+                'Bundeinlage_mm': safe_number(unit.get('Bundeinlage_mm'), 0.0),
                 'X_mm': None,
                 'Y_mm': None,
                 'Z_mm': None,
@@ -1134,6 +1164,7 @@ def create_variant_a_loading_plan(
 
     base_default = safe_number(standards.get('Standard_Kantholz_erste_Lage'), 80.0)
     layer_default = safe_number(standards.get('Standard_Einlage_zwischen_Lagen'), 40.0)
+    general_default = safe_number(standards.get('Standard_Einlage_allgemein'), 0.0)
     # Im Moment nutzen wir den Versatz als X-Abstand/Versatzwert. Der freie Abstand kann später separat geführt werden.
     gap_default = safe_number(standards.get('Längenversatz_je_Lage'), 100.0)
 
@@ -1159,6 +1190,11 @@ def create_variant_a_loading_plan(
             trip_platforms = build_trip_platforms(pritschen_df, option_name, fuhre_nr)
             if trip_platforms.empty:
                 continue
+            trip_platforms = trip_platforms.copy()
+            if 'Einlage_allgemein_mm' not in trip_platforms.columns:
+                trip_platforms['Einlage_allgemein_mm'] = general_default
+            else:
+                trip_platforms['Einlage_allgemein_mm'] = trip_platforms['Einlage_allgemein_mm'].apply(lambda v: safe_number(v, general_default))
 
             placements_try, summary_try = create_loading_plan(
                 remaining,
@@ -1208,6 +1244,12 @@ def create_variant_a_loading_plan(
                 'Typ': unit['Typ'],
                 'Anzahl_Bauteile': int(unit['Anzahl_Bauteile']),
                 'Bauteile': unit['Bauteile'],
+                'Bauteile_Liste': unit.get('Bauteile_Liste', unit.get('Bauteile', '')),
+                'Einzellängen_mm': unit.get('Einzellängen_mm', ''),
+                'Einzelbreiten_mm': unit.get('Einzelbreiten_mm', ''),
+                'Einzelhöhen_mm': unit.get('Einzelhöhen_mm', ''),
+                'Einlage_allgemein_mm': safe_number(unit.get('Einlage_allgemein_mm'), 0.0),
+                'Bundeinlage_mm': safe_number(unit.get('Bundeinlage_mm'), 0.0),
                 'X_mm': None,
                 'Y_mm': None,
                 'Z_mm': None,
@@ -1720,6 +1762,7 @@ def compute_loading_warnings(placements_df: pd.DataFrame, platforms_df: pd.DataF
                 'width': safe_number(row.get('Breite_mm')),
                 'max_height': safe_number(row.get('Max_Höhe_mm')),
                 'max_weight': safe_number(row.get('Max_Gewicht_kg')),
+                'base_height': safe_number(row.get('Kantholz_erste_Lage_mm')),
             }
 
     for _, row in placements_df.iterrows():
@@ -1748,8 +1791,9 @@ def compute_loading_warnings(placements_df: pd.DataFrame, platforms_df: pd.DataF
             warnings.append({'Typ': 'Länge', 'Pritsche': pritsche, 'Einheit_ID': einheit, 'Warnung': 'Länge / Überhang überschritten', 'Details': f'{x + length:.0f} mm > {limits["eff_length"]:.0f} mm'})
         if y + width > limits['width']:
             warnings.append({'Typ': 'Breite', 'Pritsche': pritsche, 'Einheit_ID': einheit, 'Warnung': 'Breite überschritten', 'Details': f'{y + width:.0f} mm > {limits["width"]:.0f} mm'})
-        if z + height > limits['max_height']:
-            warnings.append({'Typ': 'Höhe', 'Pritsche': pritsche, 'Einheit_ID': einheit, 'Warnung': 'Höhe überschritten', 'Details': f'{z + height:.0f} mm > {limits["max_height"]:.0f} mm'})
+        check_height = z + height if z >= limits.get('base_height', 0.0) - 0.1 else z + height + limits.get('base_height', 0.0)
+        if check_height > limits['max_height']:
+            warnings.append({'Typ': 'Höhe', 'Pritsche': pritsche, 'Einheit_ID': einheit, 'Warnung': 'Höhe überschritten', 'Details': f'{check_height:.0f} mm > {limits["max_height"]:.0f} mm'})
 
     if platforms_df is not None and not platforms_df.empty:
         for platform_name, group in placements_df[placements_df['Pritsche'] != 'NICHT VERLADEN'].groupby('Pritsche'):
@@ -1776,7 +1820,15 @@ def recompute_summary_from_placements(placements_df: pd.DataFrame, platforms_df:
         group = group[group.get('X_mm', pd.Series(dtype=float)).notna()] if not group.empty else group
         used_length = float((group['X_mm'] + group['Länge_mm']).max()) if not group.empty else 0.0
         used_width = float((group['Y_mm'] + group['Breite_mm']).max()) if not group.empty else 0.0
-        used_height = float((group['Z_mm'] + group['Höhe_mm']).max()) if not group.empty else safe_number(prow.get('Kantholz_erste_Lage_mm'), 0.0)
+        base_height = safe_number(prow.get('Kantholz_erste_Lage_mm'), 0.0)
+        if not group.empty:
+            raw_height = float((group['Z_mm'] + group['Höhe_mm']).max())
+            min_z = float(group['Z_mm'].min())
+            # Normal startet die Platzierung bereits auf dem Kantholz. Falls manuell ab Z=0 gesetzt wird,
+            # wird das Kantholz trotzdem zur Frachthöhe addiert.
+            used_height = raw_height if min_z >= base_height - 0.1 else raw_height + base_height
+        else:
+            used_height = base_height
         used_weight = float(pd.to_numeric(group.get('Gewicht_kg'), errors='coerce').fillna(0).sum()) if not group.empty else 0.0
         rows.append({
             'Fuhre_Nr': prow.get('Fuhre_Nr'),
@@ -1854,12 +1906,59 @@ def create_bsd_header_for_platform(
     }
 
 
+
+def _split_bsd_text_list(value: Any, fallback: str = '') -> List[str]:
+    """Zerlegt Bauteillisten aus Verladeeinheiten robust."""
+    text = str(value or '').strip()
+    if not text or text.lower() == 'nan':
+        text = str(fallback or '').strip()
+    if not text:
+        return []
+    if '|' in text:
+        items = [item.strip() for item in text.split('|')]
+    else:
+        items = [item.strip() for item in re.split(r'\s*,\s*', text)]
+    return [item for item in items if item and item.lower() != 'nan']
+
+
+def _split_bsd_number_list(value: Any, count: int, fallback_total: float, spacer_height: float) -> List[float]:
+    """Zerlegt Einzelhöhen/Längen/Breiten. Fehlen Werte, wird sinnvoll aufgefüllt."""
+    text = str(value or '').strip()
+    values: List[float] = []
+    if text and text.lower() != 'nan':
+        raw_items = text.split('|') if '|' in text else re.split(r'[;,]', text)
+        for item in raw_items:
+            if str(item).strip():
+                values.append(safe_number(item, 0.0))
+    if count <= 0:
+        return values
+    if len(values) < count:
+        # Wenn keine Einzelhöhen bekannt sind, wird aus der Gesamthöhe abzüglich Einlagen verteilt.
+        if not values:
+            remaining = max(0.0, fallback_total - max(0, count - 1) * spacer_height)
+            default_each = remaining / count if count else fallback_total
+        else:
+            default_each = values[-1]
+        values.extend([default_each] * (count - len(values)))
+    return values[:count]
+
+
+def _fmt_bsd_mm_label(prefix: str, value: float) -> str:
+    return f'{prefix} {safe_number(value):.0f}'.strip()
+
+
 def create_bsd_matrix_for_platform(
     placements_df: pd.DataFrame,
     platform: pd.Series,
     top_first: bool = True,
 ) -> pd.DataFrame:
     """Erstellt eine Ladeplan-BSD-Matrix je Pritsche.
+
+    Neu:
+    - Kantholz erste Lage wird als eigene unterste Zeile angezeigt.
+    - Bundeinlagen/Lagenholz werden als eigene Einlage-Zeilen angezeigt.
+    - Einlage allgemein wird zwischen jedem Bauteil im Bund angezeigt, falls > 0.
+    - Bei Bund-Verladung werden die einzelnen Bauteile des Bundes separat angezeigt.
 
     Die Matrix teilt die Pritsche in vier Bereiche auf:
     Vorne links, Vorne rechts, Hinten links, Hinten rechts.
@@ -1870,7 +1969,7 @@ def create_bsd_matrix_for_platform(
         'Pritsche', 'Fuhre_Nr', 'Lage', 'Z_mm',
         'Vorne links', 'Vorne rechts', 'Hinten links', 'Hinten rechts',
         'Bemerkung vorne links', 'Bemerkung vorne rechts', 'Bemerkung hinten links', 'Bemerkung hinten rechts',
-        'Höhe_mm', 'Breite_mm', 'Gesamtlänge_mm', 'Gewicht_kg', 'Anzahl_Einheiten'
+        'Höhe_mm', 'Breite_mm', 'Gesamtlänge_mm', 'Gewicht_kg', 'Anzahl_Einheiten', 'Zeilentyp'
     ]
     if placements_df is None or placements_df.empty:
         return pd.DataFrame(columns=columns)
@@ -1878,6 +1977,9 @@ def create_bsd_matrix_for_platform(
     pname = str(platform.get('Pritsche', ''))
     eff_length = safe_number(platform.get('Länge_mm')) + safe_number(platform.get('Überhang_vorne_mm')) + safe_number(platform.get('Überhang_hinten_mm'))
     platform_width = safe_number(platform.get('Breite_mm'))
+    base_height = safe_number(platform.get('Kantholz_erste_Lage_mm'), 0.0)
+    spacer_height = safe_number(platform.get('Einlage_zwischen_Lagen_mm'), 0.0)
+    platform_general_spacer = safe_number(platform.get('Einlage_allgemein_mm'), 0.0)
 
     rows = placements_df[placements_df['Pritsche'].astype(str) == pname].copy()
     rows = rows[rows['X_mm'].notna() & rows['Y_mm'].notna() & rows['Z_mm'].notna()].copy()
@@ -1887,16 +1989,98 @@ def create_bsd_matrix_for_platform(
     for col in ['X_mm', 'Y_mm', 'Z_mm', 'Länge_mm', 'Breite_mm', 'Höhe_mm', 'Gewicht_kg']:
         rows[col] = pd.to_numeric(rows[col], errors='coerce').fillna(0.0)
 
-    rows['Z_Lage_Key'] = rows['Z_mm'].round(1)
-    layer_keys = sorted(rows['Z_Lage_Key'].unique().tolist())
-    # Lage 1 = unten. Anzeige standardmässig oben nach unten wie klassische Ladepläne.
-    layer_no_lookup = {z: i + 1 for i, z in enumerate(layer_keys)}
-    display_keys = list(reversed(layer_keys)) if top_first else layer_keys
+    slots = ['Vorne links', 'Vorne rechts', 'Hinten links', 'Hinten rechts']
+    slot_has_load = {slot: False for slot in slots}
+    entries: List[Dict[str, Any]] = []
+
+    def add_entry(z: float, slot: str, label: str, kind: str, height: float = 0.0, length: float = 0.0, width: float = 0.0, weight: float = 0.0, remark: str = '') -> None:
+        if not slot or slot not in slots:
+            return
+        entries.append({
+            'z': round(float(z), 1),
+            'slot': slot,
+            'label': str(label or '').strip(),
+            'kind': kind,
+            'height': safe_number(height, 0.0),
+            'length': safe_number(length, 0.0),
+            'width': safe_number(width, 0.0),
+            'weight': safe_number(weight, 0.0),
+            'remark': str(remark or '').strip(),
+        })
+
+    # Bauteile/Bunde in einzelne sichtbare Zeilen zerlegen.
+    for _, row in rows.sort_values(['Z_mm', 'X_mm', 'Y_mm'], kind='stable').iterrows():
+        slot = _position_slot_for_bsd(row, eff_length, platform_width)
+        slot_has_load[slot] = True
+        typ = str(row.get('Typ', '') or '').strip()
+        count = max(1, int(safe_number(row.get('Anzahl_Bauteile'), 1)))
+        labels = _split_bsd_text_list(row.get('Bauteile_Liste', ''), row.get('Bauteile', row.get('Einheit_ID', '')))
+        if not labels:
+            labels = [_format_bsd_cell(row)]
+        if typ != 'Bund' or count <= 1:
+            label = labels[0] if labels else _format_bsd_cell(row)
+            remark = f"{safe_number(row.get('Länge_mm')):.0f}x{safe_number(row.get('Breite_mm')):.0f}x{safe_number(row.get('Höhe_mm')):.0f} mm"
+            add_entry(row['Z_mm'], slot, label, 'Bauteil', row['Höhe_mm'], row['Länge_mm'], row['Breite_mm'], row['Gewicht_kg'], remark)
+            continue
+
+        # Bund: jedes enthaltene Bauteil als eigene BSD-Zeile, Einlagen dazwischen.
+        labels = (labels + [labels[-1]] * count)[:count]
+        internal_spacer = safe_number(row.get('Einlage_allgemein_mm'), platform_general_spacer)
+        if internal_spacer <= 0:
+            internal_spacer = safe_number(row.get('Bundeinlage_mm'), spacer_height)
+        part_heights = _split_bsd_number_list(row.get('Einzelhöhen_mm', ''), count, row['Höhe_mm'], internal_spacer)
+        part_lengths = _split_bsd_number_list(row.get('Einzellängen_mm', ''), count, row['Länge_mm'], 0.0)
+        part_widths = _split_bsd_number_list(row.get('Einzelbreiten_mm', ''), count, row['Breite_mm'], 0.0)
+        part_weight = safe_number(row.get('Gewicht_kg')) / count if count else safe_number(row.get('Gewicht_kg'))
+        z_cursor = safe_number(row.get('Z_mm'))
+        for i, label in enumerate(labels):
+            ph = safe_number(part_heights[i] if i < len(part_heights) else row['Höhe_mm'])
+            pl = safe_number(part_lengths[i] if i < len(part_lengths) else row['Länge_mm'])
+            pw = safe_number(part_widths[i] if i < len(part_widths) else row['Breite_mm'])
+            remark = f"Bund {row.get('Einheit_ID', '')}: {pl:.0f}x{pw:.0f}x{ph:.0f} mm"
+            add_entry(z_cursor, slot, label, 'Bund-Bauteil', ph, pl, pw, part_weight, remark)
+            z_cursor += ph
+            if i < count - 1 and internal_spacer > 0:
+                spacer_label = 'Einlage allgemein' if safe_number(row.get('Einlage_allgemein_mm'), platform_general_spacer) > 0 else 'Einlage'
+                spacer_kind = 'Einlage allgemein' if spacer_label == 'Einlage allgemein' else 'Bund-Einlage'
+                spacer_remark = 'Einlage zwischen jedem Bauteil' if spacer_label == 'Einlage allgemein' else 'Bundeinlage / Lagenholz'
+                add_entry(z_cursor, slot, _fmt_bsd_mm_label(spacer_label, internal_spacer), spacer_kind, internal_spacer, row['Länge_mm'], row['Breite_mm'], 0.0, spacer_remark)
+                z_cursor += internal_spacer
+
+    # Kantholz erste Lage als eigene unterste Zeile anzeigen.
+    if base_height > 0:
+        for slot, has_load in slot_has_load.items():
+            if has_load:
+                add_entry(0.0, slot, _fmt_bsd_mm_label('Kantholz', base_height), 'Kantholz erste Lage', base_height, eff_length, platform_width, 0.0, 'Unterlage auf Pritsche')
+
+    # Zusätzliche Lagenholz-Zeilen zwischen separaten Lagen anzeigen.
+    if spacer_height > 0:
+        layer_z_values = sorted({round(float(v), 1) for v in rows['Z_mm'].tolist() if float(v) > base_height + 0.1})
+        existing_spacer_keys = {(round(e['z'], 1), e['slot']) for e in entries if 'Einlage' in e['kind']}
+        for z_val in layer_z_values:
+            layer_rows = rows[rows['Z_mm'].round(1) == z_val].copy()
+            for _, lrow in layer_rows.iterrows():
+                slot = _position_slot_for_bsd(lrow, eff_length, platform_width)
+                z_spacer = round(max(0.0, z_val - spacer_height), 1)
+                if (z_spacer, slot) not in existing_spacer_keys:
+                    add_entry(z_spacer, slot, _fmt_bsd_mm_label('Einlage', spacer_height), 'Lagenholz', spacer_height, lrow['Länge_mm'], lrow['Breite_mm'], 0.0, 'Einlage zwischen Lagen')
+
+    if not entries:
+        return pd.DataFrame(columns=columns)
+
+    # Gesamt belegte Grundfläche für Unterlagen/Einlagen.
+    used_width_all = round(float((rows['Y_mm'] + rows['Breite_mm']).max() - rows['Y_mm'].min()), 1)
+    used_length_all = round(float((rows['X_mm'] + rows['Länge_mm']).max() - rows['X_mm'].min()), 1)
+
+    z_levels = sorted({round(e['z'], 1) for e in entries})
+    display_levels = list(reversed(z_levels)) if top_first else z_levels
+    # Lage 1 = unten, nur für Orientierung. Auch Einlage/Kantholz bekommen eine Lage nach Höhe.
+    layer_no_lookup = {z: i + 1 for i, z in enumerate(z_levels)}
 
     matrix_rows: List[Dict[str, Any]] = []
-    for z_key in display_keys:
-        layer = rows[rows['Z_Lage_Key'] == z_key].copy()
-        if layer.empty:
+    for z_key in display_levels:
+        level_entries = [e for e in entries if round(e['z'], 1) == z_key]
+        if not level_entries:
             continue
 
         out: Dict[str, Any] = {
@@ -1912,32 +2096,31 @@ def create_bsd_matrix_for_platform(
             'Bemerkung vorne rechts': '',
             'Bemerkung hinten links': '',
             'Bemerkung hinten rechts': '',
-            'Höhe_mm': round(float(layer['Höhe_mm'].max()), 1),
-            'Breite_mm': round(float((layer['Y_mm'] + layer['Breite_mm']).max() - layer['Y_mm'].min()), 1),
-            'Gesamtlänge_mm': round(float((layer['X_mm'] + layer['Länge_mm']).max() - layer['X_mm'].min()), 1),
-            'Gewicht_kg': round(float(layer['Gewicht_kg'].sum()), 2),
-            'Anzahl_Einheiten': int(len(layer)),
+            'Höhe_mm': round(max((e['height'] for e in level_entries), default=0.0), 1),
+            'Breite_mm': 0.0,
+            'Gesamtlänge_mm': 0.0,
+            'Gewicht_kg': round(sum(e['weight'] for e in level_entries), 2),
+            'Anzahl_Einheiten': int(sum(1 for e in level_entries if 'Bauteil' in e['kind'])),
+            'Zeilentyp': ', '.join(sorted({e['kind'] for e in level_entries})),
         }
 
-        slot_values: Dict[str, List[str]] = {k: [] for k in ['Vorne links', 'Vorne rechts', 'Hinten links', 'Hinten rechts']}
-        slot_remarks: Dict[str, List[str]] = {k: [] for k in ['Vorne links', 'Vorne rechts', 'Hinten links', 'Hinten rechts']}
+        part_like = [e for e in level_entries if 'Bauteil' in e['kind']]
+        if part_like:
+            out['Breite_mm'] = round(max((e['width'] for e in part_like), default=0.0), 1)
+            out['Gesamtlänge_mm'] = round(max((e['length'] for e in part_like), default=0.0), 1)
+        else:
+            out['Breite_mm'] = used_width_all
+            out['Gesamtlänge_mm'] = used_length_all
 
-        for _, row in layer.sort_values(['X_mm', 'Y_mm'], kind='stable').iterrows():
-            slot = _position_slot_for_bsd(row, eff_length, platform_width)
-            slot_values.setdefault(slot, []).append(_format_bsd_cell(row))
-            remark = f"{safe_number(row.get('Länge_mm')):.0f}x{safe_number(row.get('Breite_mm')):.0f}x{safe_number(row.get('Höhe_mm')):.0f} mm"
-            if str(row.get('Typ', '')).strip():
-                remark = f"{row.get('Typ')}: {remark}"
-            slot_remarks.setdefault(slot, []).append(remark)
-
-        for slot in ['Vorne links', 'Vorne rechts', 'Hinten links', 'Hinten rechts']:
-            out[slot] = ' | '.join([v for v in slot_values.get(slot, []) if v])
-            out[f'Bemerkung {slot.lower()}'] = ' | '.join(slot_remarks.get(slot, []))
+        for slot in slots:
+            slot_entries = [e for e in level_entries if e['slot'] == slot]
+            out[slot] = '\n'.join([e['label'] for e in slot_entries if e['label']])
+            remarks = [e['remark'] for e in slot_entries if e['remark']]
+            out[f'Bemerkung {slot.lower()}'] = '\n'.join(remarks)
 
         matrix_rows.append(out)
 
     return pd.DataFrame(matrix_rows, columns=columns)
-
 
 def create_all_bsd_matrices(
     placements_df: pd.DataFrame,
@@ -2442,6 +2625,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None) -> None:
     default_bundle_weight = safe_number(standards.get('Max_Bundgewicht'), 1000.0)
     default_base_wood = safe_number(standards.get('Standard_Kantholz_erste_Lage'), 80.0)
     default_layer_spacer = safe_number(standards.get('Standard_Einlage_zwischen_Lagen'), 40.0)
+    default_general_spacer = safe_number(standards.get('Standard_Einlage_allgemein'), 0.0)
     default_gap = safe_number(standards.get('Längenversatz_je_Lage'), 100.0)
 
     col1, col2, col3 = st.columns(3)
@@ -2480,16 +2664,19 @@ def render_loading_module(uploaded_file, transport_excel_file=None) -> None:
         st.dataframe(sorted_parts, use_container_width=True, hide_index=True)
 
     st.subheader('3. Bund- und Unterlegholz-Einstellungen')
-    col1, col2, col3 = st.columns(3)
+    st.caption('Kantholz = liegt direkt auf der Pritsche und zählt zur Frachthöhe. Bundeinlage/Lagenholz = Einlage zwischen Bunden/Lagen. Einlage allgemein = zusätzliche Einlage zwischen jedem einzelnen Bauteil im Bund.')
+    col1, col2, col3, col4 = st.columns(4)
     base_wood_height = col1.number_input('Standard Kantholz erste Lage mm', min_value=0.0, max_value=300.0, value=float(default_base_wood), step=5.0)
     bundle_spacer_height = col2.number_input('Standard Bundeinlage / Lagenholz mm', min_value=0.0, max_value=200.0, value=float(default_layer_spacer), step=5.0)
-    gap_length = col3.number_input('Längenversatz je Lage mm', min_value=0.0, max_value=500.0, value=float(default_gap), step=10.0)
+    general_spacer_height = col3.number_input('Einlage allgemein zwischen jedem Bauteil mm', min_value=0.0, max_value=200.0, value=float(default_general_spacer), step=5.0, help='0 = aus. Wenn grösser 0, wird zwischen jedem Bauteil im Bund eine Einlage eingezeichnet und in der Höhe berücksichtigt.')
+    gap_length = col4.number_input('Längenversatz je Lage mm', min_value=0.0, max_value=500.0, value=float(default_gap), step=10.0)
 
     # Standards werden für die Berechnung aktualisiert. Pritschenwerte aus Excel überschreiben diese Defaults pro Pritsche.
     standards['Holzdichte'] = density
     standards['Max_Bundgewicht'] = max_bundle_weight
     standards['Standard_Kantholz_erste_Lage'] = base_wood_height
     standards['Standard_Einlage_zwischen_Lagen'] = bundle_spacer_height
+    standards['Standard_Einlage_allgemein'] = general_spacer_height
     standards['Längenversatz_je_Lage'] = gap_length
 
     col1, col2, col3, col4 = st.columns(4)
@@ -2503,6 +2690,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None) -> None:
         use_bundles=use_bundles,
         max_bundle_weight=max_bundle_weight,
         bundle_spacer_height=bundle_spacer_height,
+        general_spacer_height=general_spacer_height,
         same_height=same_height,
         same_width=same_width,
         same_quality=same_quality,
@@ -2538,6 +2726,9 @@ def render_loading_module(uploaded_file, transport_excel_file=None) -> None:
                 'Breite_mm': st.column_config.NumberColumn('Breite mm'),
                 'Max_Höhe_mm': st.column_config.NumberColumn('Max. Höhe mm'),
                 'Max_Gewicht_kg': st.column_config.NumberColumn('Max. Gewicht kg'),
+                'Kantholz_erste_Lage_mm': st.column_config.NumberColumn('Kantholz erste Lage mm'),
+                'Einlage_zwischen_Lagen_mm': st.column_config.NumberColumn('Bundeinlage / Lagenholz mm'),
+                'Einlage_allgemein_mm': st.column_config.NumberColumn('Einlage allgemein mm'),
             },
             key='pritschen_editor_excel',
         )
