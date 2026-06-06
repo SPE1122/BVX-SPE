@@ -2,16 +2,14 @@
 BVX Auswertung + Verladeplanung - Streamlit Version
 
 Installation:
-    pip install streamlit pandas plotly openpyxl matplotlib pillow
+    pip install streamlit pandas plotly openpyxl reportlab pillow
 
 Ausführen:
-    streamlit run bvx_auswertung_streamlit_verladung_varianteA_excel_hauptausgabe.py
+    streamlit run bvx_auswertung_streamlit_verladung_varianteA_pdf_logo_ansichten_v2.py
 
 Hinweis:
-    Die Verladeplanung ist als grober, eigenständiger Modulbereich aufgebaut.
-    Hauptausgabe ist der Excel-Verladeplan im BSD-/Pritschenzettel-Stil.
-    Zusätzlich werden pro Pritsche grafische Excel-Ansichten erzeugt.
-    PDF ist nur optional und benötigt reportlab.
+    Hauptausgabe ist der A3-PDF-Pritschenplan.
+    Excel bleibt als Begleitdatei mit den kleinen BSD-/Pritschenzetteln erhalten.
     Die Transportabmessungen sind Beispiel-/Stammdaten und müssen intern geprüft und angepasst werden.
 """
 
@@ -22,10 +20,21 @@ import plotly.graph_objects as go
 import re
 import math
 import io
+import base64
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Tuple
 from collections import Counter
 from datetime import datetime
+
+DEFAULT_LOGO_B64 = '''/9j/4AAQSkZJRgABAQEBLAEsAAD/4QBWRXhpZgAATU0AKgAAAAgABAEaAAUAAAABAAAAPgEbAAUAAAABAAAARgEoAAMAAAABAAIAAAITAAMAAAABAAEAAAAAAAAAAAEsAAAAAQAAASwAAAAB/+0ALFBob3Rvc2hvcCAzLjAAOEJJTQQEAAAAAAAPHAFaAAMbJUccAQAAAgAEAP/hDIFodHRwOi8vbnMuYWRvYmUuY29tL3hhcC8xLjAvADw/eHBhY2tldCBiZWdpbj0n77u/JyBpZD0nVzVNME1wQ2VoaUh6cmVTek5UY3prYzlkJz8+Cjx4OnhtcG1ldGEgeG1sbnM6eD0nYWRvYmU6bnM6bWV0YS8nIHg6eG1wdGs9J0ltYWdlOjpFeGlmVG9vbCAxMC4xMCc+CjxyZGY6UkRGIHhtbG5zOnJkZj0naHR0cDovL3d3dy53My5vcmcvMTk5OS8wMi8yMi1yZGYtc3ludGF4LW5zIyc+CgogPHJkZjpEZXNjcmlwdGlvbiByZGY6YWJvdXQ9JycKICB4bWxuczp0aWZmPSdodHRwOi8vbnMuYWRvYmUuY29tL3RpZmYvMS4wLyc+CiAgPHRpZmY6UmVzb2x1dGlvblVuaXQ+MjwvdGlmZjpSZXNvbHV0aW9uVW5pdD4KICA8dGlmZjpYUmVzb2x1dGlvbj4zMDAvMTwvdGlmZjpYUmVzb2x1dGlvbj4KICA8dGlmZjpZUmVzb2x1dGlvbj4zMDAvMTwvdGlmZjpZUmVzb2x1dGlvbj4KIDwvcmRmOkRlc2NyaXB0aW9uPgoKIDxyZGY6RGVzY3JpcHRpb24gcmRmOmFib3V0PScnCiAgeG1sbnM6eG1wTU09J2h0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC9tbS8nPgogIDx4bXBNTTpEb2N1bWVudElEPmFkb2JlOmRvY2lkOnN0b2NrOjc5MDJhZWNhLWMyZWYtNDY1My1hNTBhLWMxM2NmYzRiYmE4MjwveG1wTU06RG9jdW1lbnRJRD4KICA8eG1wTU06SW5zdGFuY2VJRD54bXAuaWlkOjY5ZGNlMzk1LTZhYWYtNGI0Zi1iNTg2LWE2NTVhMDgzOTI0MDwveG1wTU06SW5zdGFuY2VJRD4KIDwvcmRmOkRlc2NyaXB0aW9uPgo8L3JkZjpSREY+CjwveDp4bXBtZXRhPgogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAo8P3hwYWNrZXQgZW5kPSd3Jz8+/9sAQwAFAwQEBAMFBAQEBQUFBgcMCAcHBwcPCwsJDBEPEhIRDxERExYcFxMUGhURERghGBodHR8fHxMXIiQiHiQcHh8e/9sAQwEFBQUHBgcOCAgOHhQRFB4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4e/8AAEQgBaAFxAwERAAIRAQMRAf/EAB0AAQACAgMBAQAAAAAAAAAAAAAHCAUGAwQJAgH/xABEEAABAwMCAwUFBQcCBAYDAAABAAIDBAURBgcSIUEIEzFRYSIycYGRFEJSYqEVIzNygpKiFrEkQ1PBFyU0c5OywuHw/8QAGAEBAQEBAQAAAAAAAAAAAAAAAAMCAQT/xAAgEQEBAQEAAwEBAQEBAQAAAAAAAQIREiExQVEiAzJx/9oADAMBAAIRAxEAPwC5aAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg4qiop6dvFPNHE3ze4NH6oPymq6Wpyaephmx/03h3+yDmQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQaNuxujpjbm3Nlu87p6+ZpNNb4CDNL6+TW5+8eXlk8l2Trl1Iqfr/ALQO4Op5pI6Gv/09QE+zBbziTH5pT7RP8vCPRUmZEru1FldWVdfM6auq6irlccl88rpHH5uJXWXHTTTU0gkppZIHjmHRPLCPmEEj6G3x3F0pLG2O+S3ajbjNJciZmkeQefbb8j8ly5lamrFq9m96NM7isFEzNrvjWcT7fO8EvA8XRO++Po4dR1WLnik1Kk5ZaEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQR7vtuXRbbaSNZwsqLtV8UVupXHk9+Ob3fkbkE+eQOq7J1nV4obqC8XPUF5qbxea2Wtr6p/HNNIebj0A8gPAAcgOQVUbeuggICAg5aOpqKOrhq6SeWnqIHiSKWJxa+Nw5hzSOYIQXd7NW7bdwLI+1Xl7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yvNXREcLoZK1xa4eTuftD45XeRztbn2fdPa0vtwltlvsDLnpSvc1l2jrw6Ojc0eD2vHMTN+66PLh4HkuasdzK2PdLs16mslRLXaNc6/W3Jc2nc5rauIeWDhsnxGD6Lk07cX8RnbRubpeSS222PV9nc8kPp6eOpiDj/K0Yz6hd9Vn3G/7U7B6v1jeWXTWEFbZ7S5/eVElWSKuq9Gtd7Qz+N3h0BXLqRqZt+rl2i3UVptlNbLbTR0tHSxNighjGGsY0YACmq7SAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICD8e1r2lr2hzXDBBGQQgwJ0To01X2o6TsPf5z3n7Oi4s+eeFd7XORnYo44o2xxsaxjRhrWjAA9AuOvpAx8fqgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICD/2Q=='''
+
+
+def get_embedded_default_logo() -> Optional[bytes]:
+    try:
+        return base64.b64decode(DEFAULT_LOGO_B64)
+    except Exception:
+        return None
+
 
 
 # =============================================================================
@@ -1410,42 +1419,26 @@ def create_loading_excel(
     bsd_header_df: Optional[pd.DataFrame] = None,
     bsd_matrix_df: Optional[pd.DataFrame] = None,
     project_meta: Optional[Dict[str, Any]] = None,
+    logo_bytes: Optional[bytes] = None,
 ) -> bytes:
-    """Erstellt den Excel-Export.
+    """Erstellt die Excel-Begleitdatei.
 
-    Die Excel-Datei dient als Begleit-/Kontrolldatei mit Rohdatenblättern und
-    den kleinen optischen BSD-/Pritschenzetteln. Grafische Grossansichten
-    werden nicht mehr in Excel eingebettet; diese sind Hauptbestandteil der
-    A3-PDF-Ausgabe.
+    Enthalten sind nur die kleinen optischen BSD-/Pritschenzettel je Pritsche.
+    Die technischen Rohdatenregister werden bewusst nicht mehr ausgegeben.
     """
     project_meta = project_meta or {}
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        # Rohdatenblätter bleiben erhalten.
-        parts_df.to_excel(writer, sheet_name='Bauteile', index=False)
-        units_df.to_excel(writer, sheet_name='Verladeeinheiten', index=False)
-        placements_df.to_excel(writer, sheet_name='Platzierung', index=False)
-        platforms_df.to_excel(writer, sheet_name='Pritschen_verwendet', index=False)
-        summary_df.to_excel(writer, sheet_name='Pritschen_Summary', index=False)
-        if options_df is not None and not options_df.empty:
-            options_df.to_excel(writer, sheet_name='Fuhrenoptionen', index=False)
-        if fuhren_log_df is not None and not fuhren_log_df.empty:
-            fuhren_log_df.to_excel(writer, sheet_name='Fuhrenübersicht', index=False)
-        if bsd_header_df is not None and not bsd_header_df.empty:
-            bsd_header_df.to_excel(writer, sheet_name='Ladeplan_BSD_Kopf', index=False)
-        if bsd_matrix_df is not None and not bsd_matrix_df.empty:
-            bsd_matrix_df.to_excel(writer, sheet_name='Ladeplan_BSD_Daten', index=False)
-        if warnings_df is not None and not warnings_df.empty:
-            warnings_df.to_excel(writer, sheet_name='Warnungen', index=False)
-        if project_meta:
-            pd.DataFrame([{'Feld': k, 'Wert': v} for k, v in project_meta.items()]).to_excel(writer, sheet_name='Projektkopf', index=False)
+        # Nur optische Pritschenzettel ausgeben.
+        # Ein temporäres Hinweisblatt verhindert eine leere Excel-Datei, falls keine Pritsche belegt ist.
+        pd.DataFrame([{'Hinweis': 'Keine belegte Pritsche / kein Ladeplan erzeugt.'}]).to_excel(writer, sheet_name='Hinweis', index=False)
 
         # Optische Ladeplan-BSD-Blätter erzeugen.
         try:
             from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
             from openpyxl.utils import get_column_letter
         except Exception:
-            # Falls openpyxl lokal nicht verfügbar ist, bleiben zumindest die Rohdaten erhalten.
+            # Falls openpyxl lokal nicht verfügbar ist, bleibt zumindest das Hinweisblatt erhalten.
             return output.getvalue()
 
         wb = writer.book
@@ -1719,6 +1712,21 @@ def create_loading_excel(
             ws.cell(footer_row + 5, 13).fill = fill_hatch
             ws.cell(footer_row + 5, 13).border = border_thin
 
+            # Logo im Pritschenzettel einfügen, falls vorhanden.
+            if logo_bytes:
+                try:
+                    from openpyxl.drawing.image import Image as XLImage
+                    if not hasattr(wb, '_verladeplan_excel_logo_buffers'):
+                        wb._verladeplan_excel_logo_buffers = []
+                    img_buf = io.BytesIO(logo_bytes)
+                    wb._verladeplan_excel_logo_buffers.append(img_buf)
+                    img = XLImage(img_buf)
+                    img.width = 120
+                    img.height = 85
+                    ws.add_image(img, f'M{max(15, footer_row - 6)}')
+                except Exception:
+                    pass
+
             # Rahmen / allgemeine Formatierung.
             for row in ws.iter_rows(min_row=1, max_row=lower_top + 6, min_col=1, max_col=16):
                 for cell in row:
@@ -1960,7 +1968,10 @@ def create_loading_excel(
                 matrix = bsd_matrix_df[bsd_matrix_df['Pritsche'].astype(str) == pname].copy()
                 add_styled_bsd_sheet(header, matrix)
 
-        # Rohdatenblätter etwas lesbarer machen.
+        if 'Hinweis' in wb.sheetnames and len(wb.sheetnames) > 1:
+            wb.remove(wb['Hinweis'])
+
+        # Verbleibende Blätter etwas lesbarer machen.
         for ws in wb.worksheets:
             if ws.title.startswith('BSD_') or ws.title.startswith('Ansicht_'):
                 continue
@@ -2570,26 +2581,38 @@ def create_all_bsd_matrices(
 
 
 def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y: float, w: float, h: float, view: str, title: str) -> None:
-    """Einfache PDF-Zeichnung ohne zusätzliche Plotly/Kaleido-Abhängigkeit."""
+    """Zeichnet eine PDF-Ansicht mit Pritschen- und Ladungsabmessungen."""
     from reportlab.lib import colors
 
     eff_length = safe_number(platform.get('Länge_mm')) + safe_number(platform.get('Überhang_vorne_mm')) + safe_number(platform.get('Überhang_hinten_mm'))
     width = safe_number(platform.get('Breite_mm'))
     max_height = safe_number(platform.get('Max_Höhe_mm'))
+    pname = str(platform.get('Pritsche', ''))
+
+    rows = placements[placements['Pritsche'].astype(str) == pname].copy()
+    rows = rows[rows['X_mm'].notna() & rows['Y_mm'].notna() & rows['Z_mm'].notna()].copy()
+
+    used_len = safe_number((rows['X_mm'] + rows['Länge_mm']).max() - rows['X_mm'].min(), 0.0) if not rows.empty else 0.0
+    used_wid = safe_number((rows['Y_mm'] + rows['Breite_mm']).max() - rows['Y_mm'].min(), 0.0) if not rows.empty else 0.0
+    used_hei = safe_number((rows['Z_mm'] + rows['Höhe_mm']).max(), 0.0) if not rows.empty else 0.0
 
     c.setStrokeColor(colors.black)
-    c.setFont('Helvetica-Bold', 8)
-    c.drawString(x, y + h + 10, title)
+    c.setFillColor(colors.black)
+    c.setFont('Helvetica-Bold', 9)
+    c.drawString(x, y + h + 13, title)
 
     if view == 'top':
         data_w, data_h = max(eff_length, 1), max(width, 1)
-        x_label, y_label = 'X Länge', 'Y Breite'
-    elif view == 'side':
-        data_w, data_h = max(eff_length, 1), max(max_height, 1)
-        x_label, y_label = 'X Länge', 'Z Höhe'
+        x_label, y_label = 'Länge X', 'Breite Y'
+        dim_line = f'Pritsche: L {eff_length:.0f} / B {width:.0f} mm   Ladung: L {used_len:.0f} / B {used_wid:.0f} mm'
+    elif view in ('side', 'side_left', 'side_right'):
+        data_w, data_h = max(eff_length, 1), max(max_height, used_hei, 1)
+        x_label, y_label = 'Länge X', 'Höhe Z'
+        dim_line = f'Pritsche: L {eff_length:.0f} / H {max_height:.0f} mm   Ladung: L {used_len:.0f} / H {used_hei:.0f} mm'
     else:
-        data_w, data_h = max(width, 1), max(max_height, 1)
-        x_label, y_label = 'Y Breite', 'Z Höhe'
+        data_w, data_h = max(width, 1), max(max_height, used_hei, 1)
+        x_label, y_label = 'Breite Y', 'Höhe Z'
+        dim_line = f'Pritsche: B {width:.0f} / H {max_height:.0f} mm   Ladung: B {used_wid:.0f} / H {used_hei:.0f} mm'
 
     scale = min(w / data_w, h / data_h)
     draw_w = data_w * scale
@@ -2597,45 +2620,77 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
     ox = x
     oy = y
 
+    # Pritschenrahmen / Maximalbereich
     c.setStrokeColor(colors.black)
+    c.setLineWidth(0.9)
     c.rect(ox, oy, draw_w, draw_h, stroke=1, fill=0)
-    c.setFont('Helvetica', 6)
+
+    # Achsen- und Maßtexte ähnlich wie in der App
+    c.setFont('Helvetica', 6.5)
+    c.setFillColor(colors.black)
     c.drawString(ox, oy - 10, x_label)
     c.saveState()
-    c.translate(ox - 12, oy)
+    c.translate(ox - 14, oy + 2)
     c.rotate(90)
     c.drawString(0, 0, y_label)
     c.restoreState()
+    c.drawString(ox, oy - 22, dim_line)
 
-    rows = placements[placements['Pritsche'].astype(str) == str(platform.get('Pritsche', ''))].copy()
-    rows = rows[rows['X_mm'].notna() & rows['Y_mm'].notna() & rows['Z_mm'].notna()].copy()
-    c.setFillColor(colors.lightgrey)
-    c.setStrokeColor(colors.darkgrey)
+    # einfache Maßlinie unten / links
+    c.setLineWidth(0.5)
+    c.line(ox, oy - 4, ox + draw_w, oy - 4)
+    c.line(ox, oy - 6, ox, oy - 2)
+    c.line(ox + draw_w, oy - 6, ox + draw_w, oy - 2)
+    c.saveState()
+    c.translate(ox - 6, oy)
+    c.line(0, 0, 0, draw_h)
+    c.line(-2, 0, 2, 0)
+    c.line(-2, draw_h, 2, draw_h)
+    c.restoreState()
+
+    # Null-/Grenzwerte klein anschreiben
+    c.setFont('Helvetica', 5.5)
+    c.drawRightString(ox + draw_w, oy - 11, f'{data_w:.0f}')
+    c.drawString(ox - 2, oy + draw_h + 2, f'{data_h:.0f}')
+
+    # Bauteile / Bunde
     for _, row in rows.iterrows():
         if view == 'top':
             rx = ox + safe_number(row.get('X_mm')) * scale
             ry = oy + safe_number(row.get('Y_mm')) * scale
             rw = safe_number(row.get('Länge_mm')) * scale
             rh = safe_number(row.get('Breite_mm')) * scale
-        elif view == 'side':
-            rx = ox + safe_number(row.get('X_mm')) * scale
+        elif view in ('side', 'side_left', 'side_right'):
+            x_val = safe_number(row.get('X_mm'))
+            l_val = safe_number(row.get('Länge_mm'))
+            if view == 'side_right':
+                x_val = eff_length - x_val - l_val
+            rx = ox + x_val * scale
             ry = oy + safe_number(row.get('Z_mm')) * scale
-            rw = safe_number(row.get('Länge_mm')) * scale
+            rw = l_val * scale
             rh = safe_number(row.get('Höhe_mm')) * scale
-        else:
+        elif view == 'front':
+            y_val = width - safe_number(row.get('Y_mm')) - safe_number(row.get('Breite_mm'))
+            rx = ox + y_val * scale
+            ry = oy + safe_number(row.get('Z_mm')) * scale
+            rw = safe_number(row.get('Breite_mm')) * scale
+            rh = safe_number(row.get('Höhe_mm')) * scale
+        else:  # back
             rx = ox + safe_number(row.get('Y_mm')) * scale
             ry = oy + safe_number(row.get('Z_mm')) * scale
             rw = safe_number(row.get('Breite_mm')) * scale
             rh = safe_number(row.get('Höhe_mm')) * scale
+
         if rw <= 0 or rh <= 0:
             continue
         c.setFillColor(colors.lightgrey)
+        c.setStrokeColor(colors.darkgrey)
+        c.setLineWidth(0.45)
         c.rect(rx, ry, rw, rh, stroke=1, fill=1)
         c.setFillColor(colors.black)
-        c.setFont('Helvetica', 5)
-        label = str(_view_label(row)).replace('<br>', ' ')[:24]
+        c.setFont('Helvetica', 5.2)
+        label = str(_view_label(row)).replace('<br>', ' ')[:32]
         c.drawCentredString(rx + rw / 2, ry + rh / 2, label)
-
 
 def _pdf_draw_bsd_matrix_page(c, page_w: float, page_h: float, margin: float, platform: pd.Series, matrix_df: pd.DataFrame, header: Dict[str, Any], project_name: str, logo_bytes: Optional[bytes] = None) -> None:
     """Zeichnet eine zweite PDF-Seite pro Pritsche mit Ladeplan-BSD-Matrix."""
@@ -2824,31 +2879,20 @@ def create_loading_pdf(
         for i, line in enumerate(hints):
             c.drawString(hint_x, hint_y - 14 - i * 12, line)
 
-        # Zeichnungsbereiche
-        top_y = 210
-        _pdf_draw_view(c, placements_df, platform, margin, top_y, 500, 270, 'side', 'Seitenansicht')
-        _pdf_draw_view(c, placements_df, platform, margin + 520, top_y, 150, 270, 'back', 'Rückansicht')
-        _pdf_draw_view(c, placements_df, platform, margin + 685, top_y, 150, 270, 'front', 'Vorderansicht')
-        _pdf_draw_view(c, placements_df, platform, margin, 35, 810, 135, 'top', 'Draufsicht')
+        # Zeichnungsbereiche: grössere A3-Ansichten mit linker/rechter Seitenansicht.
+        _pdf_draw_view(c, placements_df, platform, margin, 455, 720, 230, 'side_left', 'Linke Seitenansicht')
+        _pdf_draw_view(c, placements_df, platform, margin, 205, 720, 230, 'side_right', 'Rechte Seitenansicht')
+        _pdf_draw_view(c, placements_df, platform, margin + 750, 455, 170, 230, 'back', 'Rückansicht')
+        _pdf_draw_view(c, placements_df, platform, margin + 930, 455, 170, 230, 'front', 'Vorderansicht')
+        _pdf_draw_view(c, placements_df, platform, margin, 35, 1080, 135, 'top', 'Draufsicht')
 
-        # Warnungen
-        pwarnings = warnings_df[warnings_df['Pritsche'].astype(str) == pname] if warnings_df is not None and not warnings_df.empty else pd.DataFrame()
-        c.setFont('Helvetica-Bold', 8)
-        c.drawString(page_w - 290, 150, 'Warnungen')
-        c.setFont('Helvetica', 7)
-        if pwarnings.empty:
-            c.drawString(page_w - 290, 136, 'Keine Warnungen')
-        else:
-            for i, (_, wrn) in enumerate(pwarnings.head(8).iterrows()):
-                c.drawString(page_w - 290, 136 - i * 11, f"- {wrn.get('Einheit_ID','')}: {wrn.get('Warnung','')}")
-
-        # QS Feld
+        # Qualitätssicherung kompakt oben rechts.
         c.setStrokeColor(colors.black)
-        c.rect(page_w - 290, 35, 250, 60, stroke=1, fill=0)
+        c.rect(page_w - 245, page_h - 145, 210, 52, stroke=1, fill=0)
         c.setFont('Helvetica', 8)
-        c.drawString(page_w - 280, 78, 'Qualitätssicherung')
-        c.drawString(page_w - 280, 58, 'Datum: __________________')
-        c.drawString(page_w - 140, 58, 'Unterschrift: __________________')
+        c.drawString(page_w - 235, page_h - 108, 'Qualitätssicherung')
+        c.drawString(page_w - 235, page_h - 125, 'Datum: ______________')
+        c.drawString(page_w - 125, page_h - 125, 'Visum: __________')
 
         c.showPage()
 
@@ -3121,11 +3165,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
         except Exception:
             logo_bytes = None
     if logo_bytes is None:
-        try:
-            with open(r'/mnt/data/ghostwriter_images/context/4e099357-7f76-52ac-b22d-16395ad9966b.jpg', 'rb') as fh:
-                logo_bytes = fh.read()
-        except Exception:
-            logo_bytes = None
+        logo_bytes = get_embedded_default_logo()
 
     st.subheader('3. Sortierung')
     sort_options = [
@@ -3388,7 +3428,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
         st.info(
             'Hauptausgabe ist wieder der A3-Pritschenplan als PDF. Die PDF enthält die grosse grafische Darstellung '
             'mit Seitenansicht, Rückansicht, Vorderansicht, Draufsicht und den kleinen Ladeplan-BSD-Seiten je Pritsche. '
-            'Excel bleibt als Daten- und Begleitdatei mit den kleinen BSD-Zetteln erhalten.'
+            'Excel bleibt als Begleitdatei mit den kleinen BSD-Zetteln erhalten.'
         )
 
         try:
@@ -3413,7 +3453,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
 
         st.divider()
         st.subheader('Excel-Daten / kleine BSD-Zettel')
-        st.caption('Die Excel-Datei enthält die kleinen BSD-/Pritschenzettel und die Datenblätter Verladeeinheiten, Platzierung, Pritschen_verwendet, Pritschen_Summary, Fuhrenübersicht und Ladeplan_BSD_Daten.')
+        st.caption('Die Excel-Datei enthält nur noch die kleinen BSD-/Pritschenzettel je Pritsche. Die technischen Datenregister werden nicht mehr ausgegeben.')
 
         excel_data = create_loading_excel(
             sorted_parts,
@@ -3427,6 +3467,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
             bsd_header_df=bsd_header_df,
             bsd_matrix_df=bsd_matrix_df,
             project_meta=project_meta,
+            logo_bytes=logo_bytes,
         )
         st.download_button(
             label='Excel-Begleitdatei herunterladen',
@@ -3437,7 +3478,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
 
         st.markdown('''
         **Hinweis:** Diese Version erstellt den A3-Pritschenplan als Hauptausgabe im PDF.
-        Die Excel-Datei enthält kleine BSD-Zettel und Datenregister. Manuelles Umplatzieren erfolgt über die Platzierungstabelle.
+        Die Excel-Datei enthält kleine BSD-Zettel. Manuelles Umplatzieren erfolgt über die Platzierungstabelle.
         Drag-and-drop ist nicht enthalten.
         ''')
 
