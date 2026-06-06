@@ -495,7 +495,7 @@ def parts_to_dataframe(parts: List[Part], density_kg_m3: float = 500.0) -> pd.Da
     rows = []
     for idx, part in enumerate(parts, start=1):
         volume_m3 = part.volume_m3 or (part.length * part.width * part.height / 1_000_000_000)
-        rows.append({
+        row = {
             'Index': idx,
             'Name': part.name,
             'Bauteilnummer': part.part_no or part.name,
@@ -510,8 +510,60 @@ def parts_to_dataframe(parts: List[Part], density_kg_m3: float = 500.0) -> pd.Da
             'Höhe_mm': float(part.height or 0),
             'Volumen_m3': float(volume_m3 or 0),
             'Gewicht_kg': float((volume_m3 or 0) * density_kg_m3),
-        })
+        }
+        # Alle BVX-Attribute zusätzlich verfügbar machen, damit sie z. B.
+        # für Decke/Bauabschnitt oder spätere Kopf-/Sortierfelder ausgewählt werden können.
+        for attr_key, attr_value in (part.attributes or {}).items():
+            col = f'BVX_{attr_key}'
+            if col not in row:
+                row[col] = attr_value
+        rows.append(row)
     return pd.DataFrame(rows)
+
+
+def _available_bvx_meta_fields(parts_df: pd.DataFrame) -> List[str]:
+    """Felder, die sinnvoll für Kopf-/Projektdaten auswählbar sind."""
+    if parts_df is None or parts_df.empty:
+        return []
+    fields: List[str] = []
+    for col in parts_df.columns:
+        if col in {'Index', 'Länge_mm', 'Breite_mm', 'Höhe_mm', 'Volumen_m3', 'Gewicht_kg'}:
+            continue
+        try:
+            values = parts_df[col].dropna().astype(str).str.strip()
+            values = values[(values != '') & (values.str.lower() != 'nan')]
+            if len(values) > 0:
+                fields.append(col)
+        except Exception:
+            pass
+    return fields
+
+
+def _default_attr_index(options: List[str], preferred: List[str]) -> int:
+    lower_map = {str(opt).lower(): i for i, opt in enumerate(options)}
+    for pref in preferred:
+        idx = lower_map.get(pref.lower())
+        if idx is not None:
+            return idx
+    for pref in preferred:
+        for i, opt in enumerate(options):
+            if pref.lower() in str(opt).lower():
+                return i
+    return 0
+
+
+def _unique_display_values_from_field(parts_df: pd.DataFrame, field: str, max_values: int = 6) -> str:
+    """Nimmt die eindeutigen Werte eines BVX-Feldes für Kopfbereiche."""
+    if parts_df is None or parts_df.empty or not field or field == 'Manuell' or field not in parts_df.columns:
+        return ''
+    values: List[str] = []
+    for value in parts_df[field].tolist():
+        text = _format_label_value(value)
+        if text and text not in values:
+            values.append(text)
+        if len(values) >= max_values:
+            break
+    return ', '.join(values)
 
 
 def sort_parts_dataframe(
@@ -805,7 +857,7 @@ def build_loading_units(
         count = len(current_rows)
         length = max(float(r['Länge_mm']) for r in current_rows)
         width = max(float(r['Breite_mm']) for r in current_rows)
-        internal_spacer = general_spacer_height if general_spacer_height > 0 else bundle_spacer_height
+        internal_spacer = general_spacer_height if general_spacer_height > 0 else 0.0
         height = sum(float(r['Höhe_mm']) for r in current_rows) + max(0, count - 1) * internal_spacer
         volume = sum(float(r['Volumen_m3']) for r in current_rows)
         weight = sum(float(r['Gewicht_kg']) for r in current_rows)
@@ -890,6 +942,7 @@ def init_platform_state(row: pd.Series, base_wood_height: float, layer_spacer_he
         'used_width': 0.0,
         'used_height': float(base_height),
         'total_weight': 0.0,
+        'current_layer_has_bundle': False,
         'placements': [],
     }
 
@@ -956,6 +1009,7 @@ def commit_place(
     state['used_width'] = max(state['used_width'], y + width)
     state['used_height'] = max(state['used_height'], z + height)
     state['total_weight'] += float(unit['Gewicht_kg'])
+    state['current_layer_has_bundle'] = bool(state.get('current_layer_has_bundle', False) or str(unit.get('Typ', '')).strip() == 'Bund')
     return placement
 
 
@@ -999,14 +1053,24 @@ def try_place_unit(
         if allow_stack and state['layer_max_height'] > 0:
             x = 0.0
             y = 0.0
-            effective_layer_spacer = max(float(state.get('layer_spacer_height', 0.0)), float(state.get('general_spacer_height', 0.0)))
-            z = state['current_z'] + state['layer_max_height'] + effective_layer_spacer
+            # Bundeinlage/Lagenholz nur zwischen separaten Bunden/Lagen verwenden.
+            # Innerhalb eines Bundes kommt diese Einlage nicht zum Einsatz.
+            # Wenn keine Bundlage betroffen ist, kann optional die allgemeine Einlage
+            # zwischen einzelnen Bauteilen/Lagen gerechnet werden.
+            current_layer_has_bundle = bool(state.get('current_layer_has_bundle', False))
+            next_is_bundle = str(unit.get('Typ', '')).strip() == 'Bund'
+            if current_layer_has_bundle or next_is_bundle:
+                effective_layer_spacer = float(state.get('layer_spacer_height', 0.0))
+            else:
+                effective_layer_spacer = float(state.get('general_spacer_height', 0.0))
+            z = state['current_z'] + state['layer_max_height'] + max(0.0, effective_layer_spacer)
             if can_place(state, x, y, z, use_length, use_width, height, weight):
                 state['current_x'] = 0.0
                 state['current_y'] = 0.0
                 state['current_z'] = z
                 state['row_max_width'] = 0.0
                 state['layer_max_height'] = 0.0
+                state['current_layer_has_bundle'] = False
                 return commit_place(state, unit, x, y, z, use_length, use_width, height, rotation, 'übereinander')
 
     return None
@@ -1342,6 +1406,7 @@ def create_loading_excel(
     warnings_df: Optional[pd.DataFrame] = None,
     bsd_header_df: Optional[pd.DataFrame] = None,
     bsd_matrix_df: Optional[pd.DataFrame] = None,
+    project_meta: Optional[Dict[str, Any]] = None,
 ) -> bytes:
     """Erstellt den Excel-Export.
 
@@ -1350,6 +1415,7 @@ def create_loading_excel(
     PB6-Vorlage angelehnt: Kopfbereich, Kontrolle, Ladeplan-Matrix,
     Ladehöhe, Material/Bemerkungen und Gewichts-Etikette.
     """
+    project_meta = project_meta or {}
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         # Rohdatenblätter bleiben erhalten.
@@ -1368,6 +1434,8 @@ def create_loading_excel(
             bsd_matrix_df.to_excel(writer, sheet_name='Ladeplan_BSD_Daten', index=False)
         if warnings_df is not None and not warnings_df.empty:
             warnings_df.to_excel(writer, sheet_name='Warnungen', index=False)
+        if project_meta:
+            pd.DataFrame([{'Feld': k, 'Wert': v} for k, v in project_meta.items()]).to_excel(writer, sheet_name='Projektkopf', index=False)
 
         # Optische Ladeplan-BSD-Blätter erzeugen.
         try:
@@ -1486,26 +1554,29 @@ def create_loading_excel(
             ws['C2'] = pname
             ws['C2'].font = font_title
             ws['C2'].fill = fill_cyan
-            ws['C3'] = str(val(header, 'Pritschenname', '') or val(header, 'Fuhrenoption', ''))
+            ws['C3'] = str(val(header, 'Objekt_Name', '') or val(header, 'Pritschenname', '') or val(header, 'Fuhrenoption', ''))
             ws['C3'].font = font_title
             ws['C3'].fill = fill_yellow
+            write_label(ws, 'A4', 'Transport:')
+            ws['C4'] = str(val(header, 'Transport_Name', ''))
+            ws['C4'].fill = fill_yellow
             write_label(ws, 'A6', 'Decke:')
-            ws['C6'] = ''
+            ws['C6'] = str(val(header, 'Decke', ''))
             ws['C6'].fill = fill_cyan
             write_label(ws, 'A7', 'Bauabschnitt:')
-            ws['C7'] = ''
+            ws['C7'] = str(val(header, 'Bauabschnitt', ''))
             ws['C7'].fill = fill_cyan
             write_label(ws, 'A9', 'Sachbearbeiter:')
-            ws['C9'] = ''
+            ws['C9'] = str(val(header, 'Sachbearbeiter', ''))
             write_label(ws, 'A10', 'Datum:')
-            ws['C10'] = datetime.now().strftime('%d.%m.%Y')
+            ws['C10'] = str(val(header, 'Datum', datetime.now().strftime('%d.%m.%Y')))
             set_box(ws, 'A9:D10')
 
             # Kopf Mitte.
             set_box(ws, 'F2:K10')
             write_label(ws, 'F2', 'Unternehmer:')
             ws.merge_cells('I2:K2')
-            ws['I2'] = ''
+            ws['I2'] = str(val(header, 'Transport_Name', ''))
             ws['I2'].fill = fill_yellow
             write_label(ws, 'F4', 'Pritschenhöhe:')
             ws['I4'] = fmt_mm(val(header, 'Pritschenhöhe_mm', 0))
@@ -1954,6 +2025,7 @@ def create_bsd_header_for_platform(
     platform: pd.Series,
     summary_df: pd.DataFrame,
     warnings_df: Optional[pd.DataFrame] = None,
+    project_meta: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Kopfdaten je Pritsche ähnlich Ladeplan BSD."""
     pname = str(platform.get('Pritsche', ''))
@@ -1962,6 +2034,8 @@ def create_bsd_header_for_platform(
     warn_count = 0
     if warnings_df is not None and not warnings_df.empty and 'Pritsche' in warnings_df.columns:
         warn_count = int((warnings_df['Pritsche'].astype(str) == pname).sum())
+
+    project_meta = project_meta or {}
 
     return {
         'Pritsche': pname,
@@ -1977,6 +2051,14 @@ def create_bsd_header_for_platform(
         'Breite_gesamt_mm': safe_number(srow.get('Breite genutzt_mm')),
         'Ladegewicht_kg': safe_number(srow.get('Gewicht genutzt_kg')),
         'Warnungen': warn_count,
+        'Objekt_Name': project_meta.get('Objekt_Name', ''),
+        'Transport_Name': project_meta.get('Transport_Name', ''),
+        'Sachbearbeiter': project_meta.get('Sachbearbeiter', ''),
+        'Datum': project_meta.get('Datum', datetime.now().strftime('%d.%m.%Y')),
+        'Decke': project_meta.get('Decke', ''),
+        'Bauabschnitt': project_meta.get('Bauabschnitt', ''),
+        'Decke_Attribut': project_meta.get('Decke_Attribut', ''),
+        'Bauabschnitt_Attribut': project_meta.get('Bauabschnitt_Attribut', ''),
     }
 
 
@@ -2093,7 +2175,7 @@ def create_bsd_matrix_for_platform(
         slot_has_load[slot] = True
         typ = str(row.get('Typ', '') or '').strip()
         count = max(1, int(safe_number(row.get('Anzahl_Bauteile'), 1)))
-        labels = _split_bsd_text_list(row.get('Bauteile_Liste', ''), row.get('Bauteile', row.get('Einheit_ID', '')))
+        labels = _split_bsd_text_list(row.get('Ansicht_Liste', ''), row.get('Bauteile_Liste', row.get('Bauteile', row.get('Einheit_ID', ''))))
         if not labels:
             labels = [_format_bsd_cell(row)]
         if typ != 'Bund' or count <= 1:
@@ -2105,8 +2187,10 @@ def create_bsd_matrix_for_platform(
         # Bund: jedes enthaltene Bauteil als eigene BSD-Zeile, Einlagen dazwischen.
         labels = (labels + [labels[-1]] * count)[:count]
         internal_spacer = safe_number(row.get('Einlage_allgemein_mm'), platform_general_spacer)
+        # Bundeinlage/Lagenholz wird NICHT innerhalb eines Bundes verwendet.
+        # Innerhalb eines Bundes nur dann Einlage, wenn "Einlage allgemein" > 0 ist.
         if internal_spacer <= 0:
-            internal_spacer = safe_number(row.get('Bundeinlage_mm'), spacer_height)
+            internal_spacer = 0.0
         part_heights = _split_bsd_number_list(row.get('Einzelhöhen_mm', ''), count, row['Höhe_mm'], internal_spacer)
         part_lengths = _split_bsd_number_list(row.get('Einzellängen_mm', ''), count, row['Länge_mm'], 0.0)
         part_widths = _split_bsd_number_list(row.get('Einzelbreiten_mm', ''), count, row['Breite_mm'], 0.0)
@@ -2120,8 +2204,8 @@ def create_bsd_matrix_for_platform(
             add_entry(z_cursor, slot, label, 'Bund-Bauteil', ph, pl, pw, part_weight, remark)
             z_cursor += ph
             if i < count - 1 and internal_spacer > 0:
-                spacer_label = 'Einlage allgemein' if safe_number(row.get('Einlage_allgemein_mm'), platform_general_spacer) > 0 else 'Einlage'
-                spacer_kind = 'Einlage allgemein' if spacer_label == 'Einlage allgemein' else 'Bund-Einlage'
+                spacer_label = 'Einlage allgemein'
+                spacer_kind = 'Einlage allgemein'
                 spacer_remark = ''
                 add_entry(z_cursor, slot, _fmt_bsd_mm_label(spacer_label, internal_spacer), spacer_kind, internal_spacer, row['Länge_mm'], row['Breite_mm'], 0.0, spacer_remark)
                 z_cursor += internal_spacer
@@ -2133,19 +2217,28 @@ def create_bsd_matrix_for_platform(
                 add_entry(0.0, slot, _fmt_bsd_mm_label('Kantholz', base_height), 'Kantholz erste Lage', base_height, eff_length, platform_width, 0.0, '')
 
     # Zusätzliche Einlage-Zeilen zwischen separaten Lagen anzeigen.
-    effective_layer_spacer = spacer_height if spacer_height > 0 else platform_general_spacer
-    if effective_layer_spacer > 0:
-        layer_z_values = sorted({round(float(v), 1) for v in rows['Z_mm'].tolist() if float(v) > base_height + 0.1})
-        existing_spacer_keys = {(round(e['z'], 1), e['slot']) for e in entries if 'Einlage' in e['kind']}
-        spacer_label = 'Einlage' if spacer_height > 0 else 'Einlage allgemein'
-        spacer_kind = 'Lagenholz' if spacer_height > 0 else 'Einlage allgemein'
-        for z_val in layer_z_values:
-            layer_rows = rows[rows['Z_mm'].round(1) == z_val].copy()
-            for _, lrow in layer_rows.iterrows():
-                slot = _position_slot_for_bsd(lrow, eff_length, platform_width)
-                z_spacer = round(max(0.0, z_val - effective_layer_spacer), 1)
-                if (z_spacer, slot) not in existing_spacer_keys:
-                    add_entry(z_spacer, slot, _fmt_bsd_mm_label(spacer_label, effective_layer_spacer), spacer_kind, effective_layer_spacer, lrow['Länge_mm'], lrow['Breite_mm'], 0.0, '')
+    # Bundeinlage/Lagenholz nur zwischen Bund-Lagen verwenden.
+    # Einlage allgemein nur dann, wenn sie ausdrücklich > 0 gesetzt ist.
+    layer_z_values = sorted({round(float(v), 1) for v in rows['Z_mm'].tolist() if float(v) > base_height + 0.1})
+    existing_spacer_keys = {(round(e['z'], 1), e['slot']) for e in entries if 'Einlage' in e['kind'] or 'Lagenholz' in e['kind']}
+    for z_val in layer_z_values:
+        layer_rows = rows[rows['Z_mm'].round(1) == z_val].copy()
+        for _, lrow in layer_rows.iterrows():
+            slot = _position_slot_for_bsd(lrow, eff_length, platform_width)
+            is_bundle_layer = str(lrow.get('Typ', '')).strip() == 'Bund'
+            if is_bundle_layer and spacer_height > 0:
+                effective_layer_spacer = spacer_height
+                spacer_label = 'Bundeinlage / Lagenholz'
+                spacer_kind = 'Lagenholz'
+            elif platform_general_spacer > 0:
+                effective_layer_spacer = platform_general_spacer
+                spacer_label = 'Einlage allgemein'
+                spacer_kind = 'Einlage allgemein'
+            else:
+                continue
+            z_spacer = round(max(0.0, z_val - effective_layer_spacer), 1)
+            if (z_spacer, slot) not in existing_spacer_keys:
+                add_entry(z_spacer, slot, _fmt_bsd_mm_label(spacer_label, effective_layer_spacer), spacer_kind, effective_layer_spacer, lrow['Länge_mm'], lrow['Breite_mm'], 0.0, '')
 
     if not entries:
         return pd.DataFrame(columns=columns)
@@ -2209,6 +2302,7 @@ def create_all_bsd_matrices(
     platforms_df: pd.DataFrame,
     summary_df: pd.DataFrame,
     warnings_df: Optional[pd.DataFrame] = None,
+    project_meta: Optional[Dict[str, Any]] = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Erstellt Kopfdaten und Ladeplan-BSD-Matrix für jede verwendete Pritsche."""
     if platforms_df is None or platforms_df.empty:
@@ -2222,7 +2316,7 @@ def create_all_bsd_matrices(
         if not has_load:
             # Leere Pritschen nicht als Ladeplan ausgeben.
             continue
-        header_rows.append(create_bsd_header_for_platform(platform, summary_df, warnings_df))
+        header_rows.append(create_bsd_header_for_platform(platform, summary_df, warnings_df, project_meta))
         matrix = create_bsd_matrix_for_platform(placements_df, platform)
         if not matrix.empty:
             matrix_frames.append(matrix)
@@ -2308,7 +2402,7 @@ def _pdf_draw_bsd_matrix_page(c, page_w: float, page_h: float, margin: float, pl
     c.setFont('Helvetica-Bold', 16)
     c.drawString(margin, page_h - 36, f'Ladeplan BSD - {pname}')
     c.setFont('Helvetica', 9)
-    c.drawString(margin, page_h - 54, f'Projekt / Datei: {project_name}')
+    c.drawString(margin, page_h - 54, f'Objekt / Datei: {header.get("Objekt_Name", project_name) or project_name}')
     c.drawString(margin, page_h - 70, f'Erstellt: {datetime.now().strftime("%d.%m.%Y %H:%M")}')
 
     # Kopfbereich links/rechts ähnlich Tabellen-Ladeplan.
@@ -2403,6 +2497,7 @@ def create_loading_pdf(
     summary_df: pd.DataFrame,
     warnings_df: pd.DataFrame,
     project_name: str = 'BVX Verladeplanung',
+    project_meta: Optional[Dict[str, Any]] = None,
 ) -> bytes:
     """Erstellt einen einfachen A3-Pritschenplan als PDF pro Pritsche."""
     try:
@@ -2412,6 +2507,7 @@ def create_loading_pdf(
     except ImportError as exc:
         raise RuntimeError('Für den PDF-Export muss reportlab installiert sein: pip install reportlab') from exc
 
+    project_meta = project_meta or {}
     output = io.BytesIO()
     c = canvas.Canvas(output, pagesize=landscape(A3))
     page_w, page_h = landscape(A3)
@@ -2430,7 +2526,7 @@ def create_loading_pdf(
         c.setFont('Helvetica-Bold', 16)
         c.drawString(margin, page_h - 36, f'Pritschenplan - {pname}')
         c.setFont('Helvetica', 9)
-        c.drawString(margin, page_h - 54, f'Projekt / Datei: {project_name}')
+        c.drawString(margin, page_h - 54, f'Objekt / Datei: {project_meta.get("Objekt_Name", project_name) or project_name}')
         c.drawString(margin, page_h - 70, f'Erstellt: {datetime.now().strftime("%d.%m.%Y %H:%M")}')
 
         info_x = page_w - 290
@@ -2439,6 +2535,7 @@ def create_loading_pdf(
         c.drawString(info_x, info_y, 'Info Pritsche')
         c.setFont('Helvetica', 8)
         info_lines = [
+            f'Transport: {project_meta.get("Transport_Name", platform.get("Fuhrenoption", ""))}',
             f'Fuhrenoption: {platform.get("Fuhrenoption", "")}',
             f'Länge genutzt: {safe_number(srow.get("Länge genutzt_mm")):.0f} / {safe_number(srow.get("Max Länge effektiv_mm")):.0f} mm',
             f'Breite genutzt: {safe_number(srow.get("Breite genutzt_mm")):.0f} / {safe_number(srow.get("Max Breite_mm")):.0f} mm',
@@ -2492,8 +2589,8 @@ def create_loading_pdf(
         # Zweite Seite: Ladeplan BSD Matrix je Pritsche, ähnlich Excel-Beispiel PB 6.
         matrix = create_bsd_matrix_for_platform(placements_df, platform)
         if not matrix.empty:
-            header = create_bsd_header_for_platform(platform, summary_df, warnings_df)
-            _pdf_draw_bsd_matrix_page(c, page_w, page_h, margin, platform, matrix, header, project_name)
+            header = create_bsd_header_for_platform(platform, summary_df, warnings_df, project_meta)
+            _pdf_draw_bsd_matrix_page(c, page_w, page_h, margin, platform, matrix, header, project_meta.get('Objekt_Name', project_name) or project_name)
             c.showPage()
 
     c.save()
@@ -2723,7 +2820,35 @@ def render_loading_module(uploaded_file, transport_excel_file=None) -> None:
     col3.metric('Gesamtgewicht', f"{parts_df['Gewicht_kg'].sum():.0f} kg")
     col4.metric('Excel-Fuhrenoptionen', int(options_df['Freigegeben'].sum()) if not options_df.empty else 0)
 
-    st.subheader('2. Sortierung')
+    st.subheader('2. Projektdaten für Ladeplan-Kopf')
+    st.caption('Objekt, Transport, Sachbearbeiter und Datum werden manuell eingegeben. Decke und Bauabschnitt können aus BVX-Attributen übernommen oder manuell überschrieben werden.')
+    meta_fields = ['Manuell'] + _available_bvx_meta_fields(parts_df)
+    mcol1, mcol2, mcol3, mcol4 = st.columns(4)
+    objekt_name = mcol1.text_input('Objekt Name', value='')
+    transport_name = mcol2.text_input('Transport Name / Unternehmer', value='')
+    sachbearbeiter = mcol3.text_input('Sachbearbeiter', value='')
+    ladeplan_datum = mcol4.text_input('Datum', value=datetime.now().strftime('%d.%m.%Y'))
+
+    mcol5, mcol6, mcol7, mcol8 = st.columns(4)
+    decke_attr = mcol5.selectbox('Decke aus BVX-Attribut', meta_fields, index=_default_attr_index(meta_fields, ['User_Attribut_2', 'BVX_User_Attribut_2', 'Name']))
+    decke_auto = _unique_display_values_from_field(parts_df, decke_attr)
+    decke_text = mcol6.text_input('Decke', value=decke_auto)
+    bauabschnitt_attr = mcol7.selectbox('Bauabschnitt aus BVX-Attribut', meta_fields, index=_default_attr_index(meta_fields, ['Pak/Unit', 'Unit', 'BVX_Unit', 'BVX_User_Attribut_2']))
+    bauabschnitt_auto = _unique_display_values_from_field(parts_df, bauabschnitt_attr)
+    bauabschnitt_text = mcol8.text_input('Bauabschnitt', value=bauabschnitt_auto)
+
+    project_meta = {
+        'Objekt_Name': objekt_name,
+        'Transport_Name': transport_name,
+        'Sachbearbeiter': sachbearbeiter,
+        'Datum': ladeplan_datum,
+        'Decke': decke_text,
+        'Bauabschnitt': bauabschnitt_text,
+        'Decke_Attribut': decke_attr,
+        'Bauabschnitt_Attribut': bauabschnitt_attr,
+    }
+
+    st.subheader('3. Sortierung')
     sort_options = [
         'Bauteilnummer', 'Pak/Unit', 'Name', 'PartId', 'Profil', 'Oberfläche', 'Qualität',
         'Länge_mm', 'Breite_mm', 'Höhe_mm', 'Gewicht_kg', 'Volumen_m3'
@@ -2745,7 +2870,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None) -> None:
     with st.expander('Bauteile anzeigen', expanded=False):
         st.dataframe(sorted_parts, use_container_width=True, hide_index=True)
 
-    st.subheader('3. Bund- und Unterlegholz-Einstellungen')
+    st.subheader('4. Bund- und Unterlegholz-Einstellungen')
     st.caption('Kantholz = liegt direkt auf der Pritsche und zählt zur Frachthöhe. Bundeinlage/Lagenholz = Einlage zwischen Bunden/Lagen. Einlage allgemein = Einlage zwischen einzelnen Bauteilen; sie wird auch bei gestapelten Einzelbauteilen berücksichtigt.')
     col1, col2, col3, col4 = st.columns(4)
     base_wood_height = col1.number_input('Standard Kantholz erste Lage mm', min_value=0.0, max_value=300.0, value=float(default_base_wood), step=5.0)
@@ -2780,7 +2905,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None) -> None:
         label_attr=main_attr,
     )
 
-    st.subheader('4. Fuhrenoptionen und Pritschen aus Excel')
+    st.subheader('5. Fuhrenoptionen und Pritschen aus Excel')
     st.caption('Variante A: Die freigegebenen Fuhrenoptionen werden nach Priorität geprüft. Die erste passende Option wird wiederholt, bis alles verladen ist.')
 
     fcol1, fcol2 = st.columns([1, 2])
@@ -2824,7 +2949,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None) -> None:
         pritschen_edit['Einlage_zwischen_Lagen_mm'] = float(bundle_spacer_height)
         pritschen_edit['Einlage_allgemein_mm'] = float(general_spacer_height)
 
-    st.subheader('5. Platzierung / Automatik')
+    st.subheader('6. Platzierung / Automatik')
     st.caption('Geometrisch mittige Ausrichtung ist fest aktiv. Die fertige Lage wird in X/Y mittig auf der Pritsche verschoben. Keine Gewichts-/Schwerpunktoptimierung.')
     col1, col2, col3, col4 = st.columns(4)
     allow_beside = col1.checkbox('Nebeneinander erlauben', value=True)
@@ -2910,6 +3035,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None) -> None:
             platforms_used_df,
             edited_summary_df,
             warnings_plan_df,
+            project_meta=project_meta,
         )
         st.markdown('**Ladeplan BSD je Pritsche**')
         st.caption('Die Tabelle wird automatisch für jede belegte Pritsche erstellt. Grundlage ist die vorhandene Platzierung: vorne/hinten wird über X, links/rechts über Y bestimmt.')
@@ -2973,7 +3099,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None) -> None:
     with tab7:
         # Falls der Ladeplan-BSD-Tab nicht angezeigt wurde, trotzdem für den Export erstellen.
         if 'bsd_header_df' not in locals() or 'bsd_matrix_df' not in locals():
-            bsd_header_df, bsd_matrix_df = create_all_bsd_matrices(edited_placements_df, platforms_used_df, edited_summary_df, warnings_plan_df)
+            bsd_header_df, bsd_matrix_df = create_all_bsd_matrices(edited_placements_df, platforms_used_df, edited_summary_df, warnings_plan_df, project_meta=project_meta)
 
         excel_data = create_loading_excel(
             sorted_parts,
@@ -2986,6 +3112,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None) -> None:
             warnings_df=warnings_plan_df,
             bsd_header_df=bsd_header_df,
             bsd_matrix_df=bsd_matrix_df,
+            project_meta=project_meta,
         )
         st.download_button(
             label='Verladeplanung als Excel herunterladen',
@@ -3001,6 +3128,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None) -> None:
                 edited_summary_df,
                 warnings_plan_df,
                 project_name=uploaded_file.name,
+                project_meta=project_meta,
             )
             st.download_button(
                 label='A3-Pritschenplan als PDF herunterladen',
