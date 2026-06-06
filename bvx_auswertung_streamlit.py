@@ -1241,6 +1241,8 @@ def create_loading_excel(
     options_df: Optional[pd.DataFrame] = None,
     fuhren_log_df: Optional[pd.DataFrame] = None,
     warnings_df: Optional[pd.DataFrame] = None,
+    bsd_header_df: Optional[pd.DataFrame] = None,
+    bsd_matrix_df: Optional[pd.DataFrame] = None,
 ) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -1253,6 +1255,10 @@ def create_loading_excel(
             options_df.to_excel(writer, sheet_name='Fuhrenoptionen', index=False)
         if fuhren_log_df is not None and not fuhren_log_df.empty:
             fuhren_log_df.to_excel(writer, sheet_name='Fuhrenübersicht', index=False)
+        if bsd_header_df is not None and not bsd_header_df.empty:
+            bsd_header_df.to_excel(writer, sheet_name='Ladeplan_BSD_Kopf', index=False)
+        if bsd_matrix_df is not None and not bsd_matrix_df.empty:
+            bsd_matrix_df.to_excel(writer, sheet_name='Ladeplan_BSD', index=False)
         if warnings_df is not None and not warnings_df.empty:
             warnings_df.to_excel(writer, sheet_name='Warnungen', index=False)
     return output.getvalue()
@@ -1463,6 +1469,178 @@ def recompute_summary_from_placements(placements_df: pd.DataFrame, platforms_df:
     return pd.DataFrame(rows)
 
 
+
+def _format_bsd_cell(row: pd.Series) -> str:
+    """Beschriftung für die Ladeplan-BSD-Matrix."""
+    bauteile = str(row.get('Bauteile', '') or '').strip()
+    einheit = str(row.get('Einheit_ID', '') or '').strip()
+    typ = str(row.get('Typ', '') or '').strip()
+    anzahl = int(safe_number(row.get('Anzahl_Bauteile'), 1))
+
+    if bauteile and bauteile.lower() != 'nan':
+        label = bauteile
+    else:
+        label = einheit
+
+    if typ == 'Bund' and einheit:
+        return f'{einheit} ({anzahl} Stk.)\n{label}'
+    return label or einheit
+
+
+def _position_slot_for_bsd(row: pd.Series, eff_length: float, platform_width: float) -> str:
+    """Ordnet eine Einheit anhand ihres geometrischen Mittelpunktes einer BSD-Position zu."""
+    x_mid = safe_number(row.get('X_mm')) + safe_number(row.get('Länge_mm')) / 2
+    y_mid = safe_number(row.get('Y_mm')) + safe_number(row.get('Breite_mm')) / 2
+
+    # X: vorderer / hinterer Bereich der Pritsche. Y: links / rechts.
+    front_back = 'Vorne' if x_mid <= eff_length / 2 else 'Hinten'
+    left_right = 'links' if y_mid <= platform_width / 2 else 'rechts'
+    return f'{front_back} {left_right}'
+
+
+def create_bsd_header_for_platform(
+    platform: pd.Series,
+    summary_df: pd.DataFrame,
+    warnings_df: Optional[pd.DataFrame] = None,
+) -> Dict[str, Any]:
+    """Kopfdaten je Pritsche ähnlich Ladeplan BSD."""
+    pname = str(platform.get('Pritsche', ''))
+    srow = summary_df[summary_df['Pritsche'].astype(str) == pname] if summary_df is not None and not summary_df.empty else pd.DataFrame()
+    srow = srow.iloc[0] if not srow.empty else pd.Series(dtype=object)
+    warn_count = 0
+    if warnings_df is not None and not warnings_df.empty and 'Pritsche' in warnings_df.columns:
+        warn_count = int((warnings_df['Pritsche'].astype(str) == pname).sum())
+
+    return {
+        'Pritsche': pname,
+        'Fuhre_Nr': platform.get('Fuhre_Nr', ''),
+        'Fuhrenoption': platform.get('Fuhrenoption', ''),
+        'Pritschenname': platform.get('Pritschenname', ''),
+        'Pritschenhöhe_mm': safe_number(platform.get('Max_Höhe_mm')),
+        'Pritschenbreite_mm': safe_number(platform.get('Breite_mm')),
+        'Pritschenlänge_effektiv_mm': safe_number(platform.get('Länge_mm')) + safe_number(platform.get('Überhang_vorne_mm')) + safe_number(platform.get('Überhang_hinten_mm')),
+        'Frachthöhe_mm': safe_number(srow.get('Höhe genutzt_mm')),
+        'Höhe_gesamt_mm': safe_number(srow.get('Höhe genutzt_mm')),
+        'Länge_gesamt_mm': safe_number(srow.get('Länge genutzt_mm')),
+        'Breite_gesamt_mm': safe_number(srow.get('Breite genutzt_mm')),
+        'Ladegewicht_kg': safe_number(srow.get('Gewicht genutzt_kg')),
+        'Warnungen': warn_count,
+    }
+
+
+def create_bsd_matrix_for_platform(
+    placements_df: pd.DataFrame,
+    platform: pd.Series,
+    top_first: bool = True,
+) -> pd.DataFrame:
+    """Erstellt eine Ladeplan-BSD-Matrix je Pritsche.
+
+    Die Matrix teilt die Pritsche in vier Bereiche auf:
+    Vorne links, Vorne rechts, Hinten links, Hinten rechts.
+    Grundlage ist die vorhandene X/Y/Z-Platzierung. Es wird keine neue
+    Verladeoptimierung gerechnet.
+    """
+    columns = [
+        'Pritsche', 'Fuhre_Nr', 'Lage', 'Z_mm',
+        'Vorne links', 'Vorne rechts', 'Hinten links', 'Hinten rechts',
+        'Bemerkung vorne links', 'Bemerkung vorne rechts', 'Bemerkung hinten links', 'Bemerkung hinten rechts',
+        'Höhe_mm', 'Breite_mm', 'Gesamtlänge_mm', 'Gewicht_kg', 'Anzahl_Einheiten'
+    ]
+    if placements_df is None or placements_df.empty:
+        return pd.DataFrame(columns=columns)
+
+    pname = str(platform.get('Pritsche', ''))
+    eff_length = safe_number(platform.get('Länge_mm')) + safe_number(platform.get('Überhang_vorne_mm')) + safe_number(platform.get('Überhang_hinten_mm'))
+    platform_width = safe_number(platform.get('Breite_mm'))
+
+    rows = placements_df[placements_df['Pritsche'].astype(str) == pname].copy()
+    rows = rows[rows['X_mm'].notna() & rows['Y_mm'].notna() & rows['Z_mm'].notna()].copy()
+    if rows.empty:
+        return pd.DataFrame(columns=columns)
+
+    for col in ['X_mm', 'Y_mm', 'Z_mm', 'Länge_mm', 'Breite_mm', 'Höhe_mm', 'Gewicht_kg']:
+        rows[col] = pd.to_numeric(rows[col], errors='coerce').fillna(0.0)
+
+    rows['Z_Lage_Key'] = rows['Z_mm'].round(1)
+    layer_keys = sorted(rows['Z_Lage_Key'].unique().tolist())
+    # Lage 1 = unten. Anzeige standardmässig oben nach unten wie klassische Ladepläne.
+    layer_no_lookup = {z: i + 1 for i, z in enumerate(layer_keys)}
+    display_keys = list(reversed(layer_keys)) if top_first else layer_keys
+
+    matrix_rows: List[Dict[str, Any]] = []
+    for z_key in display_keys:
+        layer = rows[rows['Z_Lage_Key'] == z_key].copy()
+        if layer.empty:
+            continue
+
+        out: Dict[str, Any] = {
+            'Pritsche': pname,
+            'Fuhre_Nr': platform.get('Fuhre_Nr', ''),
+            'Lage': layer_no_lookup[z_key],
+            'Z_mm': round(float(z_key), 1),
+            'Vorne links': '',
+            'Vorne rechts': '',
+            'Hinten links': '',
+            'Hinten rechts': '',
+            'Bemerkung vorne links': '',
+            'Bemerkung vorne rechts': '',
+            'Bemerkung hinten links': '',
+            'Bemerkung hinten rechts': '',
+            'Höhe_mm': round(float(layer['Höhe_mm'].max()), 1),
+            'Breite_mm': round(float((layer['Y_mm'] + layer['Breite_mm']).max() - layer['Y_mm'].min()), 1),
+            'Gesamtlänge_mm': round(float((layer['X_mm'] + layer['Länge_mm']).max() - layer['X_mm'].min()), 1),
+            'Gewicht_kg': round(float(layer['Gewicht_kg'].sum()), 2),
+            'Anzahl_Einheiten': int(len(layer)),
+        }
+
+        slot_values: Dict[str, List[str]] = {k: [] for k in ['Vorne links', 'Vorne rechts', 'Hinten links', 'Hinten rechts']}
+        slot_remarks: Dict[str, List[str]] = {k: [] for k in ['Vorne links', 'Vorne rechts', 'Hinten links', 'Hinten rechts']}
+
+        for _, row in layer.sort_values(['X_mm', 'Y_mm'], kind='stable').iterrows():
+            slot = _position_slot_for_bsd(row, eff_length, platform_width)
+            slot_values.setdefault(slot, []).append(_format_bsd_cell(row))
+            remark = f"{safe_number(row.get('Länge_mm')):.0f}x{safe_number(row.get('Breite_mm')):.0f}x{safe_number(row.get('Höhe_mm')):.0f} mm"
+            if str(row.get('Typ', '')).strip():
+                remark = f"{row.get('Typ')}: {remark}"
+            slot_remarks.setdefault(slot, []).append(remark)
+
+        for slot in ['Vorne links', 'Vorne rechts', 'Hinten links', 'Hinten rechts']:
+            out[slot] = ' | '.join([v for v in slot_values.get(slot, []) if v])
+            out[f'Bemerkung {slot.lower()}'] = ' | '.join(slot_remarks.get(slot, []))
+
+        matrix_rows.append(out)
+
+    return pd.DataFrame(matrix_rows, columns=columns)
+
+
+def create_all_bsd_matrices(
+    placements_df: pd.DataFrame,
+    platforms_df: pd.DataFrame,
+    summary_df: pd.DataFrame,
+    warnings_df: Optional[pd.DataFrame] = None,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Erstellt Kopfdaten und Ladeplan-BSD-Matrix für jede verwendete Pritsche."""
+    if platforms_df is None or platforms_df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    header_rows: List[Dict[str, Any]] = []
+    matrix_frames: List[pd.DataFrame] = []
+    for _, platform in platforms_df.iterrows():
+        pname = str(platform.get('Pritsche', ''))
+        has_load = placements_df is not None and not placements_df.empty and (placements_df['Pritsche'].astype(str) == pname).any()
+        if not has_load:
+            # Leere Pritschen nicht als Ladeplan ausgeben.
+            continue
+        header_rows.append(create_bsd_header_for_platform(platform, summary_df, warnings_df))
+        matrix = create_bsd_matrix_for_platform(placements_df, platform)
+        if not matrix.empty:
+            matrix_frames.append(matrix)
+
+    header_df = pd.DataFrame(header_rows)
+    matrix_df = pd.concat(matrix_frames, ignore_index=True) if matrix_frames else pd.DataFrame()
+    return header_df, matrix_df
+
+
 def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y: float, w: float, h: float, view: str, title: str) -> None:
     """Einfache PDF-Zeichnung ohne zusätzliche Plotly/Kaleido-Abhängigkeit."""
     from reportlab.lib import colors
@@ -1529,6 +1707,103 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
         c.setFont('Helvetica', 5)
         label = str(row.get('Einheit_ID', ''))[:12]
         c.drawCentredString(rx + rw / 2, ry + rh / 2, label)
+
+
+def _pdf_draw_bsd_matrix_page(c, page_w: float, page_h: float, margin: float, platform: pd.Series, matrix_df: pd.DataFrame, header: Dict[str, Any], project_name: str) -> None:
+    """Zeichnet eine zweite PDF-Seite pro Pritsche mit Ladeplan-BSD-Matrix."""
+    from reportlab.lib import colors
+
+    pname = str(platform.get('Pritsche', 'Pritsche'))
+    c.setFont('Helvetica-Bold', 16)
+    c.drawString(margin, page_h - 36, f'Ladeplan BSD - {pname}')
+    c.setFont('Helvetica', 9)
+    c.drawString(margin, page_h - 54, f'Projekt / Datei: {project_name}')
+    c.drawString(margin, page_h - 70, f'Erstellt: {datetime.now().strftime("%d.%m.%Y %H:%M")}')
+
+    # Kopfbereich links/rechts ähnlich Tabellen-Ladeplan.
+    left_x = margin
+    right_x = page_w / 2 + 20
+    top_y = page_h - 100
+    c.setStrokeColor(colors.black)
+    c.rect(left_x, top_y - 105, page_w / 2 - margin - 35, 105, stroke=1, fill=0)
+    c.rect(right_x, top_y - 105, page_w / 2 - margin - 20, 105, stroke=1, fill=0)
+
+    c.setFont('Helvetica-Bold', 10)
+    c.drawString(left_x + 8, top_y - 18, 'Pritsche:')
+    c.drawString(right_x + 8, top_y - 18, 'Pritschen- / Frachtdaten')
+    c.setFont('Helvetica', 8)
+    left_lines = [
+        f'Fuhre: {header.get("Fuhre_Nr", "")}',
+        f'Fuhrenoption: {header.get("Fuhrenoption", "")}',
+        f'Pritschenname: {header.get("Pritschenname", "")}',
+        f'Datum: {datetime.now().strftime("%d.%m.%Y")}',
+    ]
+    right_lines = [
+        f'Pritschenhöhe: {safe_number(header.get("Pritschenhöhe_mm")):.0f} mm',
+        f'Pritschenbreite: {safe_number(header.get("Pritschenbreite_mm")):.0f} mm',
+        f'Frachthöhe: {safe_number(header.get("Frachthöhe_mm")):.0f} mm',
+        f'Höhe gesamt: {safe_number(header.get("Höhe_gesamt_mm")):.0f} mm',
+        f'Länge gesamt: {safe_number(header.get("Länge_gesamt_mm")):.0f} mm',
+        f'Breite gesamt: {safe_number(header.get("Breite_gesamt_mm")):.0f} mm',
+        f'Ladegewicht: {safe_number(header.get("Ladegewicht_kg")):.0f} kg',
+    ]
+    for i, line in enumerate(left_lines):
+        c.drawString(left_x + 8, top_y - 38 - i * 14, line)
+    for i, line in enumerate(right_lines):
+        c.drawString(right_x + 8, top_y - 38 - i * 12, line)
+
+    table_y = top_y - 135
+    table_x = margin
+    row_h = 20
+    # A3 quer: kompakte Spaltenbreiten.
+    col_defs = [
+        ('Lage', 38),
+        ('Vorne links', 128),
+        ('Vorne rechts', 128),
+        ('Hinten links', 128),
+        ('Hinten rechts', 128),
+        ('Höhe_mm', 56),
+        ('Breite_mm', 62),
+        ('Gesamtlänge_mm', 78),
+        ('Gewicht_kg', 64),
+    ]
+    total_w = sum(w for _, w in col_defs)
+
+    c.setFillColor(colors.lightgrey)
+    c.rect(table_x, table_y, total_w, row_h, stroke=1, fill=1)
+    c.setFillColor(colors.black)
+    c.setFont('Helvetica-Bold', 7)
+    cx = table_x
+    for col, w in col_defs:
+        c.rect(cx, table_y, w, row_h, stroke=1, fill=0)
+        c.drawString(cx + 3, table_y + 7, col.replace('_mm', ' mm').replace('_kg', ' kg'))
+        cx += w
+
+    c.setFont('Helvetica', 6)
+    y = table_y - row_h
+    max_rows = int((table_y - 35) / row_h)
+    rows = matrix_df.head(max_rows).copy() if matrix_df is not None and not matrix_df.empty else pd.DataFrame()
+    if rows.empty:
+        c.drawString(table_x, y + 6, 'Keine Ladeplan-BSD-Daten vorhanden')
+        return
+
+    for _, row in rows.iterrows():
+        cx = table_x
+        for col, w in col_defs:
+            c.rect(cx, y, w, row_h, stroke=1, fill=0)
+            value = row.get(col, '')
+            if col in ['Höhe_mm', 'Breite_mm', 'Gesamtlänge_mm']:
+                text = f'{safe_number(value):.0f}' if safe_number(value) else ''
+            elif col == 'Gewicht_kg':
+                text = f'{safe_number(value):.0f}' if safe_number(value) else ''
+            else:
+                text = str(value).replace('\n', ' / ')
+            text = text[:35] if w >= 100 else text[:12]
+            c.drawString(cx + 3, y + 7, text)
+            cx += w
+        y -= row_h
+        if y < 30:
+            break
 
 
 def create_loading_pdf(
@@ -1622,6 +1897,13 @@ def create_loading_pdf(
         c.drawString(page_w - 140, 58, 'Unterschrift: __________________')
 
         c.showPage()
+
+        # Zweite Seite: Ladeplan BSD Matrix je Pritsche, ähnlich Excel-Beispiel PB 6.
+        matrix = create_bsd_matrix_for_platform(placements_df, platform)
+        if not matrix.empty:
+            header = create_bsd_header_for_platform(platform, summary_df, warnings_df)
+            _pdf_draw_bsd_matrix_page(c, page_w, page_h, margin, platform, matrix, header, project_name)
+            c.showPage()
 
     c.save()
     return output.getvalue()
@@ -1970,7 +2252,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None) -> None:
     edited_summary_df = recompute_summary_from_placements(edited_placements_df, platforms_used_df) if not platforms_used_df.empty else summary_df
     warnings_plan_df = compute_loading_warnings(edited_placements_df, platforms_used_df)
 
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(['Verladeeinheiten', 'Fuhrenübersicht', 'Platzierung / manuell', 'Warnungen', 'Ansichten', 'Export'])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(['Verladeeinheiten', 'Fuhrenübersicht', 'Platzierung / manuell', 'Ladeplan BSD', 'Warnungen', 'Ansichten', 'Export'])
 
     with tab1:
         st.dataframe(units_df, use_container_width=True, hide_index=True)
@@ -2015,6 +2297,43 @@ def render_loading_module(uploaded_file, transport_excel_file=None) -> None:
             st.error('Nicht alle Verladeeinheiten konnten automatisch platziert werden. Freigegebene Fuhrenoptionen, Pritschenmaße oder Bundbildung prüfen.')
 
     with tab4:
+        bsd_header_df, bsd_matrix_df = create_all_bsd_matrices(
+            edited_placements_df,
+            platforms_used_df,
+            edited_summary_df,
+            warnings_plan_df,
+        )
+        st.markdown('**Ladeplan BSD je Pritsche**')
+        st.caption('Die Tabelle wird automatisch für jede belegte Pritsche erstellt. Grundlage ist die vorhandene Platzierung: vorne/hinten wird über X, links/rechts über Y bestimmt.')
+
+        if bsd_header_df.empty or bsd_matrix_df.empty:
+            st.warning('Für die aktuelle Verladung wurde kein Ladeplan BSD erzeugt.')
+        else:
+            selected_bsd_platform = st.selectbox('Pritsche für Ladeplan BSD', bsd_header_df['Pritsche'].astype(str).tolist(), key='bsd_platform_select')
+            bsd_info = bsd_header_df[bsd_header_df['Pritsche'].astype(str) == selected_bsd_platform]
+            if not bsd_info.empty:
+                hrow = bsd_info.iloc[0]
+                c1, c2, c3, c4, c5 = st.columns(5)
+                c1.metric('Ladegewicht', f"{safe_number(hrow.get('Ladegewicht_kg')):.0f} kg")
+                c2.metric('Frachthöhe', f"{safe_number(hrow.get('Frachthöhe_mm')):.0f} mm")
+                c3.metric('Länge gesamt', f"{safe_number(hrow.get('Länge_gesamt_mm')):.0f} mm")
+                c4.metric('Breite gesamt', f"{safe_number(hrow.get('Breite_gesamt_mm')):.0f} mm")
+                c5.metric('Warnungen', int(safe_number(hrow.get('Warnungen'))))
+
+            selected_matrix = bsd_matrix_df[bsd_matrix_df['Pritsche'].astype(str) == selected_bsd_platform].copy()
+            display_cols = [
+                'Lage', 'Vorne links', 'Vorne rechts', 'Hinten links', 'Hinten rechts',
+                'Höhe_mm', 'Breite_mm', 'Gesamtlänge_mm', 'Gewicht_kg', 'Anzahl_Einheiten'
+            ]
+            st.dataframe(selected_matrix[display_cols], use_container_width=True, hide_index=True)
+
+            with st.expander('Alle Ladeplan-BSD-Kopfdaten und Matrizen anzeigen', expanded=False):
+                st.markdown('**Kopfdaten**')
+                st.dataframe(bsd_header_df, use_container_width=True, hide_index=True)
+                st.markdown('**Matrix alle Pritschen**')
+                st.dataframe(bsd_matrix_df, use_container_width=True, hide_index=True)
+
+    with tab5:
         if warnings_plan_df.empty:
             st.success('Keine Warnungen gefunden.')
         else:
@@ -2022,7 +2341,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None) -> None:
             st.warning(f'{severe_count} Warnung(en) gefunden.')
             st.dataframe(warnings_plan_df, use_container_width=True, hide_index=True)
 
-    with tab5:
+    with tab6:
         if platforms_used_df.empty:
             st.warning('Keine Pritsche für die Ansicht vorhanden.')
         else:
@@ -2043,7 +2362,11 @@ def render_loading_module(uploaded_file, transport_excel_file=None) -> None:
                 st.plotly_chart(draw_loading_view(edited_placements_df, platforms_used_df, selected_platform, 'back'), use_container_width=True)
             st.plotly_chart(draw_loading_view(edited_placements_df, platforms_used_df, selected_platform, 'top'), use_container_width=True)
 
-    with tab6:
+    with tab7:
+        # Falls der Ladeplan-BSD-Tab nicht angezeigt wurde, trotzdem für den Export erstellen.
+        if 'bsd_header_df' not in locals() or 'bsd_matrix_df' not in locals():
+            bsd_header_df, bsd_matrix_df = create_all_bsd_matrices(edited_placements_df, platforms_used_df, edited_summary_df, warnings_plan_df)
+
         excel_data = create_loading_excel(
             sorted_parts,
             units_df,
@@ -2053,6 +2376,8 @@ def render_loading_module(uploaded_file, transport_excel_file=None) -> None:
             options_df=options_edit,
             fuhren_log_df=fuhren_log_df,
             warnings_df=warnings_plan_df,
+            bsd_header_df=bsd_header_df,
+            bsd_matrix_df=bsd_matrix_df,
         )
         st.download_button(
             label='Verladeplanung als Excel herunterladen',
