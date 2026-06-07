@@ -1898,7 +1898,7 @@ def build_trip_platforms(pritschen_df: pd.DataFrame, fuhrenoption: str, fuhre_nr
 
 
 def create_variant_a_loading_plan(
-    units: pd.DataFrame,
+    sorted_parts: pd.DataFrame,
     options_df: pd.DataFrame,
     pritschen_df: pd.DataFrame,
     standards: Dict[str, Any],
@@ -1907,36 +1907,54 @@ def create_variant_a_loading_plan(
     allow_rotation: bool,
     center_geometric: bool = True,
     max_fuhren: int = 50,
-) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """V19: harte, kontrollierbare Grundlogik ohne Zurückspringen.
+    use_bundles: bool = True,
+    max_bundle_weight: float = 1000.0,
+    bundle_spacer_height: float = 40.0,
+    general_spacer_height: float = 0.0,
+    same_height: bool = True,
+    same_width: bool = False,
+    same_quality: bool = False,
+    same_profile: bool = False,
+    label_attr: str = 'Bauteilnummer',
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """V20: Pritsche-für-Pritsche-Logik mit Bundbildung erst nach Blockwahl.
 
-    Diese Version priorisiert eine verlässliche Basis vor Optimierung:
-    - Pritschen werden strikt in Pritschen_Reihenfolge gefüllt.
-    - Jede Pritsche erhält einen geschlossenen, fortlaufenden Block aus der global sortierten Verladeeinheiten-Liste.
-    - Keine spätere Einheit wird vorgezogen, um ein Loch zu füllen.
-    - Wenn eine Einheit nicht mehr auf die aktuelle Pritsche passt, geht der folgende Block zur nächsten Pritsche/Fuhre.
-    - Für die physische Stapelung wird jeder Pritschenblock intern umgekehrt gepackt: hohe Nummern unten, niedrige Nummern oben.
+    Neue Arbeitsweise:
+    1. Bauteile werden global sortiert.
+    2. Für jede Pritsche wird aus dem nächsten fortlaufenden Bauteilblock die maximale Menge gesucht.
+    3. Erst dieser Pritschenblock wird zu Bunden gebildet.
+    4. Bunde werden logisch von oben nach unten gebildet.
+    5. Für die physische Platzierung wird die Bundfolge umgedreht: hohe Nummern unten, niedrige Nummern oben.
+
+    Dadurch werden keine späteren Bauteile vorgezogen und keine global gebildeten Bunde über Pritschengrenzen gezogen.
     """
-    if units.empty:
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+    if sorted_parts is None or sorted_parts.empty:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
     enabled_options = options_df[options_df['Freigegeben'] == True].copy()
     enabled_options = enabled_options.sort_values('Priorität', kind='stable').reset_index(drop=True)
 
-    remaining = units.copy().reset_index(drop=True)
+    remaining_parts = sorted_parts.copy().reset_index(drop=True)
     all_placements: List[pd.DataFrame] = []
     all_summary: List[pd.DataFrame] = []
     all_platforms: List[pd.DataFrame] = []
+    all_units: List[pd.DataFrame] = []
     fuhren_log: List[Dict[str, Any]] = []
 
     base_default = safe_number(standards.get('Standard_Kantholz_erste_Lage'), 80.0)
-    layer_default = safe_number(standards.get('Standard_Einlage_zwischen_Lagen'), 40.0)
-    general_default = safe_number(standards.get('Standard_Einlage_allgemein'), 0.0)
+    layer_default = safe_number(standards.get('Standard_Einlage_zwischen_Lagen'), bundle_spacer_height)
+    general_default = safe_number(standards.get('Standard_Einlage_allgemein'), general_spacer_height)
     gap_default = safe_number(standards.get('Längenversatz_je_Lage'), 100.0)
 
-    def _make_not_loaded_rows(df: pd.DataFrame, reason: str) -> pd.DataFrame:
+    def _make_part_label(row: pd.Series) -> str:
+        return str(row.get(label_attr) or row.get('Bauteilnummer') or row.get('Name') or '')
+
+    def _make_not_loaded_rows_from_parts(parts_block: pd.DataFrame, reason: str, unit_start: int) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        if parts_block is None or parts_block.empty:
+            return pd.DataFrame(), pd.DataFrame()
+        units = _build_units_for_part_block(parts_block, unit_start, block_name='NICHT VERLADEN')
         rows: List[Dict[str, Any]] = []
-        for _, unit in df.iterrows():
+        for _, unit in units.iterrows():
             rows.append({
                 'Fuhre_Nr': None,
                 'Fuhrenoption': '',
@@ -1965,11 +1983,7 @@ def create_variant_a_loading_plan(
                 'Ebene': reason,
                 'Gewicht_kg': round(float(unit['Gewicht_kg']), 2),
             })
-        return pd.DataFrame(rows)
-
-    if enabled_options.empty:
-        not_loaded = _make_not_loaded_rows(remaining, 'keine Fuhrenoption freigegeben')
-        return not_loaded, pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(rows), units
 
     def _prepare_trip_platforms(option_name: str, fuhre_nr: int) -> pd.DataFrame:
         trip_platforms = build_trip_platforms(pritschen_df, option_name, fuhre_nr)
@@ -1981,12 +1995,38 @@ def create_variant_a_loading_plan(
         trip_platforms['Einlage_allgemein_mm'] = general_default
         return trip_platforms
 
-    def _pack_exact_block_on_platform(block_df: pd.DataFrame, platform_row: pd.Series) -> Tuple[bool, pd.DataFrame, pd.DataFrame]:
-        if block_df.empty:
+    def _build_units_for_part_block(parts_block: pd.DataFrame, unit_start: int, block_name: str) -> pd.DataFrame:
+        units = build_loading_units(
+            parts_block,
+            use_bundles=use_bundles,
+            max_bundle_weight=max_bundle_weight,
+            bundle_spacer_height=bundle_spacer_height,
+            general_spacer_height=general_spacer_height,
+            same_height=same_height,
+            same_width=same_width,
+            same_quality=same_quality,
+            same_profile=same_profile,
+            label_attr=label_attr,
+        )
+        if units is None or units.empty:
+            return pd.DataFrame()
+        units = units.copy().reset_index(drop=True)
+        new_ids: List[str] = []
+        for i, row in units.iterrows():
+            prefix = 'B' if str(row.get('Typ', '')).strip() == 'Bund' else 'E'
+            new_ids.append(f'{prefix}{unit_start + i:04d}')
+        units['Einheit_ID'] = new_ids
+        units['Pritschenblock'] = block_name
+        units['Logische_Reihenfolge_im_Block'] = list(range(1, len(units) + 1))
+        units['Bundbildung'] = 'nach Pritschenblock / von oben nach unten'
+        return units
+
+    def _pack_block_units_on_platform(block_units_top: pd.DataFrame, platform_row: pd.Series) -> Tuple[bool, pd.DataFrame, pd.DataFrame]:
+        if block_units_top is None or block_units_top.empty:
             return False, pd.DataFrame(), pd.DataFrame()
         platform_df = pd.DataFrame([platform_row]).reset_index(drop=True)
-        # Physisch umgekehrt packen: höchste Einheit zuerst unten, niedrigste zuletzt oben.
-        physical_order = block_df.iloc[::-1].copy().reset_index(drop=True)
+        # Wichtig: logisch ist block_units_top oben -> unten. Physisch wird unten begonnen.
+        physical_order = block_units_top.iloc[::-1].copy().reset_index(drop=True)
         placements_try, _summary_try = create_loading_plan(
             physical_order,
             platform_df,
@@ -2000,126 +2040,172 @@ def create_variant_a_loading_plan(
         if placements_try is None or placements_try.empty:
             return False, pd.DataFrame(), pd.DataFrame()
         loaded = placements_try[placements_try['Pritsche'] != 'NICHT VERLADEN'].copy()
-        wanted_ids = block_df['Einheit_ID'].astype(str).tolist()
+        wanted_ids = block_units_top['Einheit_ID'].astype(str).tolist()
         loaded_ids = loaded.get('Einheit_ID', pd.Series(dtype=str)).dropna().astype(str).tolist()
         if set(wanted_ids) != set(loaded_ids):
             return False, pd.DataFrame(), pd.DataFrame()
         loaded = loaded[loaded['Einheit_ID'].astype(str).isin(wanted_ids)].copy()
         if 'Ebene' in loaded.columns:
             loaded['Ebene'] = loaded['Ebene'].astype(str).apply(
-                lambda v: v if 'V19 harter Block' in v else f'{v} / V19 harter Block'
+                lambda v: v if 'V20 Pritschenblock' in v else f'{v} / V20 Pritschenblock'
             )
         summary = recompute_summary_from_placements(loaded, platform_df)
         return True, loaded, summary
 
-    def _simulate_option_hard(option_row: pd.Series, remaining_df: pd.DataFrame, fuhre_nr: int) -> Optional[Dict[str, Any]]:
+    def _find_max_part_block_for_platform(parts_df: pd.DataFrame, platform_row: pd.Series, unit_start: int) -> Dict[str, Any]:
+        best_n = 0
+        best_units = pd.DataFrame()
+        best_loaded = pd.DataFrame()
+        best_summary = pd.DataFrame()
+        max_n = len(parts_df)
+        platform_label = str(platform_row.get('Pritsche', platform_row.get('Pritschenname', 'Pritsche')))
+
+        # Streng fortlaufend: nur den nächsten Bauteilblock wachsen lassen.
+        for n in range(1, max_n + 1):
+            part_block = parts_df.iloc[:n].copy().reset_index(drop=True)
+            block_units = _build_units_for_part_block(part_block, unit_start, platform_label)
+            if block_units.empty:
+                break
+            ok, loaded, summary = _pack_block_units_on_platform(block_units, platform_row)
+            if not ok:
+                break
+            best_n = n
+            best_units = block_units
+            best_loaded = loaded
+            best_summary = summary
+
+        return {
+            'parts_count': best_n,
+            'units': best_units,
+            'loaded': best_loaded,
+            'summary': best_summary,
+        }
+
+    def _simulate_option_by_parts(option_row: pd.Series, remaining_df: pd.DataFrame, fuhre_nr: int, unit_start: int) -> Optional[Dict[str, Any]]:
         option_name = str(option_row['Fuhrenoption'])
         trip_platforms = _prepare_trip_platforms(option_name, fuhre_nr)
         if trip_platforms.empty:
             return None
 
         cursor = 0
+        unit_counter = unit_start
         placement_frames: List[pd.DataFrame] = []
         summary_frames: List[pd.DataFrame] = []
         used_platform_frames: List[pd.DataFrame] = []
-        loaded_ids: List[str] = []
+        unit_frames: List[pd.DataFrame] = []
+        loaded_part_count = 0
+        first_label = ''
+        last_label = ''
 
         for _, platform_row in trip_platforms.sort_values('Pritschen_Reihenfolge', kind='stable').iterrows():
             if cursor >= len(remaining_df):
                 break
-
-            best_n = 0
-            best_loaded = pd.DataFrame()
-            best_summary = pd.DataFrame()
-            max_n = len(remaining_df) - cursor
-
-            # Streng fortlaufend: nur Anfangsblock testen. Sobald n+1 nicht passt, nicht mit n+2 weitersuchen.
-            for n in range(1, max_n + 1):
-                block = remaining_df.iloc[cursor:cursor + n].copy().reset_index(drop=True)
-                ok, loaded, summary = _pack_exact_block_on_platform(block, platform_row)
-                if not ok:
-                    break
-                best_n = n
-                best_loaded = loaded
-                best_summary = summary
-
-            if best_n <= 0:
+            candidate = _find_max_part_block_for_platform(remaining_df.iloc[cursor:].reset_index(drop=True), platform_row, unit_counter)
+            if int(candidate.get('parts_count', 0)) <= 0:
                 continue
+            n = int(candidate['parts_count'])
+            block_parts = remaining_df.iloc[cursor:cursor + n].copy().reset_index(drop=True)
+            if not first_label and not block_parts.empty:
+                first_label = _make_part_label(block_parts.iloc[0])
+            if not block_parts.empty:
+                last_label = _make_part_label(block_parts.iloc[-1])
 
-            placement_frames.append(best_loaded)
-            summary_frames.append(best_summary)
+            units_for_platform = candidate['units'].copy()
+            unit_counter += len(units_for_platform)
+            placement_frames.append(candidate['loaded'])
+            summary_frames.append(candidate['summary'])
             used_platform_frames.append(pd.DataFrame([platform_row]))
-            ids = remaining_df.iloc[cursor:cursor + best_n]['Einheit_ID'].astype(str).tolist()
-            loaded_ids.extend(ids)
-            cursor += best_n
+            unit_frames.append(units_for_platform)
+            cursor += n
+            loaded_part_count += n
 
-        if not loaded_ids:
+        if loaded_part_count <= 0:
             return None
 
         loaded_try = pd.concat(placement_frames, ignore_index=True) if placement_frames else pd.DataFrame()
         summary_try = pd.concat(summary_frames, ignore_index=True) if summary_frames else pd.DataFrame()
         platforms_used = pd.concat(used_platform_frames, ignore_index=True) if used_platform_frames else pd.DataFrame()
+        units_used = pd.concat(unit_frames, ignore_index=True) if unit_frames else pd.DataFrame()
         loaded_weight = float(loaded_try['Gewicht_kg'].sum()) if not loaded_try.empty else 0.0
         used_platforms = int(loaded_try['Pritsche'].nunique()) if not loaded_try.empty else 0
         priority = safe_number(option_row.get('Priorität'), 999)
-        score = (len(loaded_ids) * 1000000.0) + loaded_weight - (used_platforms * 100.0) - (priority * 10.0)
+        # Priorität: möglichst viele fortlaufende Bauteile, dann Gewicht, dann weniger Pritschen.
+        score = (loaded_part_count * 1000000.0) + loaded_weight - (used_platforms * 100.0) - (priority * 10.0)
         return {
             'score': score,
             'option_name': option_name,
             'trip_platforms': platforms_used,
             'summary_try': summary_try,
             'loaded_try': loaded_try,
-            'loaded_ids': loaded_ids,
+            'units_used': units_used,
+            'parts_loaded_count': loaded_part_count,
             'loaded_weight': loaded_weight,
+            'first_label': first_label,
+            'last_label': last_label,
+            'next_unit_counter': unit_counter,
         }
 
+    if enabled_options.empty:
+        not_loaded, units_left = _make_not_loaded_rows_from_parts(remaining_parts, 'keine Fuhrenoption freigegeben', 1)
+        return not_loaded, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), units_left
+
     fuhre_nr = 1
-    while not remaining.empty and fuhre_nr <= max_fuhren:
+    unit_counter_global = 1
+    while not remaining_parts.empty and fuhre_nr <= max_fuhren:
         best_try = None
         for _, option_row in enabled_options.iterrows():
-            attempt = _simulate_option_hard(option_row, remaining, fuhre_nr)
+            attempt = _simulate_option_by_parts(option_row, remaining_parts, fuhre_nr, unit_counter_global)
             if attempt is None:
                 continue
             if best_try is None or attempt['score'] > best_try['score']:
                 best_try = attempt
 
-        if best_try is None or not best_try.get('loaded_ids'):
+        if best_try is None or int(best_try.get('parts_loaded_count', 0)) <= 0:
             break
 
-        loaded_try = best_try['loaded_try']
-        loaded_ids = best_try['loaded_ids']
-        trip_platforms = best_try['trip_platforms']
-        option_name = best_try['option_name']
-
-        all_placements.append(loaded_try)
+        all_placements.append(best_try['loaded_try'])
         all_summary.append(best_try['summary_try'])
-        all_platforms.append(trip_platforms)
+        all_platforms.append(best_try['trip_platforms'])
+        all_units.append(best_try['units_used'])
+        unit_counter_global = int(best_try.get('next_unit_counter', unit_counter_global + len(best_try['units_used'])))
+
         fuhren_log.append({
             'Fuhre_Nr': fuhre_nr,
-            'Fuhrenoption': option_name,
-            'Verladeeinheiten': len(loaded_ids),
+            'Fuhrenoption': best_try['option_name'],
+            'Bauteile': int(best_try['parts_loaded_count']),
+            'Verladeeinheiten': int(len(best_try['units_used'])) if best_try['units_used'] is not None else 0,
             'Gewicht_kg': round(float(best_try['loaded_weight']), 2),
-            'Pritschen': ', '.join(trip_platforms['Pritschenname'].astype(str).tolist()) if not trip_platforms.empty else '',
-            'Reihenfolge': 'V19 fortlaufend harter Block',
-            'Erste_Einheit': loaded_ids[0] if loaded_ids else '',
-            'Letzte_Einheit': loaded_ids[-1] if loaded_ids else '',
+            'Pritschen': ', '.join(best_try['trip_platforms']['Pritschenname'].astype(str).tolist()) if not best_try['trip_platforms'].empty else '',
+            'Reihenfolge': 'V20 Pritsche nacheinander: Block -> sortieren -> Bund -> unten packen',
+            'Erste_Bauteilnummer': best_try.get('first_label', ''),
+            'Letzte_Bauteilnummer': best_try.get('last_label', ''),
         })
-        remaining = remaining.iloc[len(loaded_ids):].copy().reset_index(drop=True)
+
+        remaining_parts = remaining_parts.iloc[int(best_try['parts_loaded_count']):].copy().reset_index(drop=True)
         fuhre_nr += 1
 
-    if not remaining.empty:
-        all_placements.append(_make_not_loaded_rows(remaining, 'passt in keine freigegebene Fuhrenoption mit V19-Blocklogik'))
+    if not remaining_parts.empty:
+        not_loaded, units_left = _make_not_loaded_rows_from_parts(
+            remaining_parts,
+            'passt in keine freigegebene Fuhrenoption mit V20-Pritschenblocklogik',
+            unit_counter_global,
+        )
+        if not not_loaded.empty:
+            all_placements.append(not_loaded)
+        if not units_left.empty:
+            all_units.append(units_left)
 
     placements_df = pd.concat(all_placements, ignore_index=True) if all_placements else pd.DataFrame()
     summary_df = pd.concat(all_summary, ignore_index=True) if all_summary else pd.DataFrame()
     platforms_used_df = pd.concat(all_platforms, ignore_index=True) if all_platforms else pd.DataFrame()
+    plan_units_df = pd.concat(all_units, ignore_index=True) if all_units else pd.DataFrame()
 
     if center_geometric and not placements_df.empty and not platforms_used_df.empty:
         placements_df = center_placements_geometrically(placements_df, platforms_used_df)
         summary_df = recompute_summary_from_placements(placements_df, platforms_used_df)
 
     fuhren_log_df = pd.DataFrame(fuhren_log)
-    return placements_df, summary_df, platforms_used_df, fuhren_log_df
+    return placements_df, summary_df, platforms_used_df, fuhren_log_df, plan_units_df
 
 def create_loading_excel(
     parts_df: pd.DataFrame,
@@ -4690,7 +4776,9 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
     same_quality = col3.checkbox('Nur gleiche Qualität im Bund', value=False)
     same_profile = col4.checkbox('Nur gleiches Profil im Bund', value=False)
 
-    units_df = build_loading_units(
+    # Vorschau: globale Bundbildung nur zur ersten Orientierung.
+    # Für die echte Verladung ab V20 werden Bunde erst nach der Pritschenblockwahl gebildet.
+    units_preview_df = build_loading_units(
         sorted_parts,
         use_bundles=use_bundles,
         max_bundle_weight=max_bundle_weight,
@@ -4702,9 +4790,10 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
         same_profile=same_profile,
         label_attr=main_attr,
     )
+    units_df = units_preview_df.copy()
 
     st.subheader('5. Fuhrenoptionen und Pritschen aus Excel')
-    st.caption('Variante A: Freigegebene Fuhrenoptionen werden geprüft. Es wird die Option gewählt, die den längsten fortlaufenden Block der Sortierung sauber mitnimmt. Die Reihenfolge springt nicht zurück.')
+    st.caption('V20: Pritsche für Pritsche. Pro Pritsche wird zuerst der maximale fortlaufende Bauteilblock gesucht, dann sortiert, dann werden daraus die Bunde gebildet. Physisch wird unten mit den höheren Nummern begonnen.')
 
     fcol1, fcol2 = st.columns([1, 2])
     with fcol1:
@@ -4764,8 +4853,8 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
     min_support_ratio = ucol2.number_input('Mindestauflagefläche %', min_value=0, max_value=100, value=65, step=5) / 100.0
     min_underbau_height = ucol3.number_input('Unterbau anzeigen ab mm', min_value=0.0, max_value=500.0, value=20.0, step=5.0)
 
-    placements_df, summary_df, platforms_used_df, fuhren_log_df = create_variant_a_loading_plan(
-        units_df,
+    placements_df, summary_df, platforms_used_df, fuhren_log_df, plan_units_df = create_variant_a_loading_plan(
+        sorted_parts,
         options_edit,
         pritschen_edit,
         standards=standards,
@@ -4774,7 +4863,19 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
         allow_rotation=allow_rotation,
         center_geometric=center_geometric,
         max_fuhren=int(max_fuhren),
+        use_bundles=use_bundles,
+        max_bundle_weight=max_bundle_weight,
+        bundle_spacer_height=bundle_spacer_height,
+        general_spacer_height=general_spacer_height,
+        same_height=same_height,
+        same_width=same_width,
+        same_quality=same_quality,
+        same_profile=same_profile,
+        label_attr=main_attr,
     )
+    # Ab hier arbeitet die App mit den tatsächlich je Pritschenblock gebildeten Verladeeinheiten.
+    if plan_units_df is not None and not plan_units_df.empty:
+        units_df = plan_units_df.copy()
 
     loaded_count = int((placements_df['Pritsche'] != 'NICHT VERLADEN').sum()) if not placements_df.empty and 'Pritsche' in placements_df.columns else 0
     not_loaded_count = int((placements_df['Pritsche'] == 'NICHT VERLADEN').sum()) if not placements_df.empty and 'Pritsche' in placements_df.columns else 0
