@@ -4354,6 +4354,198 @@ def render_analysis_module(uploaded_file) -> None:
             )
 
 
+
+
+def _control_extract_numbers(value: Any) -> List[int]:
+    """Extrahiert numerische Bauteilnummern für Kontrolltabellen."""
+    text = str(value or '')
+    nums: List[int] = []
+    for m in re.findall(r'\d+', text):
+        try:
+            nums.append(int(m))
+        except Exception:
+            pass
+    return nums
+
+
+def _control_nums_from_row(row: pd.Series) -> List[int]:
+    labels = _split_bsd_text_list(row.get('Bauteile_Liste', ''), row.get('Bauteile', row.get('Ansicht_Liste', '')))
+    nums: List[int] = []
+    for label in labels:
+        nums.extend(_control_extract_numbers(label))
+    if not nums:
+        nums = _control_extract_numbers(row.get('Ansicht_Label', row.get('Bauteile', '')))
+    return nums
+
+
+def _control_join_nums(nums: List[int], max_items: int = 12) -> str:
+    if not nums:
+        return ''
+    if len(nums) <= max_items:
+        return ' / '.join(str(n) for n in nums)
+    return ' / '.join(str(n) for n in nums[:max_items]) + ' / ...'
+
+
+def _control_platform_order(platforms_df: pd.DataFrame) -> Dict[str, int]:
+    order: Dict[str, int] = {}
+    if platforms_df is None or platforms_df.empty or 'Pritsche' not in platforms_df.columns:
+        return order
+    for idx, (_, row) in enumerate(platforms_df.reset_index(drop=True).iterrows(), start=1):
+        order[str(row.get('Pritsche', ''))] = idx
+    return order
+
+
+def build_control_bundle_table(units_df: pd.DataFrame) -> pd.DataFrame:
+    """Kontrolltabelle: Welche Bauteile stecken in welchem Bund/Verladeeinheit?"""
+    if units_df is None or units_df.empty:
+        return pd.DataFrame()
+    rows: List[Dict[str, Any]] = []
+    for idx, row in units_df.reset_index(drop=True).iterrows():
+        nums = _control_nums_from_row(row)
+        is_ascending = nums == sorted(nums) if nums else True
+        rows.append({
+            'Reihenfolge': idx + 1,
+            'Einheit_ID': row.get('Einheit_ID', ''),
+            'Typ': row.get('Typ', ''),
+            'Anzahl_Bauteile': int(safe_number(row.get('Anzahl_Bauteile'), 0)),
+            'Bauteile_im_Bund': _control_join_nums(nums),
+            'Nummer_min': min(nums) if nums else '',
+            'Nummer_max': max(nums) if nums else '',
+            'Bund_intern_aufsteigend': 'OK' if is_ascending else 'prüfen',
+            'Länge_mm': safe_number(row.get('Länge_mm')),
+            'Breite_mm': safe_number(row.get('Breite_mm')),
+            'Höhe_mm': safe_number(row.get('Höhe_mm')),
+            'Gewicht_kg': safe_number(row.get('Gewicht_kg')),
+            'Warnung': row.get('Warnung', ''),
+        })
+    return pd.DataFrame(rows)
+
+
+def build_control_assignment_table(placements_df: pd.DataFrame, platforms_df: pd.DataFrame) -> pd.DataFrame:
+    """Kontrolltabelle: Welche fortlaufenden Nummernbereiche landen auf welcher Pritsche?"""
+    if placements_df is None or placements_df.empty:
+        return pd.DataFrame()
+    porder = _control_platform_order(platforms_df)
+    loaded = placements_df[placements_df.get('Pritsche', '').astype(str) != 'NICHT VERLADEN'].copy()
+    if loaded.empty:
+        return pd.DataFrame()
+    rows: List[Dict[str, Any]] = []
+    last_max: Optional[int] = None
+    for pname in sorted(loaded['Pritsche'].astype(str).unique(), key=lambda p: porder.get(p, 999999)):
+        group = loaded[loaded['Pritsche'].astype(str) == pname]
+        nums: List[int] = []
+        for _, r in group.iterrows():
+            nums.extend(_control_nums_from_row(r))
+        nums_unique = sorted(set(nums))
+        min_num = min(nums_unique) if nums_unique else None
+        max_num = max(nums_unique) if nums_unique else None
+        ruecksprung = bool(last_max is not None and min_num is not None and min_num <= last_max)
+        missing_inside = ''
+        if min_num is not None and max_num is not None:
+            expected = set(range(min_num, max_num + 1))
+            missing = sorted(expected.difference(set(nums_unique)))
+            if missing:
+                missing_inside = _control_join_nums(missing, 20)
+        rows.append({
+            'Pritschen_Reihenfolge': porder.get(pname, 999999),
+            'Pritsche': pname,
+            'Fuhre_Nr': int(safe_number(group['Fuhre_Nr'].iloc[0], 0)) if 'Fuhre_Nr' in group.columns else '',
+            'Einheiten': int(group['Einheit_ID'].nunique()) if 'Einheit_ID' in group.columns else len(group),
+            'Bauteilnummer_von': min_num if min_num is not None else '',
+            'Bauteilnummer_bis': max_num if max_num is not None else '',
+            'Rücksprung_zur_vorigen_Pritsche': 'prüfen' if ruecksprung else 'OK',
+            'Fehlende_Nummern_innerhalb_Bereich': missing_inside,
+            'Ladegewicht_kg': round(float(pd.to_numeric(group.get('Gewicht_kg'), errors='coerce').fillna(0).sum()), 1),
+        })
+        if max_num is not None:
+            last_max = max(last_max or max_num, max_num)
+    return pd.DataFrame(rows)
+
+
+def build_control_layer_table(placements_df: pd.DataFrame, platforms_df: pd.DataFrame) -> pd.DataFrame:
+    """Kontrolltabelle: Lage, Position und Reihenfolge je Pritsche."""
+    if placements_df is None or placements_df.empty:
+        return pd.DataFrame()
+    porder = _control_platform_order(platforms_df)
+    platform_lookup = {}
+    if platforms_df is not None and not platforms_df.empty:
+        for _, p in platforms_df.iterrows():
+            platform_lookup[str(p.get('Pritsche', ''))] = p
+    rows: List[Dict[str, Any]] = []
+    loaded = placements_df[placements_df.get('Pritsche', '').astype(str) != 'NICHT VERLADEN'].copy()
+    for pname in sorted(loaded['Pritsche'].astype(str).unique(), key=lambda p: porder.get(p, 999999)):
+        group = loaded[loaded['Pritsche'].astype(str) == pname].copy()
+        if group.empty:
+            continue
+        group['Z_mm'] = pd.to_numeric(group.get('Z_mm'), errors='coerce').fillna(0.0)
+        unique_z_bottom = sorted(group['Z_mm'].unique())
+        bottom_rank = {z: i + 1 for i, z in enumerate(unique_z_bottom)}
+        top_rank = {z: len(unique_z_bottom) - i for i, z in enumerate(unique_z_bottom)}
+        platform = platform_lookup.get(pname)
+        p_width = safe_number(platform.get('Breite_mm')) if platform is not None else safe_number(group.get('Breite_mm', pd.Series([0])).max())
+        p_center_y = p_width / 2 if p_width else 0.0
+        sort_cols = ['Z_mm', 'Y_mm', 'X_mm']
+        group = group.sort_values([c for c in sort_cols if c in group.columns], ascending=[False, True, True][:len([c for c in sort_cols if c in group.columns])], kind='stable')
+        for _, r in group.iterrows():
+            nums = _control_nums_from_row(r)
+            y = safe_number(r.get('Y_mm'))
+            w = safe_number(r.get('Breite_mm'))
+            y_center = y + w / 2
+            if p_width and w >= p_width * 0.82:
+                y_pos = 'volle Breite / mittig'
+            elif p_width and y_center < p_center_y:
+                y_pos = 'links'
+            elif p_width:
+                y_pos = 'rechts'
+            else:
+                y_pos = ''
+            z = safe_number(r.get('Z_mm'))
+            rows.append({
+                'Pritschen_Reihenfolge': porder.get(pname, 999999),
+                'Pritsche': pname,
+                'Lage_von_oben': top_rank.get(z, ''),
+                'Lage_von_unten': bottom_rank.get(z, ''),
+                'Z_mm': z,
+                'Einheit_ID': r.get('Einheit_ID', ''),
+                'Typ': r.get('Typ', ''),
+                'Bauteile': _control_join_nums(nums),
+                'Nummer_min': min(nums) if nums else '',
+                'Nummer_max': max(nums) if nums else '',
+                'Y_Position': y_pos,
+                'X_mm': safe_number(r.get('X_mm')),
+                'Y_mm': y,
+                'Länge_mm': safe_number(r.get('Länge_mm')),
+                'Breite_mm': w,
+                'Höhe_mm': safe_number(r.get('Höhe_mm')),
+                'Gewicht_kg': safe_number(r.get('Gewicht_kg')),
+            })
+    return pd.DataFrame(rows)
+
+
+def build_control_issue_table(bundle_control_df: pd.DataFrame, assignment_control_df: pd.DataFrame, layer_control_df: pd.DataFrame) -> pd.DataFrame:
+    """Erzeugt eine kurze, fachliche Prüfliste vor dem PDF-Export."""
+    issues: List[Dict[str, Any]] = []
+    if bundle_control_df is not None and not bundle_control_df.empty and 'Bund_intern_aufsteigend' in bundle_control_df.columns:
+        for _, r in bundle_control_df[bundle_control_df['Bund_intern_aufsteigend'] == 'prüfen'].iterrows():
+            issues.append({'Bereich': 'Bundbildung', 'Pritsche': '', 'Schwere': 'mittel', 'Hinweis': f"Einheit {r.get('Einheit_ID')} ist intern nicht aufsteigend: {r.get('Bauteile_im_Bund')}"})
+    if assignment_control_df is not None and not assignment_control_df.empty:
+        for _, r in assignment_control_df[assignment_control_df['Rücksprung_zur_vorigen_Pritsche'] == 'prüfen'].iterrows():
+            issues.append({'Bereich': 'Pritschen-Zuteilung', 'Pritsche': r.get('Pritsche', ''), 'Schwere': 'hoch', 'Hinweis': 'Bauteilnummern springen gegenüber der vorherigen Pritsche zurück.'})
+        for _, r in assignment_control_df[assignment_control_df['Fehlende_Nummern_innerhalb_Bereich'].astype(str) != ''].iterrows():
+            issues.append({'Bereich': 'Pritschen-Zuteilung', 'Pritsche': r.get('Pritsche', ''), 'Schwere': 'mittel', 'Hinweis': f"Nummernbereich ist nicht geschlossen. Fehlend: {r.get('Fehlende_Nummern_innerhalb_Bereich')}"})
+    if layer_control_df is not None and not layer_control_df.empty:
+        for pname, grp in layer_control_df.groupby('Pritsche'):
+            g = grp.copy()
+            g['Lage_von_oben_num'] = pd.to_numeric(g.get('Lage_von_oben'), errors='coerce')
+            top = g[g['Lage_von_oben_num'] == 1]
+            lower = g[g['Lage_von_oben_num'] > 1]
+            top_nums = pd.to_numeric(top.get('Nummer_min'), errors='coerce').dropna()
+            lower_nums = pd.to_numeric(lower.get('Nummer_min'), errors='coerce').dropna()
+            if not top_nums.empty and not lower_nums.empty and float(top_nums.min()) > float(lower_nums.min()):
+                issues.append({'Bereich': 'Lagenrichtung', 'Pritsche': pname, 'Schwere': 'hoch', 'Hinweis': 'Niedrigste Nummer liegt nicht oben. Stapelrichtung prüfen.'})
+    return pd.DataFrame(issues)
+
+
 def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=None, parts_excel_file=None) -> None:
     st.header('Verladeplanung')
 
@@ -4620,7 +4812,49 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
     if underbau_warnings_df is not None and not underbau_warnings_df.empty:
         warnings_plan_df = pd.concat([warnings_plan_df, underbau_warnings_df], ignore_index=True, sort=False) if not warnings_plan_df.empty else underbau_warnings_df
 
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(['Verladeeinheiten', 'Fuhrenübersicht', 'Platzierung / manuell', 'Ladeplan BSD', 'Warnungen', 'Ansichten', 'Excel Export'])
+    tab0, tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(['Kontrolle vor PDF', 'Verladeeinheiten', 'Fuhrenübersicht', 'Platzierung / manuell', 'Ladeplan BSD', 'Warnungen', 'Ansichten', 'Excel Export'])
+
+
+    with tab0:
+        st.subheader('Kontrollansicht vor PDF / BSD')
+        st.caption('Diese Tabellen sind bewusst vor dem PDF platziert. Erst wenn Bauteile, Bunde, Pritschen-Zuteilung und Lagenplan logisch stimmen, sollte der PDF-Plan als verbindlich betrachtet werden.')
+
+        bundle_control_df = build_control_bundle_table(units_df)
+        assignment_control_df = build_control_assignment_table(edited_placements_df, platforms_used_df)
+        layer_control_df = build_control_layer_table(edited_placements_df, platforms_used_df)
+        control_issue_df = build_control_issue_table(bundle_control_df, assignment_control_df, layer_control_df)
+
+        st.markdown('**1. Bauteile sortiert**')
+        part_cols = [c for c in ['Bauteilnummer', 'Name', 'Pak/Unit', 'Länge_mm', 'Breite_mm', 'Höhe_mm', 'Gewicht_kg', 'Volumen_m3', 'Qualität', 'Profil'] if c in sorted_parts.columns]
+        st.dataframe(sorted_parts[part_cols] if part_cols else sorted_parts, use_container_width=True, hide_index=True)
+
+        st.markdown('**2. Bunde / Verladeeinheiten gebildet**')
+        st.dataframe(bundle_control_df, use_container_width=True, hide_index=True)
+
+        st.markdown('**3. Pritschen-Zuteilung / Nummernbereiche**')
+        if assignment_control_df.empty:
+            st.warning('Noch keine Pritschen-Zuteilung vorhanden.')
+        else:
+            st.dataframe(assignment_control_df, use_container_width=True, hide_index=True)
+
+        st.markdown('**4. Lagenplan je Pritsche**')
+        if layer_control_df.empty:
+            st.warning('Noch kein Lagenplan vorhanden.')
+        else:
+            platform_names = layer_control_df['Pritsche'].astype(str).drop_duplicates().tolist()
+            selected_control_platform = st.selectbox('Pritsche für Kontroll-Lagenplan', platform_names, key='control_layer_platform')
+            st.dataframe(
+                layer_control_df[layer_control_df['Pritsche'].astype(str) == selected_control_platform],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        st.markdown('**5. Prüfpunkte**')
+        if control_issue_df.empty:
+            st.success('Kontrolltabellen zeigen keine offensichtlichen Rücksprünge oder Lagenrichtungsfehler.')
+        else:
+            st.warning('Es gibt Punkte, die vor dem PDF geprüft werden sollten.')
+            st.dataframe(control_issue_df, use_container_width=True, hide_index=True)
 
     with tab1:
         st.dataframe(units_df, use_container_width=True, hide_index=True)
