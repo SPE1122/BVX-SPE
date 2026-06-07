@@ -2567,23 +2567,44 @@ def _position_slot_for_bsd(
     front_at_x_max: bool = False,
     left_at_y_max: bool = False,
 ) -> str:
-    """Ordnet eine Einheit anhand ihres Mittelpunktes einer BSD-Position zu.
+    """Ordnet eine Einheit einer BSD-Position zu.
 
-    Wichtig: Vorne/Hinten und Links/Rechts müssen zur grafischen Ansicht passen.
-    Deshalb sind die Orientierungen einstellbar.
+    Fachregel für die Praxis:
+    - Ein Bund, der die Mitte in X-Richtung berührt/überdeckt, wird im BSD immer
+      unter "Vorne" geführt. Dadurch erscheint ein mittig liegender Bund nicht
+      zufällig einmal vorne und einmal hinten.
+    - Ein Bund, der die Mitte in Y-Richtung berührt/überdeckt, wird im BSD unter
+      "links" geführt. Die Darstellung bleibt dadurch eindeutig.
+    - Für normale Einzelteile bleibt die Orientierung über den Mittelpunkt gültig.
     """
-    x_mid = safe_number(row.get('X_mm')) + safe_number(row.get('Länge_mm')) / 2
-    y_mid = safe_number(row.get('Y_mm')) + safe_number(row.get('Breite_mm')) / 2
+    x0 = safe_number(row.get('X_mm'))
+    y0 = safe_number(row.get('Y_mm'))
+    length = safe_number(row.get('Länge_mm'))
+    width = safe_number(row.get('Breite_mm'))
+    x1 = x0 + length
+    y1 = y0 + width
+    x_mid = x0 + length / 2
+    y_mid = y0 + width / 2
+    typ = str(row.get('Typ', '') or '').strip()
 
-    if front_at_x_max:
-        front_back = 'Vorne' if x_mid >= eff_length / 2 else 'Hinten'
-    else:
-        front_back = 'Vorne' if x_mid <= eff_length / 2 else 'Hinten'
+    x_center = eff_length / 2
+    y_center = platform_width / 2
+    crosses_x_center = x0 <= x_center <= x1
+    crosses_y_center = y0 <= y_center <= y1
 
-    if left_at_y_max:
-        left_right = 'links' if y_mid >= platform_width / 2 else 'rechts'
+    if typ == 'Bund' and crosses_x_center:
+        front_back = 'Vorne'
+    elif front_at_x_max:
+        front_back = 'Vorne' if x_mid >= x_center else 'Hinten'
     else:
-        left_right = 'links' if y_mid <= platform_width / 2 else 'rechts'
+        front_back = 'Vorne' if x_mid <= x_center else 'Hinten'
+
+    if typ == 'Bund' and crosses_y_center:
+        left_right = 'links'
+    elif left_at_y_max:
+        left_right = 'links' if y_mid >= y_center else 'rechts'
+    else:
+        left_right = 'links' if y_mid <= y_center else 'rechts'
 
     return f'{front_back} {left_right}'
 
@@ -3866,7 +3887,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
         pritschen_edit['Einlage_allgemein_mm'] = float(general_spacer_height)
 
     st.subheader('6. Platzierung / Automatik')
-    st.caption('Geometrisch mittige Ausrichtung ist fest aktiv. Die fertige Lage wird in X/Y mittig auf der Pritsche verschoben. Keine Gewichts-/Schwerpunktoptimierung.')
+    st.caption('Geometrisch mittige Ausrichtung ist fest aktiv. Die fertige Lage wird in X/Y mittig auf der Pritsche verschoben. Keine Gewichts-/Schwerpunktoptimierung. Verladelogik bleibt ruhig: saubere Bunde/Lagen vor Lochfüllung; Unterbau nur als letzte Kontroll-/Notlösung.')
     col1, col2, col3, col4 = st.columns(4)
     allow_beside = col1.checkbox('Nebeneinander erlauben', value=True)
     allow_stack = col2.checkbox('Übereinander erlauben', value=True)
@@ -3979,7 +4000,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
             project_meta=project_meta,
         )
         st.markdown('**Ladeplan BSD je Pritsche**')
-        st.caption('Die Tabelle wird automatisch für jede belegte Pritsche erstellt. Grundlage ist die vorhandene Platzierung: vorne/hinten wird über X, links/rechts über Y bestimmt.')
+        st.caption('Die Tabelle wird automatisch für jede belegte Pritsche erstellt. Grundlage ist die vorhandene Platzierung. Fachregel: mittig liegende Bunde werden im BSD immer vorne geführt; bei Mitte links/rechts werden sie links geführt.')
 
         if bsd_header_df.empty or bsd_matrix_df.empty:
             st.warning('Für die aktuelle Verladung wurde kein Ladeplan BSD erzeugt.')
