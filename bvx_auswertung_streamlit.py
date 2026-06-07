@@ -1196,34 +1196,10 @@ def create_loading_plan(
     while pending:
         placed = False
 
-        # 1) Zuerst versuchen, die aktuelle Verladeeinheit in der offenen Stelle zu setzen.
-        for state in states:
-            fit = _current_gap_fit(state, pending[0], allow_rotation)
-            if fit is not None:
-                x, y, z, use_length, use_width, height, rotation, mode = fit
-                commit_place(state, pending[0], x, y, z, use_length, use_width, height, rotation, mode)
-                pending.pop(0)
-                placed = True
-                break
-        if placed:
-            continue
-
-        # 2) Wenn die aktuelle Einheit nicht in die offene Stelle passt, einen späteren kleineren/passenderen Bund suchen.
-        #    Damit werden Lücken vor dem Erzeugen von Unterbau reduziert.
-        for state in states:
-            candidate = _find_later_gap_candidate(pending, state, allow_rotation)
-            if candidate is None:
-                continue
-            idx, fit = candidate
-            cand = pending.pop(idx)
-            x, y, z, use_length, use_width, height, rotation, mode = fit
-            commit_place(state, cand, x, y, z, use_length, use_width, height, rotation, mode)
-            placed = True
-            break
-        if placed:
-            continue
-
-        # 3) Erst wenn keine Lückenfüllung möglich ist, wird die nächste Reihe/Lage/Plattform versucht.
+        # Ruhige Praxislogik:
+        # Keine aggressive Lückenfüllung mit späteren Einzelteilen/Bunden.
+        # Die Reihenfolge bleibt stabil; dadurch entstehen weniger chaotische Stapel
+        # und deutlich weniger künstlicher Unterbau.
         unit = pending.pop(0)
         for state in states:
             result = try_place_unit(
@@ -1406,6 +1382,10 @@ def create_variant_a_loading_plan(
     while not remaining.empty and fuhre_nr <= max_fuhren:
         progress = False
 
+        # Alle freigegebenen Fuhrenoptionen simulieren und die Option wählen,
+        # die pro Fuhre am meisten Einheiten/Gewicht sauber mitnimmt.
+        # Ziel: weniger Pritschen/Fuhren, ohne chaotische Lückenfüllung.
+        best_try = None
         for _, option_row in enabled_options.iterrows():
             option_name = str(option_row['Fuhrenoption'])
             trip_platforms = build_trip_platforms(pritschen_df, option_name, fuhre_nr)
@@ -1434,22 +1414,45 @@ def create_variant_a_loading_plan(
 
             loaded_try = placements_try[placements_try['Pritsche'] != 'NICHT VERLADEN'].copy()
             loaded_ids = loaded_try['Einheit_ID'].dropna().astype(str).unique().tolist() if not loaded_try.empty else []
+            if not loaded_ids:
+                continue
 
-            if loaded_ids:
-                all_placements.append(loaded_try)
-                all_summary.append(summary_try)
-                all_platforms.append(trip_platforms)
-                fuhren_log.append({
-                    'Fuhre_Nr': fuhre_nr,
-                    'Fuhrenoption': option_name,
-                    'Verladeeinheiten': len(loaded_ids),
-                    'Gewicht_kg': round(float(loaded_try['Gewicht_kg'].sum()), 2),
-                    'Pritschen': ', '.join(trip_platforms['Pritschenname'].astype(str).tolist()),
-                })
-                remaining = remaining[~remaining['Einheit_ID'].astype(str).isin(loaded_ids)].copy().reset_index(drop=True)
-                progress = True
-                fuhre_nr += 1
-                break
+            loaded_weight = float(loaded_try['Gewicht_kg'].sum())
+            used_platforms = int(loaded_try['Pritsche'].nunique())
+            priority = safe_number(option_row.get('Priorität'), 999)
+            # Hauptkriterium: möglichst viele Einheiten je Fuhre.
+            # Danach Gewichtsausnutzung. Bei Gleichstand bleibt die höhere Priorität besser.
+            score = (len(loaded_ids) * 1000000.0) + loaded_weight - (priority * 10.0) - (used_platforms * 0.01)
+            if best_try is None or score > best_try['score']:
+                best_try = {
+                    'score': score,
+                    'option_name': option_name,
+                    'trip_platforms': trip_platforms,
+                    'placements_try': placements_try,
+                    'summary_try': summary_try,
+                    'loaded_try': loaded_try,
+                    'loaded_ids': loaded_ids,
+                    'loaded_weight': loaded_weight,
+                }
+
+        if best_try is not None:
+            loaded_try = best_try['loaded_try']
+            loaded_ids = best_try['loaded_ids']
+            trip_platforms = best_try['trip_platforms']
+            option_name = best_try['option_name']
+            all_placements.append(loaded_try)
+            all_summary.append(best_try['summary_try'])
+            all_platforms.append(trip_platforms)
+            fuhren_log.append({
+                'Fuhre_Nr': fuhre_nr,
+                'Fuhrenoption': option_name,
+                'Verladeeinheiten': len(loaded_ids),
+                'Gewicht_kg': round(float(best_try['loaded_weight']), 2),
+                'Pritschen': ', '.join(trip_platforms['Pritschenname'].astype(str).tolist()),
+            })
+            remaining = remaining[~remaining['Einheit_ID'].astype(str).isin(loaded_ids)].copy().reset_index(drop=True)
+            progress = True
+            fuhre_nr += 1
 
         if not progress:
             break
@@ -3872,9 +3875,9 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
     max_fuhren = col4.number_input('Max. Fuhren Sicherheitslimit', min_value=1, max_value=200, value=50, step=1)
 
     st.subheader('7. Auflage / Unterbau')
-    st.caption('Diese Kontrolle rechnet keine neue Verladung, sondern erkennt freie Höhe und zu geringe Auflage. Bei Bedarf wird im Ladeplan/PDF ein Unterbau als Hinweis eingezeichnet.')
+    st.caption('Ruhige Logik: Unterbau ist nur Kontrolle/Notlösung. Zuerst werden weniger Fuhren und saubere Lagen angestrebt; Unterbau sollte möglichst selten verwendet werden.')
     ucol1, ucol2, ucol3 = st.columns(3)
-    underbau_enabled = ucol1.checkbox('Unterbau / Auflage prüfen', value=True)
+    underbau_enabled = ucol1.checkbox('Unterbau / Auflage prüfen und anzeigen', value=False)
     min_support_ratio = ucol2.number_input('Mindestauflagefläche %', min_value=0, max_value=100, value=65, step=5) / 100.0
     min_underbau_height = ucol3.number_input('Unterbau anzeigen ab mm', min_value=0.0, max_value=500.0, value=20.0, step=5.0)
 
