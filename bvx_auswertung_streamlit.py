@@ -1917,7 +1917,7 @@ def create_variant_a_loading_plan(
     same_profile: bool = False,
     label_attr: str = 'Bauteilnummer',
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """V20: Pritsche-für-Pritsche-Logik mit Bundbildung erst nach Blockwahl.
+    """V21: geprüfte Block-Suche pro Pritsche mit Bundbildung erst nach gültigem Block.
 
     Neue Arbeitsweise:
     1. Bauteile werden global sortiert.
@@ -2018,7 +2018,7 @@ def create_variant_a_loading_plan(
         units['Einheit_ID'] = new_ids
         units['Pritschenblock'] = block_name
         units['Logische_Reihenfolge_im_Block'] = list(range(1, len(units) + 1))
-        units['Bundbildung'] = 'nach Pritschenblock / von oben nach unten'
+        units['Bundbildung'] = 'V21 nach geprüftem Pritschenblock / von oben nach unten'
         return units
 
     def _pack_block_units_on_platform(block_units_top: pd.DataFrame, platform_row: pd.Series) -> Tuple[bool, pd.DataFrame, pd.DataFrame]:
@@ -2047,38 +2047,70 @@ def create_variant_a_loading_plan(
         loaded = loaded[loaded['Einheit_ID'].astype(str).isin(wanted_ids)].copy()
         if 'Ebene' in loaded.columns:
             loaded['Ebene'] = loaded['Ebene'].astype(str).apply(
-                lambda v: v if 'V20 Pritschenblock' in v else f'{v} / V20 Pritschenblock'
+                lambda v: v if 'V21 Pritschenblock' in v else f'{v} / V21 Pritschenblock'
             )
         summary = recompute_summary_from_placements(loaded, platform_df)
         return True, loaded, summary
 
     def _find_max_part_block_for_platform(parts_df: pd.DataFrame, platform_row: pd.Series, unit_start: int) -> Dict[str, Any]:
+        """Sucht den grössten gültigen, fortlaufenden Bauteilblock für genau diese Pritsche.
+
+        V21-Änderung:
+        Ein früher Kandidat darf fehlschlagen, ohne dass die Suche sofort abbricht.
+        Grund: Durch einen zusätzlichen Bauteil kann sich die Bundbildung ändern; dadurch kann
+        ein grösserer Block wieder sauberer packbar sein als ein kleiner Zwischenkandidat.
+        Abgebrochen wird nur, wenn das rohe Bauteilgewicht bereits über der zulässigen
+        Pritschenlast liegt, weil mehr Bauteile dann sicher nicht helfen können.
+        """
         best_n = 0
         best_units = pd.DataFrame()
         best_loaded = pd.DataFrame()
         best_summary = pd.DataFrame()
         max_n = len(parts_df)
         platform_label = str(platform_row.get('Pritsche', platform_row.get('Pritschenname', 'Pritsche')))
+        max_weight = safe_number(platform_row.get('Max_Gewicht_kg'), 0.0)
+        tare = safe_number(platform_row.get('Eigengewicht_Pritsche_kg'), 0.0)
+        tests_done = 0
+        failed_candidates = 0
 
-        # Streng fortlaufend: nur den nächsten Bauteilblock wachsen lassen.
+        # Streng fortlaufend: nur der nächste Bauteilblock wird getestet.
+        # Aber: nicht beim ersten geometrischen Fehler abbrechen.
         for n in range(1, max_n + 1):
             part_block = parts_df.iloc[:n].copy().reset_index(drop=True)
+            raw_weight = float(part_block['Gewicht_kg'].sum()) + tare if 'Gewicht_kg' in part_block.columns else 0.0
+            if max_weight > 0 and raw_weight > max_weight + 0.001:
+                break
+
             block_units = _build_units_for_part_block(part_block, unit_start, platform_label)
             if block_units.empty:
                 break
+
+            tests_done += 1
             ok, loaded, summary = _pack_block_units_on_platform(block_units, platform_row)
-            if not ok:
-                break
-            best_n = n
-            best_units = block_units
-            best_loaded = loaded
-            best_summary = summary
+            if ok:
+                best_n = n
+                best_units = block_units
+                best_loaded = loaded
+                best_summary = summary
+            else:
+                failed_candidates += 1
+                # weiter testen: ein späterer Bauteil kann die Bundgrenze verändern
+                # und damit wieder einen gültigen Block ergeben.
+                continue
+
+        if best_n > 0:
+            if 'Bundbildung' in best_units.columns:
+                best_units['Bundbildung'] = best_units['Bundbildung'].astype(str) + f' / Kandidaten geprüft: {tests_done}, verworfen: {failed_candidates}'
+            if 'Ebene' in best_loaded.columns:
+                best_loaded['Ebene'] = best_loaded['Ebene'].astype(str) + f' / Blocktest {tests_done}'
 
         return {
             'parts_count': best_n,
             'units': best_units,
             'loaded': best_loaded,
             'summary': best_summary,
+            'tests_done': tests_done,
+            'failed_candidates': failed_candidates,
         }
 
     def _simulate_option_by_parts(option_row: pd.Series, remaining_df: pd.DataFrame, fuhre_nr: int, unit_start: int) -> Optional[Dict[str, Any]]:
@@ -2176,7 +2208,7 @@ def create_variant_a_loading_plan(
             'Verladeeinheiten': int(len(best_try['units_used'])) if best_try['units_used'] is not None else 0,
             'Gewicht_kg': round(float(best_try['loaded_weight']), 2),
             'Pritschen': ', '.join(best_try['trip_platforms']['Pritschenname'].astype(str).tolist()) if not best_try['trip_platforms'].empty else '',
-            'Reihenfolge': 'V20 Pritsche nacheinander: Block -> sortieren -> Bund -> unten packen',
+            'Reihenfolge': 'V21 Blockprüfung: Kandidaten testen -> gültigen Max-Block fixieren -> Bund -> unten packen',
             'Erste_Bauteilnummer': best_try.get('first_label', ''),
             'Letzte_Bauteilnummer': best_try.get('last_label', ''),
         })
@@ -2187,7 +2219,7 @@ def create_variant_a_loading_plan(
     if not remaining_parts.empty:
         not_loaded, units_left = _make_not_loaded_rows_from_parts(
             remaining_parts,
-            'passt in keine freigegebene Fuhrenoption mit V20-Pritschenblocklogik',
+            'passt in keine freigegebene Fuhrenoption mit V21 geprüfter Blocklogik',
             unit_counter_global,
         )
         if not not_loaded.empty:
@@ -4777,7 +4809,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
     same_profile = col4.checkbox('Nur gleiches Profil im Bund', value=False)
 
     # Vorschau: globale Bundbildung nur zur ersten Orientierung.
-    # Für die echte Verladung ab V20 werden Bunde erst nach der Pritschenblockwahl gebildet.
+    # Für die echte Verladung ab V21 werden Bunde erst nach der Pritschenblockwahl gebildet.
     units_preview_df = build_loading_units(
         sorted_parts,
         use_bundles=use_bundles,
@@ -4793,7 +4825,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
     units_df = units_preview_df.copy()
 
     st.subheader('5. Fuhrenoptionen und Pritschen aus Excel')
-    st.caption('V20: Pritsche für Pritsche. Pro Pritsche wird zuerst der maximale fortlaufende Bauteilblock gesucht, dann sortiert, dann werden daraus die Bunde gebildet. Physisch wird unten mit den höheren Nummern begonnen.')
+    st.caption('V21: Pritsche für Pritsche. Pro Pritsche wird zuerst der maximale fortlaufende Bauteilblock gesucht, dann sortiert, dann werden daraus die Bunde gebildet. Physisch wird unten mit den höheren Nummern begonnen.')
 
     fcol1, fcol2 = st.columns([1, 2])
     with fcol1:
