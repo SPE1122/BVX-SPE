@@ -1026,6 +1026,67 @@ def commit_place(
     return placement
 
 
+def _unit_orientations_for_state(state: Dict[str, Any], unit: pd.Series, allow_rotation: bool) -> List[Tuple[float, float, int]]:
+    """Mögliche Drehungen einer Verladeeinheit."""
+    length = float(unit['Länge_mm'])
+    width = float(unit['Breite_mm'])
+    rotation_allowed = bool(allow_rotation and state.get('allow_rotation_platform', False))
+    orientations = [(length, width, 0)]
+    if rotation_allowed and abs(length - width) > 0.001:
+        orientations.append((width, length, 90))
+    return orientations
+
+
+def _current_gap_fit(state: Dict[str, Any], unit: pd.Series, allow_rotation: bool) -> Optional[Tuple[float, float, float, float, float, float, int, str]]:
+    """Prüft nur die aktuelle offene Stelle in der aktuellen Reihe/Lage.
+
+    Diese Funktion bewegt nicht in eine neue Reihe oder neue Lage. Sie wird genutzt,
+    um kleinere spätere Bunde/Bauteile in vorhandene Löcher zu setzen, bevor ein
+    Unterbau erzeugt wird.
+    """
+    height = float(unit['Höhe_mm'])
+    weight = float(unit['Gewicht_kg'])
+    x = float(state['current_x'])
+    y = float(state['current_y'])
+    z = float(state['current_z'])
+    for use_length, use_width, rotation in _unit_orientations_for_state(state, unit, allow_rotation):
+        if can_place(state, x, y, z, use_length, use_width, height, weight):
+            return (x, y, z, use_length, use_width, height, rotation, 'Lücke gefüllt')
+    return None
+
+
+def _gap_candidate_score(state: Dict[str, Any], fit: Tuple[float, float, float, float, float, float, int, str]) -> float:
+    """Bewertet, wie gut ein Kandidat die offene Stelle füllt."""
+    _, _, _, length, width, height, _, _ = fit
+    rest_l = max(1.0, float(state['Eff_Länge_mm']) - float(state['current_x']))
+    rest_w = max(1.0, float(state['Breite_mm']) - float(state['current_y']))
+    fill_l = min(1.0, length / rest_l)
+    fill_w = min(1.0, width / rest_w)
+    area = length * width
+    return fill_l * 1000000.0 + fill_w * 10000.0 + area / 1000.0 + height
+
+
+def _find_later_gap_candidate(pending: List[pd.Series], state: Dict[str, Any], allow_rotation: bool, max_search: int = 40) -> Optional[Tuple[int, Tuple[float, float, float, float, float, float, int, str]]]:
+    """Sucht in den nächsten Verladeeinheiten nach einem Teil, das die offene Lücke füllt."""
+    if len(pending) <= 1:
+        return None
+    # Nur suchen, wenn überhaupt schon eine Reihe/Lage begonnen wurde.
+    if float(state.get('current_x', 0.0)) <= 0 and float(state.get('current_y', 0.0)) <= 0 and float(state.get('used_height', 0.0)) <= float(state.get('base_wood_height', 0.0)) + 0.1:
+        return None
+    best: Optional[Tuple[int, Tuple[float, float, float, float, float, float, int, str], float]] = None
+    limit = min(len(pending), max_search + 1)
+    for idx in range(1, limit):
+        fit = _current_gap_fit(state, pending[idx], allow_rotation)
+        if fit is None:
+            continue
+        score = _gap_candidate_score(state, fit)
+        if best is None or score > best[2]:
+            best = (idx, fit, score)
+    if best is None:
+        return None
+    return best[0], best[1]
+
+
 def try_place_unit(
     state: Dict[str, Any],
     unit: pd.Series,
@@ -1033,17 +1094,10 @@ def try_place_unit(
     allow_stack: bool,
     allow_rotation: bool,
 ) -> Optional[Dict[str, Any]]:
-    length = float(unit['Länge_mm'])
-    width = float(unit['Breite_mm'])
     height = float(unit['Höhe_mm'])
     weight = float(unit['Gewicht_kg'])
 
-    rotation_allowed = bool(allow_rotation and state.get('allow_rotation_platform', False))
-    orientations = [(length, width, 0)]
-    if rotation_allowed and length != width:
-        orientations.append((width, length, 90))
-
-    for use_length, use_width, rotation in orientations:
+    for use_length, use_width, rotation in _unit_orientations_for_state(state, unit, allow_rotation):
         # 1. hintereinander in aktueller Reihe
         x = state['current_x']
         y = state['current_y']
@@ -1107,8 +1161,70 @@ def create_loading_plan(
     states = [init_platform_state(row, base_wood_height, layer_spacer_height, gap_length) for _, row in active_platforms.iterrows()]
     not_loaded: List[Dict[str, Any]] = []
 
-    for _, unit in units.iterrows():
+    pending: List[pd.Series] = [row for _, row in units.iterrows()]
+
+    def append_not_loaded(unit: pd.Series) -> None:
+        not_loaded.append({
+            'Fuhre_Nr': None,
+            'Fuhrenoption': '',
+            'Pritschenname': '',
+            'Pritsche': 'NICHT VERLADEN',
+            'Einheit_ID': unit['Einheit_ID'],
+            'Typ': unit['Typ'],
+            'Anzahl_Bauteile': int(unit['Anzahl_Bauteile']),
+            'Bauteile': unit['Bauteile'],
+            'Bauteile_Liste': unit.get('Bauteile_Liste', unit.get('Bauteile', '')),
+            'Ansicht_Attribut': unit.get('Ansicht_Attribut', ''),
+            'Ansicht_Label': unit.get('Ansicht_Label', unit.get('Einheit_ID', '')),
+            'Ansicht_Liste': unit.get('Ansicht_Liste', unit.get('Ansicht_Label', '')),
+            'Einzellängen_mm': unit.get('Einzellängen_mm', ''),
+            'Einzelbreiten_mm': unit.get('Einzelbreiten_mm', ''),
+            'Einzelhöhen_mm': unit.get('Einzelhöhen_mm', ''),
+            'Einlage_allgemein_mm': safe_number(unit.get('Einlage_allgemein_mm'), 0.0),
+            'Bundeinlage_mm': safe_number(unit.get('Bundeinlage_mm'), 0.0),
+            'X_mm': None,
+            'Y_mm': None,
+            'Z_mm': None,
+            'Länge_mm': unit['Länge_mm'],
+            'Breite_mm': unit['Breite_mm'],
+            'Höhe_mm': unit['Höhe_mm'],
+            'Drehung': None,
+            'Ebene': 'nicht passend',
+            'Gewicht_kg': round(float(unit['Gewicht_kg']), 2),
+        })
+
+    while pending:
         placed = False
+
+        # 1) Zuerst versuchen, die aktuelle Verladeeinheit in der offenen Stelle zu setzen.
+        for state in states:
+            fit = _current_gap_fit(state, pending[0], allow_rotation)
+            if fit is not None:
+                x, y, z, use_length, use_width, height, rotation, mode = fit
+                commit_place(state, pending[0], x, y, z, use_length, use_width, height, rotation, mode)
+                pending.pop(0)
+                placed = True
+                break
+        if placed:
+            continue
+
+        # 2) Wenn die aktuelle Einheit nicht in die offene Stelle passt, einen späteren kleineren/passenderen Bund suchen.
+        #    Damit werden Lücken vor dem Erzeugen von Unterbau reduziert.
+        for state in states:
+            candidate = _find_later_gap_candidate(pending, state, allow_rotation)
+            if candidate is None:
+                continue
+            idx, fit = candidate
+            cand = pending.pop(idx)
+            x, y, z, use_length, use_width, height, rotation, mode = fit
+            commit_place(state, cand, x, y, z, use_length, use_width, height, rotation, mode)
+            placed = True
+            break
+        if placed:
+            continue
+
+        # 3) Erst wenn keine Lückenfüllung möglich ist, wird die nächste Reihe/Lage/Plattform versucht.
+        unit = pending.pop(0)
         for state in states:
             result = try_place_unit(
                 state,
@@ -1121,34 +1237,7 @@ def create_loading_plan(
                 placed = True
                 break
         if not placed:
-            not_loaded.append({
-                'Fuhre_Nr': None,
-                'Fuhrenoption': '',
-                'Pritschenname': '',
-                'Pritsche': 'NICHT VERLADEN',
-                'Einheit_ID': unit['Einheit_ID'],
-                'Typ': unit['Typ'],
-                'Anzahl_Bauteile': int(unit['Anzahl_Bauteile']),
-                'Bauteile': unit['Bauteile'],
-                'Bauteile_Liste': unit.get('Bauteile_Liste', unit.get('Bauteile', '')),
-                'Ansicht_Attribut': unit.get('Ansicht_Attribut', ''),
-                'Ansicht_Label': unit.get('Ansicht_Label', unit.get('Einheit_ID', '')),
-                'Ansicht_Liste': unit.get('Ansicht_Liste', unit.get('Ansicht_Label', '')),
-                'Einzellängen_mm': unit.get('Einzellängen_mm', ''),
-                'Einzelbreiten_mm': unit.get('Einzelbreiten_mm', ''),
-                'Einzelhöhen_mm': unit.get('Einzelhöhen_mm', ''),
-                'Einlage_allgemein_mm': safe_number(unit.get('Einlage_allgemein_mm'), 0.0),
-                'Bundeinlage_mm': safe_number(unit.get('Bundeinlage_mm'), 0.0),
-                'X_mm': None,
-                'Y_mm': None,
-                'Z_mm': None,
-                'Länge_mm': unit['Länge_mm'],
-                'Breite_mm': unit['Breite_mm'],
-                'Höhe_mm': unit['Höhe_mm'],
-                'Drehung': None,
-                'Ebene': 'nicht passend',
-                'Gewicht_kg': round(float(unit['Gewicht_kg']), 2),
-            })
+            append_not_loaded(unit)
 
     placements = []
     summary = []
@@ -3019,6 +3108,46 @@ def _pdf_add_visible_spacer_rows(rows: pd.DataFrame, platform: pd.Series, view: 
         return rows
     return pd.concat([rows, pd.DataFrame(helpers)], ignore_index=True, sort=False)
 
+
+
+def _pdf_draw_underbau_blocks(c, rx: float, ry: float, rw: float, rh: float, view: str, label: str) -> None:
+    """Zeichnet Unterbau als Hilfselement: in Draufsicht gestrichelt, in Ansichten als Klötze."""
+    from reportlab.lib import colors
+    if rw <= 0 or rh <= 0:
+        return
+    c.saveState()
+    c.setStrokeColor(colors.HexColor('#555555'))
+    c.setFillColor(colors.HexColor('#d9d9d9'))
+    c.setLineWidth(0.45)
+
+    if view == 'top':
+        # Nur gestrichelte Kontur, damit Bauteilnummern nicht verdeckt werden.
+        c.setDash(3, 2)
+        c.rect(rx, ry, rw, rh, stroke=1, fill=0)
+        c.setDash()
+        if rw > 22 and rh > 8:
+            c.setFont('Helvetica', 3.8)
+            c.setFillColor(colors.HexColor('#555555'))
+            c.drawString(rx + 2, ry + 2, str(label).replace('Unterbau', 'UB')[:10])
+        c.restoreState()
+        return
+
+    # Seiten-/Front-/Rückansichten: nicht als durchgehender Balken, sondern als 2 Auflagerklötze.
+    # Die Klötze werden annähernd quadratisch, aber nie breiter als 25% der Projektion.
+    block_w = max(4.0, min(max(rh, 5.0), rw * 0.22, 38.0))
+    if rw <= block_w * 2.4:
+        # Wenn das Bauteil sehr schmal projiziert ist, nur einen mittigen Klotz zeichnen.
+        bx = rx + (rw - block_w) / 2
+        c.rect(bx, ry, block_w, rh, stroke=1, fill=1)
+    else:
+        c.rect(rx, ry, block_w, rh, stroke=1, fill=1)
+        c.rect(rx + rw - block_w, ry, block_w, rh, stroke=1, fill=1)
+    if rw > 35 and rh > 7:
+        c.setFont('Helvetica', 4.2)
+        c.setFillColor(colors.HexColor('#333333'))
+        c.drawCentredString(rx + rw / 2, ry + rh / 2 - 1.4, str(label).replace('Unterbau', 'UB')[:14])
+    c.restoreState()
+
 def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y: float, w: float, h: float, view: str, title: str, front_at_x_max: bool = False, left_at_y_max: bool = False) -> None:
     """Zeichnet eine PDF-Ansicht mit Pritschen- und Ladungsabmessungen.
 
@@ -3037,8 +3166,10 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
     rows = placements[placements['Pritsche'].astype(str) == pname].copy()
     rows = rows[rows['X_mm'].notna() & rows['Y_mm'].notna() & rows['Z_mm'].notna()].copy()
     if view == 'top' and not rows.empty:
-        # Unterbau, Einlagen und Kanthölzer sind in der Draufsicht in der Regel verdeckt.
-        rows = rows[~rows.get('Typ', pd.Series(dtype=str)).astype(str).isin(['Unterbau', 'Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz'])].copy()
+        # In der Draufsicht sollen Bauteilnummern im Vordergrund bleiben.
+        # Unterbau wird später nur gestrichelt gezeichnet; Einlagen/Kantholz bleiben verdeckt.
+        typ_series = rows.get('Typ', pd.Series(dtype=str)).astype(str)
+        rows = rows[~typ_series.isin(['Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz'])].copy()
     rows = _pdf_add_visible_spacer_rows(rows, platform, view)
 
     used_len = safe_number((rows['X_mm'] + rows['Länge_mm']).max() - rows['X_mm'].min(), 0.0) if not rows.empty else 0.0
@@ -3124,8 +3255,8 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
             c.setFillColor(colors.HexColor('#e6e6e6'))
             c.setStrokeColor(colors.grey)
         elif row_typ == 'Unterbau':
-            c.setFillColor(colors.HexColor('#d0d0d0'))
-            c.setStrokeColor(colors.HexColor('#666666'))
+            _pdf_draw_underbau_blocks(c, rx, ry, rw, rh, view, str(row.get('Ansicht_Label', row.get('Bauteile', 'Unterbau'))))
+            continue
         else:
             c.setFillColor(colors.lightgrey)
             c.setStrokeColor(colors.darkgrey)
