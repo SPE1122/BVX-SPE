@@ -1431,6 +1431,7 @@ def create_loading_excel(
     Ladeplan_BSD_Kopf und Projektkopf.
     """
     project_meta = project_meta or {}
+    front_at_x_max, left_at_y_max = _orientation_flags_from_meta(project_meta)
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         # Gewünschte Zusatzregister für Kontrolle / Weiterverarbeitung.
@@ -2287,14 +2288,45 @@ def _format_bsd_cell(row: pd.Series) -> str:
     return label or einheit
 
 
-def _position_slot_for_bsd(row: pd.Series, eff_length: float, platform_width: float) -> str:
-    """Ordnet eine Einheit anhand ihres geometrischen Mittelpunktes einer BSD-Position zu."""
+def _orientation_flags_from_meta(project_meta: Optional[Dict[str, Any]] = None) -> Tuple[bool, bool]:
+    """Liest die Orientierung für Ladeplan/PDF.
+
+    front_at_x_max: True = Vorne liegt bei grossem X-Wert.
+    left_at_y_max: True = Links liegt bei grossem Y-Wert.
+    """
+    meta = project_meta or {}
+    front_raw = str(meta.get('Vorne_Orientierung', '') or '').lower()
+    left_raw = str(meta.get('Links_Orientierung', '') or '').lower()
+    front_at_x_max = ('x=max' in front_raw) or ('x max' in front_raw) or ('rechts' in front_raw) or (front_raw.strip() == 'xmax')
+    left_at_y_max = ('y=max' in left_raw) or ('y max' in left_raw) or ('oben' in left_raw) or (left_raw.strip() == 'ymax')
+    return front_at_x_max, left_at_y_max
+
+
+def _position_slot_for_bsd(
+    row: pd.Series,
+    eff_length: float,
+    platform_width: float,
+    front_at_x_max: bool = False,
+    left_at_y_max: bool = False,
+) -> str:
+    """Ordnet eine Einheit anhand ihres Mittelpunktes einer BSD-Position zu.
+
+    Wichtig: Vorne/Hinten und Links/Rechts müssen zur grafischen Ansicht passen.
+    Deshalb sind die Orientierungen einstellbar.
+    """
     x_mid = safe_number(row.get('X_mm')) + safe_number(row.get('Länge_mm')) / 2
     y_mid = safe_number(row.get('Y_mm')) + safe_number(row.get('Breite_mm')) / 2
 
-    # X: vorderer / hinterer Bereich der Pritsche. Y: links / rechts.
-    front_back = 'Vorne' if x_mid <= eff_length / 2 else 'Hinten'
-    left_right = 'links' if y_mid <= platform_width / 2 else 'rechts'
+    if front_at_x_max:
+        front_back = 'Vorne' if x_mid >= eff_length / 2 else 'Hinten'
+    else:
+        front_back = 'Vorne' if x_mid <= eff_length / 2 else 'Hinten'
+
+    if left_at_y_max:
+        left_right = 'links' if y_mid >= platform_width / 2 else 'rechts'
+    else:
+        left_right = 'links' if y_mid <= platform_width / 2 else 'rechts'
+
     return f'{front_back} {left_right}'
 
 
@@ -2392,6 +2424,8 @@ def create_bsd_matrix_for_platform(
     placements_df: pd.DataFrame,
     platform: pd.Series,
     top_first: bool = True,
+    front_at_x_max: bool = False,
+    left_at_y_max: bool = False,
 ) -> pd.DataFrame:
     """Erstellt eine Ladeplan-BSD-Matrix je Pritsche.
 
@@ -2451,7 +2485,7 @@ def create_bsd_matrix_for_platform(
 
     # Bauteile/Bunde in einzelne sichtbare Zeilen zerlegen.
     for _, row in rows.sort_values(['Z_mm', 'X_mm', 'Y_mm'], kind='stable').iterrows():
-        slot = _position_slot_for_bsd(row, eff_length, platform_width)
+        slot = _position_slot_for_bsd(row, eff_length, platform_width, front_at_x_max, left_at_y_max)
         slot_has_load[slot] = True
         typ = str(row.get('Typ', '') or '').strip()
         count = max(1, int(safe_number(row.get('Anzahl_Bauteile'), 1)))
@@ -2504,7 +2538,7 @@ def create_bsd_matrix_for_platform(
     for z_val in layer_z_values:
         layer_rows = rows[rows['Z_mm'].round(1) == z_val].copy()
         for _, lrow in layer_rows.iterrows():
-            slot = _position_slot_for_bsd(lrow, eff_length, platform_width)
+            slot = _position_slot_for_bsd(lrow, eff_length, platform_width, front_at_x_max, left_at_y_max)
             is_bundle_layer = str(lrow.get('Typ', '')).strip() == 'Bund'
             if is_bundle_layer and spacer_height > 0:
                 effective_layer_spacer = spacer_height
@@ -2590,6 +2624,7 @@ def create_all_bsd_matrices(
 
     header_rows: List[Dict[str, Any]] = []
     matrix_frames: List[pd.DataFrame] = []
+    front_at_x_max, left_at_y_max = _orientation_flags_from_meta(project_meta)
     for _, platform in platforms_df.iterrows():
         pname = str(platform.get('Pritsche', ''))
         has_load = placements_df is not None and not placements_df.empty and (placements_df['Pritsche'].astype(str) == pname).any()
@@ -2597,7 +2632,7 @@ def create_all_bsd_matrices(
             # Leere Pritschen nicht als Ladeplan ausgeben.
             continue
         header_rows.append(create_bsd_header_for_platform(platform, summary_df, warnings_df, project_meta))
-        matrix = create_bsd_matrix_for_platform(placements_df, platform)
+        matrix = create_bsd_matrix_for_platform(placements_df, platform, front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max)
         if not matrix.empty:
             matrix_frames.append(matrix)
 
@@ -2607,7 +2642,7 @@ def create_all_bsd_matrices(
 
 
 
-def _pdf_projection_values(row: pd.Series, view: str, eff_length: float, width: float) -> Tuple[float, float, float, float, float]:
+def _pdf_projection_values(row: pd.Series, view: str, eff_length: float, width: float, front_at_x_max: bool = False, left_at_y_max: bool = False) -> Tuple[float, float, float, float, float]:
     """Gibt projiziertes Rechteck und Tiefenwert für eine Ansicht zurück."""
     x = safe_number(row.get('X_mm'))
     y = safe_number(row.get('Y_mm'))
@@ -2618,22 +2653,29 @@ def _pdf_projection_values(row: pd.Series, view: str, eff_length: float, width: 
 
     if view == 'top':
         return x, y, lx, by, z + hz
-    if view in ('side', 'side_left'):
-        # Von links gesehen: kleine Y-Werte liegen vorne. Grosse Y-Werte zuerst zeichnen.
+
+    # Linke/rechte Seitenansicht an die gewählte Links-Orientierung koppeln.
+    # links = Y klein (Standard) oder links = Y gross.
+    side_from_y_min = (view in ('side', 'side_left') and not left_at_y_max) or (view == 'side_right' and left_at_y_max)
+    side_from_y_max = (view == 'side_right' and not left_at_y_max) or (view in ('side', 'side_left') and left_at_y_max)
+    if side_from_y_min:
         return x, z, lx, hz, -y
-    if view == 'side_right':
-        # Von rechts gesehen: grosse Y-Werte liegen vorne.
+    if side_from_y_max:
         return eff_length - x - lx, z, lx, hz, y + by
-    if view == 'front':
-        # Von vorne gesehen: kleine X-Werte liegen vorne. Breite wird gespiegelt.
+
+    # Vorder-/Rückansicht an die gewählte Vorne-Orientierung koppeln.
+    # vorne = X klein (Standard) oder vorne = X gross.
+    front_from_x_min = (view == 'front' and not front_at_x_max) or (view == 'back' and front_at_x_max)
+    if front_from_x_min:
         return width - y - by, z, by, hz, -x
-    # back: von hinten gesehen: grosse X-Werte liegen vorne.
+
+    # Ansicht von X gross.
     return y, z, by, hz, x + lx
 
 
-def _pdf_visible_sort_value(row: pd.Series, view: str, eff_length: float, width: float) -> float:
+def _pdf_visible_sort_value(row: pd.Series, view: str, eff_length: float, width: float, front_at_x_max: bool = False, left_at_y_max: bool = False) -> float:
     """Sortierwert: zuerst verdeckte, zuletzt sichtbare Bauteile zeichnen."""
-    return _pdf_projection_values(row, view, eff_length, width)[4]
+    return _pdf_projection_values(row, view, eff_length, width, front_at_x_max, left_at_y_max)[4]
 
 
 def _pdf_label_lines(row: pd.Series, view: str) -> List[str]:
@@ -2713,7 +2755,100 @@ def _pdf_draw_label_lines(c, rx: float, ry: float, rw: float, rh: float, lines: 
             c.drawCentredString(rx + rw / 2, yy, txt)
 
 
-def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y: float, w: float, h: float, view: str, title: str) -> None:
+
+
+def _pdf_add_visible_spacer_rows(rows: pd.DataFrame, platform: pd.Series, view: str) -> pd.DataFrame:
+    """Ergänzt Kantholz und Einlagen als sichtbare Hilfszeilen für PDF-Ansichten.
+
+    Grund: Im Ladeplan BSD werden Kantholz und Bundeinlagen als eigene Lagen
+    geführt. Damit Pritschenplan und Ladeplan zusammenpassen, müssen diese
+    Hölzer auch in den Seiten-/Vorder-/Rückansichten gezeichnet werden.
+    In der Draufsicht werden sie nicht gezeichnet, weil sie von oben nicht
+    sichtbar sind, sobald Bauteile darüber liegen.
+    """
+    if rows is None or rows.empty or view == 'top':
+        return rows
+
+    base_height = safe_number(platform.get('Kantholz_erste_Lage_mm'), 0.0)
+    bundle_spacer = safe_number(platform.get('Einlage_zwischen_Lagen_mm'), 0.0)
+    general_spacer = safe_number(platform.get('Einlage_allgemein_mm'), 0.0)
+
+    helpers = []
+    required_cols = set(rows.columns)
+
+    def helper_row(source: Optional[pd.Series], typ: str, label: str, x: float, y: float, z: float, lx: float, by: float, hz: float) -> Dict[str, Any]:
+        base = {col: '' for col in required_cols}
+        if source is not None:
+            for col in required_cols:
+                try:
+                    base[col] = source.get(col, '')
+                except Exception:
+                    pass
+        base.update({
+            'Typ': typ,
+            'Einheit_ID': label,
+            'Bauteile': label,
+            'Bauteile_Liste': label,
+            'Ansicht_Label': label,
+            'Ansicht_Liste': label,
+            'X_mm': float(x),
+            'Y_mm': float(y),
+            'Z_mm': float(z),
+            'Länge_mm': float(lx),
+            'Breite_mm': float(by),
+            'Höhe_mm': float(hz),
+            'Gewicht_kg': 0.0,
+        })
+        return base
+
+    # Kantholz erste Lage: als durchgehende Unterlage der tatsächlich belegten Fläche anzeigen.
+    if base_height > 0:
+        min_x = safe_number(rows['X_mm'].min(), 0.0)
+        max_x = safe_number((rows['X_mm'] + rows['Länge_mm']).max(), min_x)
+        min_y = safe_number(rows['Y_mm'].min(), 0.0)
+        max_y = safe_number((rows['Y_mm'] + rows['Breite_mm']).max(), min_y)
+        helpers.append(helper_row(None, 'Kantholz', _fmt_bsd_mm_label('Kantholz', base_height), min_x, min_y, 0.0, max(0.0, max_x - min_x), max(0.0, max_y - min_y), base_height))
+
+    # Zwischenlagen: vor allem Bundeinlage/Lagenholz zwischen separaten Bundlagen.
+    # Die Positionen entsprechen den Z-Sprüngen im Ladeplan BSD.
+    existing = set()
+    for _, r in rows.iterrows():
+        z = safe_number(r.get('Z_mm'), 0.0)
+        if z <= base_height + 0.1:
+            continue
+        typ = str(r.get('Typ', '') or '').strip()
+        spacer_h = 0.0
+        spacer_label = ''
+        spacer_type = ''
+        if typ == 'Bund' and bundle_spacer > 0:
+            spacer_h = bundle_spacer
+            spacer_label = _fmt_bsd_mm_label('Bundeinlage', spacer_h)
+            spacer_type = 'Bundeinlage'
+        elif general_spacer > 0:
+            spacer_h = general_spacer
+            spacer_label = _fmt_bsd_mm_label('Einlage', spacer_h)
+            spacer_type = 'Einlage'
+        if spacer_h <= 0:
+            continue
+        z_spacer = round(max(0.0, z - spacer_h), 1)
+        key = (
+            round(safe_number(r.get('X_mm')), 1),
+            round(safe_number(r.get('Y_mm')), 1),
+            round(z_spacer, 1),
+            round(safe_number(r.get('Länge_mm')), 1),
+            round(safe_number(r.get('Breite_mm')), 1),
+            spacer_type,
+        )
+        if key in existing:
+            continue
+        existing.add(key)
+        helpers.append(helper_row(r, spacer_type, spacer_label, safe_number(r.get('X_mm')), safe_number(r.get('Y_mm')), z_spacer, safe_number(r.get('Länge_mm')), safe_number(r.get('Breite_mm')), spacer_h))
+
+    if not helpers:
+        return rows
+    return pd.concat([rows, pd.DataFrame(helpers)], ignore_index=True, sort=False)
+
+def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y: float, w: float, h: float, view: str, title: str, front_at_x_max: bool = False, left_at_y_max: bool = False) -> None:
     """Zeichnet eine PDF-Ansicht mit Pritschen- und Ladungsabmessungen.
 
     Beschriftung wurde bewusst reduziert:
@@ -2730,6 +2865,7 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
 
     rows = placements[placements['Pritsche'].astype(str) == pname].copy()
     rows = rows[rows['X_mm'].notna() & rows['Y_mm'].notna() & rows['Z_mm'].notna()].copy()
+    rows = _pdf_add_visible_spacer_rows(rows, platform, view)
 
     used_len = safe_number((rows['X_mm'] + rows['Länge_mm']).max() - rows['X_mm'].min(), 0.0) if not rows.empty else 0.0
     used_wid = safe_number((rows['Y_mm'] + rows['Breite_mm']).max() - rows['Y_mm'].min(), 0.0) if not rows.empty else 0.0
@@ -2795,19 +2931,27 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
 
     # Verdeckte Bauteile zuerst, sichtbare zuletzt.
     if not rows.empty:
-        rows['_pdf_sort'] = rows.apply(lambda r: _pdf_visible_sort_value(r, view, eff_length, width), axis=1)
+        rows['_pdf_sort'] = rows.apply(lambda r: _pdf_visible_sort_value(r, view, eff_length, width, front_at_x_max, left_at_y_max), axis=1)
         rows = rows.sort_values(['_pdf_sort', 'Z_mm', 'X_mm', 'Y_mm'], kind='stable')
 
     for _, row in rows.iterrows():
-        px, py, pw, ph, _depth = _pdf_projection_values(row, view, eff_length, width)
+        px, py, pw, ph, _depth = _pdf_projection_values(row, view, eff_length, width, front_at_x_max, left_at_y_max)
         rx = ox + px * scale
         ry = oy + py * scale
         rw = pw * scale
         rh = ph * scale
         if rw <= 0 or rh <= 0:
             continue
-        c.setFillColor(colors.lightgrey)
-        c.setStrokeColor(colors.darkgrey)
+        row_typ = str(row.get('Typ', '') or '').strip()
+        if row_typ == 'Kantholz':
+            c.setFillColor(colors.HexColor('#b8b8b8'))
+            c.setStrokeColor(colors.black)
+        elif row_typ in ['Bundeinlage', 'Einlage']:
+            c.setFillColor(colors.HexColor('#e6e6e6'))
+            c.setStrokeColor(colors.grey)
+        else:
+            c.setFillColor(colors.lightgrey)
+            c.setStrokeColor(colors.darkgrey)
         c.setLineWidth(0.38)
         c.rect(rx, ry, rw, rh, stroke=1, fill=1)
         _pdf_draw_label_lines(c, rx, ry, rw, rh, _pdf_label_lines(row, view), view)
@@ -2949,6 +3093,7 @@ def create_loading_pdf(
         raise RuntimeError('Für den PDF-Export muss reportlab installiert sein: pip install reportlab') from exc
 
     project_meta = project_meta or {}
+    front_at_x_max, left_at_y_max = _orientation_flags_from_meta(project_meta)
     output = io.BytesIO()
     c = canvas.Canvas(output, pagesize=landscape(A3))
     page_w, page_h = landscape(A3)
@@ -3004,11 +3149,11 @@ def create_loading_pdf(
             c.drawString(hint_x, hint_y - 14 - i * 12, line)
 
         # Zeichnungsbereiche: Vorder- und Rückansicht stehen untereinander, damit sie breiter werden.
-        _pdf_draw_view(c, placements_df, platform, margin, 395, 700, 220, 'side_left', 'Linke Seitenansicht')
-        _pdf_draw_view(c, placements_df, platform, margin, 165, 700, 215, 'side_right', 'Rechte Seitenansicht')
-        _pdf_draw_view(c, placements_df, platform, margin + 735, 390, 340, 190, 'back', 'Rückansicht')
-        _pdf_draw_view(c, placements_df, platform, margin + 735, 165, 340, 190, 'front', 'Vorderansicht')
-        _pdf_draw_view(c, placements_df, platform, margin, 25, 1080, 115, 'top', 'Draufsicht')
+        _pdf_draw_view(c, placements_df, platform, margin, 395, 700, 220, 'side_left', 'Linke Seitenansicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max)
+        _pdf_draw_view(c, placements_df, platform, margin, 165, 700, 215, 'side_right', 'Rechte Seitenansicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max)
+        _pdf_draw_view(c, placements_df, platform, margin + 735, 390, 340, 190, 'back', 'Rückansicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max)
+        _pdf_draw_view(c, placements_df, platform, margin + 735, 165, 340, 190, 'front', 'Vorderansicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max)
+        _pdf_draw_view(c, placements_df, platform, margin, 25, 1080, 115, 'top', 'Draufsicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max)
 
         # Qualitätssicherung kompakt oben rechts, getrennt vom Infofeld.
         c.setStrokeColor(colors.black)
@@ -3021,7 +3166,7 @@ def create_loading_pdf(
         c.showPage()
 
         # Zweite Seite: Ladeplan BSD Matrix je Pritsche, ähnlich Excel-Beispiel PB 6.
-        matrix = create_bsd_matrix_for_platform(placements_df, platform)
+        matrix = create_bsd_matrix_for_platform(placements_df, platform, front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max)
         if not matrix.empty:
             header = create_bsd_header_for_platform(platform, summary_df, warnings_df, project_meta)
             _pdf_draw_bsd_matrix_page(c, page_w, page_h, margin, platform, matrix, header, project_meta.get('Objekt_Name', project_name) or project_name, logo_bytes=logo_bytes)
@@ -3271,6 +3416,20 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
     bauabschnitt_auto = _unique_display_values_from_field(parts_df, bauabschnitt_attr)
     bauabschnitt_text = mcol8.text_input('Bauabschnitt', value=bauabschnitt_auto)
 
+    mcol9, mcol10 = st.columns(2)
+    vorne_orientation = mcol9.selectbox(
+        'Orientierung Vorne/Hinten',
+        ['Vorne = X=0 (links im Plan)', 'Vorne = X=max (rechts im Plan)'],
+        index=1,
+        help='Damit Ladeplan BSD und grafische Ansicht dieselbe Richtung verwenden.'
+    )
+    links_orientation = mcol10.selectbox(
+        'Orientierung Links/Rechts',
+        ['Links = Y=0', 'Links = Y=max'],
+        index=0,
+        help='Nur ändern, wenn links/rechts im Ladeplan gegenüber der Ansicht vertauscht ist.'
+    )
+
     project_meta = {
         'Objekt_Name': objekt_name,
         'Transport_Name': transport_name,
@@ -3280,6 +3439,8 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
         'Bauabschnitt': bauabschnitt_text,
         'Decke_Attribut': decke_attr,
         'Bauabschnitt_Attribut': bauabschnitt_attr,
+        'Vorne_Orientierung': vorne_orientation,
+        'Links_Orientierung': links_orientation,
     }
 
     logo_bytes = None
