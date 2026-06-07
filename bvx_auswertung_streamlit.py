@@ -644,33 +644,33 @@ def get_transport_presets() -> Dict[str, List[Dict[str, Any]]]:
         'LKW solo': [
             {'Freigabe': True, 'Pritsche': 'LKW', 'Pritschenname': 'LKW', 'Fuhrenoption': 'LKW solo', 'Pritschen_Reihenfolge': 1,
              'Länge_mm': 9300, 'Breite_mm': 2450, 'Max_Höhe_mm': 2600, 'Überhang_vorne_mm': 0,
-             'Überhang_hinten_mm': 300, 'Max_Gewicht_kg': 15000, 'Kantholz_erste_Lage_mm': 80,
+             'Überhang_hinten_mm': 300, 'Max_Gewicht_kg': 15000, 'Eigengewicht_Pritsche_kg': 0, 'Kantholz_erste_Lage_mm': 80,
              'Einlage_zwischen_Lagen_mm': 40, 'Einlage_allgemein_mm': 0, 'Drehen_90_erlaubt': False},
         ],
         'LKW mit Anhänger': [
             {'Freigabe': True, 'Pritsche': 'LKW', 'Pritschenname': 'LKW', 'Fuhrenoption': 'LKW mit Anhänger', 'Pritschen_Reihenfolge': 1,
              'Länge_mm': 9300, 'Breite_mm': 2450, 'Max_Höhe_mm': 2600, 'Überhang_vorne_mm': 0,
-             'Überhang_hinten_mm': 300, 'Max_Gewicht_kg': 15000, 'Kantholz_erste_Lage_mm': 80,
+             'Überhang_hinten_mm': 300, 'Max_Gewicht_kg': 15000, 'Eigengewicht_Pritsche_kg': 0, 'Kantholz_erste_Lage_mm': 80,
              'Einlage_zwischen_Lagen_mm': 40, 'Einlage_allgemein_mm': 0, 'Drehen_90_erlaubt': False},
             {'Freigabe': True, 'Pritsche': 'Anhänger', 'Pritschenname': 'Anhänger', 'Fuhrenoption': 'LKW mit Anhänger', 'Pritschen_Reihenfolge': 2,
              'Länge_mm': 8200, 'Breite_mm': 2450, 'Max_Höhe_mm': 2600, 'Überhang_vorne_mm': 0,
-             'Überhang_hinten_mm': 300, 'Max_Gewicht_kg': 12000, 'Kantholz_erste_Lage_mm': 80,
+             'Überhang_hinten_mm': 300, 'Max_Gewicht_kg': 12000, 'Eigengewicht_Pritsche_kg': 0, 'Kantholz_erste_Lage_mm': 80,
              'Einlage_zwischen_Lagen_mm': 40, 'Einlage_allgemein_mm': 0, 'Drehen_90_erlaubt': False},
         ],
         'Anhängerzug': [
             {'Freigabe': True, 'Pritsche': 'LKW', 'Pritschenname': 'LKW', 'Fuhrenoption': 'Anhängerzug', 'Pritschen_Reihenfolge': 1,
              'Länge_mm': 7600, 'Breite_mm': 2450, 'Max_Höhe_mm': 2600, 'Überhang_vorne_mm': 0,
-             'Überhang_hinten_mm': 300, 'Max_Gewicht_kg': 12000, 'Kantholz_erste_Lage_mm': 80,
+             'Überhang_hinten_mm': 300, 'Max_Gewicht_kg': 12000, 'Eigengewicht_Pritsche_kg': 0, 'Kantholz_erste_Lage_mm': 80,
              'Einlage_zwischen_Lagen_mm': 40, 'Einlage_allgemein_mm': 0, 'Drehen_90_erlaubt': False},
             {'Freigabe': True, 'Pritsche': 'Anhänger', 'Pritschenname': 'Anhänger', 'Fuhrenoption': 'Anhängerzug', 'Pritschen_Reihenfolge': 2,
              'Länge_mm': 8200, 'Breite_mm': 2450, 'Max_Höhe_mm': 2600, 'Überhang_vorne_mm': 0,
-             'Überhang_hinten_mm': 300, 'Max_Gewicht_kg': 12000, 'Kantholz_erste_Lage_mm': 80,
+             'Überhang_hinten_mm': 300, 'Max_Gewicht_kg': 12000, 'Eigengewicht_Pritsche_kg': 0, 'Kantholz_erste_Lage_mm': 80,
              'Einlage_zwischen_Lagen_mm': 40, 'Einlage_allgemein_mm': 0, 'Drehen_90_erlaubt': False},
         ],
         'Tiefbettauflieger': [
             {'Freigabe': True, 'Pritsche': 'Tiefbett', 'Pritschenname': 'Tiefbett', 'Fuhrenoption': 'Tiefbettauflieger', 'Pritschen_Reihenfolge': 1,
              'Länge_mm': 13000, 'Breite_mm': 2550, 'Max_Höhe_mm': 3200, 'Überhang_vorne_mm': 500,
-             'Überhang_hinten_mm': 1000, 'Max_Gewicht_kg': 24000, 'Kantholz_erste_Lage_mm': 100,
+             'Überhang_hinten_mm': 1000, 'Max_Gewicht_kg': 24000, 'Eigengewicht_Pritsche_kg': 0, 'Kantholz_erste_Lage_mm': 100,
              'Einlage_zwischen_Lagen_mm': 40, 'Einlage_allgemein_mm': 0, 'Drehen_90_erlaubt': True},
         ],
     }
@@ -749,7 +749,7 @@ def read_transport_config_excel(uploaded_excel) -> Tuple[pd.DataFrame, pd.DataFr
 
     required_cols = [
         'Fuhrenoption', 'Pritschen_Reihenfolge', 'Pritschenname', 'Freigabe', 'Länge_mm', 'Breite_mm',
-        'Max_Höhe_mm', 'Max_Gewicht_kg', 'Überhang_vorne_mm', 'Überhang_hinten_mm',
+        'Max_Höhe_mm', 'Max_Gewicht_kg', 'Eigengewicht_Pritsche_kg', 'Überhang_vorne_mm', 'Überhang_hinten_mm',
         'Kantholz_erste_Lage_mm', 'Einlage_zwischen_Lagen_mm', 'Einlage_allgemein_mm', 'Drehen_90_erlaubt'
     ]
     for col in required_cols:
@@ -760,7 +760,7 @@ def read_transport_config_excel(uploaded_excel) -> Tuple[pd.DataFrame, pd.DataFr
     p['Freigabe'] = p['Freigabe'].apply(yes_no_to_bool)
     p['Drehen_90_erlaubt'] = p['Drehen_90_erlaubt'].apply(yes_no_to_bool)
     p['Pritschen_Reihenfolge'] = p['Pritschen_Reihenfolge'].apply(lambda v: int(safe_number(v, 999)))
-    for col in ['Länge_mm', 'Breite_mm', 'Max_Höhe_mm', 'Max_Gewicht_kg', 'Überhang_vorne_mm', 'Überhang_hinten_mm', 'Kantholz_erste_Lage_mm', 'Einlage_zwischen_Lagen_mm', 'Einlage_allgemein_mm']:
+    for col in ['Länge_mm', 'Breite_mm', 'Max_Höhe_mm', 'Max_Gewicht_kg', 'Eigengewicht_Pritsche_kg', 'Überhang_vorne_mm', 'Überhang_hinten_mm', 'Kantholz_erste_Lage_mm', 'Einlage_zwischen_Lagen_mm', 'Einlage_allgemein_mm']:
         p[col] = p[col].apply(lambda v: safe_number(v, 0.0))
     p['Pritsche'] = p['Pritschenname'].astype(str)
 
@@ -939,6 +939,7 @@ def init_platform_state(row: pd.Series, base_wood_height: float, layer_spacer_he
         'Überhang_vorne_mm': float(row['Überhang_vorne_mm']),
         'Überhang_hinten_mm': float(row['Überhang_hinten_mm']),
         'Max_Gewicht_kg': float(row['Max_Gewicht_kg']),
+        'Eigengewicht_Pritsche_kg': float(row.get('Eigengewicht_Pritsche_kg', 0.0) or 0.0),
         'Eff_Länge_mm': float(row['Länge_mm']) + float(row['Überhang_vorne_mm']) + float(row['Überhang_hinten_mm']),
         'base_wood_height': float(base_height),
         'layer_spacer_height': float(layer_height),
@@ -960,7 +961,7 @@ def init_platform_state(row: pd.Series, base_wood_height: float, layer_spacer_he
 
 
 def can_place(state: Dict[str, Any], x: float, y: float, z: float, length: float, width: float, height: float, weight: float) -> bool:
-    if state['total_weight'] + weight > state['Max_Gewicht_kg']:
+    if state['total_weight'] + weight + state.get('Eigengewicht_Pritsche_kg', 0.0) > state['Max_Gewicht_kg']:
         return False
     if x + length > state['Eff_Länge_mm']:
         return False
@@ -1162,6 +1163,8 @@ def create_loading_plan(
             'Breite genutzt_mm': round(state['used_width'], 1),
             'Höhe genutzt_mm': round(state['used_height'], 1),
             'Gewicht genutzt_kg': round(state['total_weight'], 2),
+            'Eigengewicht Pritsche_kg': round(state.get('Eigengewicht_Pritsche_kg', 0.0), 2),
+            'Gesamtgewicht inkl. Pritsche_kg': round(state['total_weight'] + state.get('Eigengewicht_Pritsche_kg', 0.0), 2),
             'Max Länge effektiv_mm': round(state['Eff_Länge_mm'], 1),
             'Max Breite_mm': round(state['Breite_mm'], 1),
             'Max Höhe_mm': round(state['Max_Höhe_mm'], 1),
@@ -1423,15 +1426,29 @@ def create_loading_excel(
 ) -> bytes:
     """Erstellt die Excel-Begleitdatei.
 
-    Enthalten sind nur die kleinen optischen BSD-/Pritschenzettel je Pritsche.
-    Die technischen Rohdatenregister werden bewusst nicht mehr ausgegeben.
+    Enthalten sind die kleinen optischen BSD-/Pritschenzettel je Pritsche
+    sowie die gewünschten Zusatzregister: Bauteile, Fuhrenoptionen,
+    Ladeplan_BSD_Kopf und Projektkopf.
     """
     project_meta = project_meta or {}
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        # Nur optische Pritschenzettel ausgeben.
-        # Ein temporäres Hinweisblatt verhindert eine leere Excel-Datei, falls keine Pritsche belegt ist.
-        pd.DataFrame([{'Hinweis': 'Keine belegte Pritsche / kein Ladeplan erzeugt.'}]).to_excel(writer, sheet_name='Hinweis', index=False)
+        # Gewünschte Zusatzregister für Kontrolle / Weiterverarbeitung.
+        wrote_any_sheet = False
+        if parts_df is not None and not parts_df.empty:
+            parts_df.to_excel(writer, sheet_name='Bauteile', index=False)
+            wrote_any_sheet = True
+        if options_df is not None and not options_df.empty:
+            options_df.to_excel(writer, sheet_name='Fuhrenoptionen', index=False)
+            wrote_any_sheet = True
+        if bsd_header_df is not None and not bsd_header_df.empty:
+            bsd_header_df.to_excel(writer, sheet_name='Ladeplan_BSD_Kopf', index=False)
+            wrote_any_sheet = True
+        if project_meta:
+            pd.DataFrame([{'Feld': k, 'Wert': v} for k, v in project_meta.items()]).to_excel(writer, sheet_name='Projektkopf', index=False)
+            wrote_any_sheet = True
+        if not wrote_any_sheet:
+            pd.DataFrame([{'Hinweis': 'Keine belegte Pritsche / kein Ladeplan erzeugt.'}]).to_excel(writer, sheet_name='Hinweis', index=False)
 
         # Optische Ladeplan-BSD-Blätter erzeugen.
         try:
@@ -1569,7 +1586,7 @@ def create_loading_excel(
             set_box(ws, 'A9:D10')
 
             # Kopf Mitte.
-            set_box(ws, 'F2:K10')
+            set_box(ws, 'F2:K12')
             write_label(ws, 'F2', 'Unternehmer:')
             ws.merge_cells('I2:K2')
             ws['I2'] = str(val(header, 'Transport_Name', ''))
@@ -1590,9 +1607,11 @@ def create_loading_excel(
             ws['I9'] = fmt_mm(val(header, 'Länge_gesamt_mm', 0)); ws['J9'] = 'mm'
             write_label(ws, 'F10', 'Breite (gesamt):')
             ws['I10'] = fmt_mm(val(header, 'Breite_gesamt_mm', 0)); ws['J10'] = 'mm'
-            write_label(ws, 'F11', 'Ladegewicht (gesamt):')
+            write_label(ws, 'F11', 'Ladegewicht:')
             ws['I11'] = fmt_t(val(header, 'Ladegewicht_kg', 0)); ws['J11'] = 'to'
-            set_box(ws, 'F11:K11')
+            write_label(ws, 'F12', 'Gesamtgewicht inkl. Pritsche:')
+            ws['I12'] = fmt_t(val(header, 'Gesamtgewicht_kg', 0)); ws['J12'] = 'to'
+            set_box(ws, 'F11:K12')
 
             # Kontrolle rechts.
             set_box(ws, 'M2:P10')
@@ -1671,7 +1690,7 @@ def create_loading_excel(
             for c in range(2, 5):
                 ws.cell(footer_row, c).value = fmt_mm(val(header, 'Frachthöhe_mm', 0))
             ws.merge_cells(start_row=footer_row, start_column=5, end_row=footer_row, end_column=8)
-            ws.cell(footer_row, 5).value = f"Gesamtgewicht ca.: {fmt_t(val(header, 'Ladegewicht_kg', 0))} Tonnen"
+            ws.cell(footer_row, 5).value = f"Gesamtgewicht ca.: {fmt_t(val(header, 'Gesamtgewicht_kg', val(header, 'Ladegewicht_kg', 0)))} Tonnen"
             ws.cell(footer_row, 5).font = font_head
             ws.cell(footer_row, 9).value = fmt_mm(val(header, 'Höhe_gesamt_mm', 0))
             ws.cell(footer_row, 10).value = fmt_mm(val(header, 'Breite_gesamt_mm', 0))
@@ -2159,6 +2178,7 @@ def compute_loading_warnings(placements_df: pd.DataFrame, platforms_df: pd.DataF
                 'width': safe_number(row.get('Breite_mm')),
                 'max_height': safe_number(row.get('Max_Höhe_mm')),
                 'max_weight': safe_number(row.get('Max_Gewicht_kg')),
+                'own_weight': safe_number(row.get('Eigengewicht_Pritsche_kg')),
                 'base_height': safe_number(row.get('Kantholz_erste_Lage_mm')),
             }
 
@@ -2197,10 +2217,12 @@ def compute_loading_warnings(placements_df: pd.DataFrame, platforms_df: pd.DataF
             name = str(platform_name)
             if name not in platform_lookup:
                 continue
-            total_weight = pd.to_numeric(group.get('Gewicht_kg'), errors='coerce').fillna(0).sum()
+            load_weight = pd.to_numeric(group.get('Gewicht_kg'), errors='coerce').fillna(0).sum()
+            own_weight = platform_lookup[name].get('own_weight', 0.0)
+            total_weight = load_weight + own_weight
             max_weight = platform_lookup[name]['max_weight']
             if total_weight > max_weight:
-                warnings.append({'Typ': 'Gewicht', 'Pritsche': name, 'Einheit_ID': '', 'Warnung': 'Max. Gewicht überschritten', 'Details': f'{total_weight:.0f} kg > {max_weight:.0f} kg'})
+                warnings.append({'Typ': 'Gewicht', 'Pritsche': name, 'Einheit_ID': '', 'Warnung': 'Max. Gesamtgewicht überschritten', 'Details': f'{total_weight:.0f} kg inkl. Eigengewicht > {max_weight:.0f} kg'})
 
     return pd.DataFrame(warnings)
 
@@ -2227,6 +2249,7 @@ def recompute_summary_from_placements(placements_df: pd.DataFrame, platforms_df:
         else:
             used_height = base_height
         used_weight = float(pd.to_numeric(group.get('Gewicht_kg'), errors='coerce').fillna(0).sum()) if not group.empty else 0.0
+        platform_own_weight = safe_number(prow.get('Eigengewicht_Pritsche_kg'), 0.0)
         rows.append({
             'Fuhre_Nr': prow.get('Fuhre_Nr'),
             'Fuhrenoption': prow.get('Fuhrenoption'),
@@ -2236,6 +2259,8 @@ def recompute_summary_from_placements(placements_df: pd.DataFrame, platforms_df:
             'Breite genutzt_mm': round(used_width, 1),
             'Höhe genutzt_mm': round(used_height, 1),
             'Gewicht genutzt_kg': round(used_weight, 2),
+            'Eigengewicht Pritsche_kg': round(platform_own_weight, 2),
+            'Gesamtgewicht inkl. Pritsche_kg': round(used_weight + platform_own_weight, 2),
             'Max Länge effektiv_mm': round(safe_number(prow.get('Länge_mm')) + safe_number(prow.get('Überhang_vorne_mm')) + safe_number(prow.get('Überhang_hinten_mm')), 1),
             'Max Breite_mm': round(safe_number(prow.get('Breite_mm')), 1),
             'Max Höhe_mm': round(safe_number(prow.get('Max_Höhe_mm')), 1),
@@ -2302,6 +2327,9 @@ def create_bsd_header_for_platform(
         'Länge_gesamt_mm': safe_number(srow.get('Länge genutzt_mm')),
         'Breite_gesamt_mm': safe_number(srow.get('Breite genutzt_mm')),
         'Ladegewicht_kg': safe_number(srow.get('Gewicht genutzt_kg')),
+        'Eigengewicht_Pritsche_kg': safe_number(srow.get('Eigengewicht Pritsche_kg'), safe_number(platform.get('Eigengewicht_Pritsche_kg'))),
+        'Gesamtgewicht_kg': safe_number(srow.get('Gesamtgewicht inkl. Pritsche_kg'), safe_number(srow.get('Gewicht genutzt_kg')) + safe_number(platform.get('Eigengewicht_Pritsche_kg'))),
+        'Max_Gewicht_kg': safe_number(platform.get('Max_Gewicht_kg')),
         'Warnungen': warn_count,
         'Objekt_Name': project_meta.get('Objekt_Name', ''),
         'Transport_Name': project_meta.get('Transport_Name', ''),
@@ -2800,8 +2828,8 @@ def _pdf_draw_bsd_matrix_page(c, page_w: float, page_h: float, margin: float, pl
     right_x = page_w / 2 + 20
     top_y = page_h - 100
     c.setStrokeColor(colors.black)
-    c.rect(left_x, top_y - 105, page_w / 2 - margin - 35, 105, stroke=1, fill=0)
-    c.rect(right_x, top_y - 105, page_w / 2 - margin - 20, 105, stroke=1, fill=0)
+    c.rect(left_x, top_y - 125, page_w / 2 - margin - 35, 125, stroke=1, fill=0)
+    c.rect(right_x, top_y - 125, page_w / 2 - margin - 20, 125, stroke=1, fill=0)
 
     c.setFont('Helvetica-Bold', 10)
     c.drawString(left_x + 8, top_y - 18, 'Pritsche:')
@@ -2821,13 +2849,16 @@ def _pdf_draw_bsd_matrix_page(c, page_w: float, page_h: float, margin: float, pl
         f'Länge gesamt: {safe_number(header.get("Länge_gesamt_mm")):.0f} mm',
         f'Breite gesamt: {safe_number(header.get("Breite_gesamt_mm")):.0f} mm',
         f'Ladegewicht: {safe_number(header.get("Ladegewicht_kg")):.0f} kg',
+        f'Eigengewicht Pritsche: {safe_number(header.get("Eigengewicht_Pritsche_kg")):.0f} kg',
+        f'Gesamtgewicht: {safe_number(header.get("Gesamtgewicht_kg")):.0f} kg',
     ]
     for i, line in enumerate(left_lines):
         c.drawString(left_x + 8, top_y - 38 - i * 14, line)
+    c.setFont('Helvetica', 7.2)
     for i, line in enumerate(right_lines):
-        c.drawString(right_x + 8, top_y - 38 - i * 12, line)
+        c.drawString(right_x + 8, top_y - 34 - i * 10.5, line)
 
-    table_y = top_y - 135
+    table_y = top_y - 155
     table_x = margin
     row_h = 20
     # A3 quer: kompakte Spaltenbreiten.
@@ -2951,7 +2982,9 @@ def create_loading_pdf(
             f'Länge genutzt: {safe_number(srow.get("Länge genutzt_mm")):.0f} / {safe_number(srow.get("Max Länge effektiv_mm")):.0f} mm',
             f'Breite genutzt: {safe_number(srow.get("Breite genutzt_mm")):.0f} / {safe_number(srow.get("Max Breite_mm")):.0f} mm',
             f'Höhe genutzt: {safe_number(srow.get("Höhe genutzt_mm")):.0f} / {safe_number(srow.get("Max Höhe_mm")):.0f} mm',
-            f'Gewicht: {safe_number(srow.get("Gewicht genutzt_kg")):.0f} / {safe_number(srow.get("Max Gewicht_kg")):.0f} kg',
+            f'Ladegewicht: {safe_number(srow.get("Gewicht genutzt_kg")):.0f} kg',
+            f'Eigengewicht: {safe_number(srow.get("Eigengewicht Pritsche_kg")):.0f} kg',
+            f'Gesamtgewicht: {safe_number(srow.get("Gesamtgewicht inkl. Pritsche_kg")):.0f} / {safe_number(srow.get("Max Gewicht_kg")):.0f} kg',
         ]
         for i, line in enumerate(info_lines):
             c.drawString(info_x, info_y - 16 - i * 13, line)
@@ -2970,11 +3003,11 @@ def create_loading_pdf(
         for i, line in enumerate(hints):
             c.drawString(hint_x, hint_y - 14 - i * 12, line)
 
-        # Zeichnungsbereiche: A3-Ansichten mit Abstand zum Kopfbereich.
-        _pdf_draw_view(c, placements_df, platform, margin, 395, 720, 220, 'side_left', 'Linke Seitenansicht')
-        _pdf_draw_view(c, placements_df, platform, margin, 165, 720, 215, 'side_right', 'Rechte Seitenansicht')
-        _pdf_draw_view(c, placements_df, platform, margin + 750, 395, 170, 220, 'back', 'Rückansicht')
-        _pdf_draw_view(c, placements_df, platform, margin + 930, 395, 170, 220, 'front', 'Vorderansicht')
+        # Zeichnungsbereiche: Vorder- und Rückansicht stehen untereinander, damit sie breiter werden.
+        _pdf_draw_view(c, placements_df, platform, margin, 395, 700, 220, 'side_left', 'Linke Seitenansicht')
+        _pdf_draw_view(c, placements_df, platform, margin, 165, 700, 215, 'side_right', 'Rechte Seitenansicht')
+        _pdf_draw_view(c, placements_df, platform, margin + 735, 390, 340, 190, 'back', 'Rückansicht')
+        _pdf_draw_view(c, placements_df, platform, margin + 735, 165, 340, 190, 'front', 'Vorderansicht')
         _pdf_draw_view(c, placements_df, platform, margin, 25, 1080, 115, 'top', 'Draufsicht')
 
         # Qualitätssicherung kompakt oben rechts, getrennt vom Infofeld.
@@ -3343,7 +3376,8 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                 'Länge_mm': st.column_config.NumberColumn('Länge mm'),
                 'Breite_mm': st.column_config.NumberColumn('Breite mm'),
                 'Max_Höhe_mm': st.column_config.NumberColumn('Max. Höhe mm'),
-                'Max_Gewicht_kg': st.column_config.NumberColumn('Max. Gewicht kg'),
+                'Max_Gewicht_kg': st.column_config.NumberColumn('Max. Gesamtgewicht kg'),
+                'Eigengewicht_Pritsche_kg': st.column_config.NumberColumn('Eigengewicht Pritsche kg'),
                 'Kantholz_erste_Lage_mm': st.column_config.NumberColumn('Kantholz erste Lage mm'),
                 'Einlage_zwischen_Lagen_mm': st.column_config.NumberColumn('Bundeinlage / Lagenholz mm'),
                 'Einlage_allgemein_mm': st.column_config.NumberColumn('Einlage allgemein mm'),
@@ -3458,7 +3492,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
             if not bsd_info.empty:
                 hrow = bsd_info.iloc[0]
                 c1, c2, c3, c4, c5 = st.columns(5)
-                c1.metric('Ladegewicht', f"{safe_number(hrow.get('Ladegewicht_kg')):.0f} kg")
+                c1.metric('Gesamtgewicht', f"{safe_number(hrow.get('Gesamtgewicht_kg')):.0f} kg")
                 c2.metric('Frachthöhe', f"{safe_number(hrow.get('Frachthöhe_mm')):.0f} mm")
                 c3.metric('Länge gesamt', f"{safe_number(hrow.get('Länge_gesamt_mm')):.0f} mm")
                 c4.metric('Breite gesamt', f"{safe_number(hrow.get('Breite_gesamt_mm')):.0f} mm")
@@ -3497,7 +3531,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                 c1.metric('Länge genutzt', f"{row['Länge genutzt_mm']:.0f} mm")
                 c2.metric('Breite genutzt', f"{row['Breite genutzt_mm']:.0f} mm")
                 c3.metric('Höhe genutzt', f"{row['Höhe genutzt_mm']:.0f} mm")
-                c4.metric('Gewicht', f"{row['Gewicht genutzt_kg']:.0f} kg")
+                c4.metric('Gesamtgewicht', f"{safe_number(row.get('Gesamtgewicht inkl. Pritsche_kg')):.0f} kg")
 
             col1, col2 = st.columns(2)
             with col1:
