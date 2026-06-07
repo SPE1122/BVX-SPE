@@ -1432,6 +1432,78 @@ def center_placements_geometrically(placements_df: pd.DataFrame, platforms_df: p
 
     return result
 
+
+def normalize_y_from_platform_center(placements_df: pd.DataFrame, platforms_df: pd.DataFrame) -> pd.DataFrame:
+    """Richtet die Y-Positionen praxisnah von der Pritschenmitte aus.
+
+    Ziel:
+    - 1200-mm-Elemente links/rechts treffen sich an der Pritschenmitte.
+    - breite Elemente werden mittig geführt.
+    - einzelne obere Restbunde dürfen mittig liegen.
+    - dadurch ist die Mitte in Vorder-/Rückansicht durchgehend sauber.
+    """
+    if placements_df is None or placements_df.empty or platforms_df is None or platforms_df.empty:
+        return placements_df.copy() if placements_df is not None else pd.DataFrame()
+
+    result = placements_df.copy()
+    if 'Pritsche' not in result.columns:
+        return result
+
+    for col in ['Y_mm', 'Z_mm', 'Breite_mm']:
+        if col in result.columns:
+            result[col] = pd.to_numeric(result[col], errors='coerce')
+
+    helper_types = {'Unterbau', 'Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz'}
+    p_lookup = {str(r.get('Pritsche', '')): r for _, r in platforms_df.iterrows()}
+
+    for pname, prow in p_lookup.items():
+        width = safe_number(prow.get('Breite_mm'), 0.0)
+        if width <= 0:
+            continue
+        center = width / 2.0
+        mask = (
+            result['Pritsche'].astype(str).eq(pname)
+            & result['Y_mm'].notna()
+            & result['Z_mm'].notna()
+            & result['Breite_mm'].notna()
+            & ~result.get('Typ', pd.Series(dtype=str)).astype(str).isin(helper_types)
+        )
+        if not mask.any():
+            continue
+
+        real = result.loc[mask].copy()
+        top_z = float(real['Z_mm'].max()) if not real.empty else None
+
+        for idx, row in real.iterrows():
+            bw = safe_number(row.get('Breite_mm'), 0.0)
+            if bw <= 0 or bw > width:
+                continue
+            z = safe_number(row.get('Z_mm'), 0.0)
+            y = safe_number(row.get('Y_mm'), 0.0)
+            y_mid = y + bw / 2.0
+
+            # Breite Elemente / fast volle Pritschenbreite: sauber mittig.
+            if bw >= width * 0.75:
+                new_y = (width - bw) / 2.0
+            # oberster einzelner Restbund darf mittig sein.
+            elif top_z is not None and abs(z - top_z) < 0.1 and bw >= width * 0.45:
+                # Wenn mehrere Reihen oben links/rechts liegen, nicht alle zusammen in die Mitte ziehen.
+                same_top = real[real['Z_mm'].round(1).eq(round(z, 1))]
+                if len(same_top) <= 1:
+                    new_y = (width - bw) / 2.0
+                else:
+                    new_y = center - bw if y_mid <= center else center
+            else:
+                # Normale 1200er-Lagen: von der Mitte aus auf links/rechts legen.
+                new_y = center - bw if y_mid <= center else center
+                # Sicherheit gegen negative Werte bei leicht breiteren Elementen.
+                new_y = max(0.0, min(new_y, width - bw))
+
+            result.at[idx, 'Y_mm'] = round(new_y, 1)
+
+    result = normalize_y_from_platform_center(result, platforms_df)
+    return result
+
 def invert_vertical_order_by_platform(placements_df: pd.DataFrame, platforms_df: pd.DataFrame) -> pd.DataFrame:
     """Spiegelt die Z-Reihenfolge je belegter Pritsche.
 
@@ -1641,17 +1713,15 @@ def create_variant_a_loading_plan(
             trip_platforms['Einlage_allgemein_mm'] = general_default
 
             # Die globale Sortierreihenfolge bestimmt den fortlaufenden Block.
-            # Für die physische Stapelung wird dieser Block umgekehrt platziert:
-            # bei aufsteigender Sortierung liegt damit die kleinste Nummer oben
-            # und die höchste Nummer unten. Beispiel: 1 oben, 10 unten;
-            # Pritsche 2: 11 oben, 20 unten.
+            # Zuerst wird kompakt gepackt; danach wird je Pritsche die Z-Richtung
+            # gespiegelt, damit bei aufsteigendem Hauptattribut die kleinste Nummer
+            # oben sichtbar ist. Beispiel: 1 oben, 10 unten; Pritsche 2: 11 oben.
             best_prefix = None
             max_try = len(remaining)
             for n in range(1, max_try + 1):
                 prefix_df = remaining.iloc[:n].copy().reset_index(drop=True)
-                # Wichtig: Die globale Reihenfolge wird in dieser Reihenfolge auf die
-                # Pritschen verteilt. Erst danach wird je Pritsche die Z-Reihenfolge
-                # gespiegelt, damit die niedrigste Nummer oben liegt.
+                # Wichtig: Die globale Reihenfolge wird fortlaufend auf die
+                # Pritschen verteilt. Spätere Einheiten werden nicht vorgezogen.
                 placements_try, _summary_try = create_loading_plan(
                     prefix_df,
                     trip_platforms,
@@ -1671,17 +1741,11 @@ def create_variant_a_loading_plan(
                 if not set(wanted_ids).issubset(loaded_set):
                     break
                 loaded_try = loaded_try_all[loaded_try_all['Einheit_ID'].astype(str).isin(wanted_ids)].copy()
-                loaded_try = repack_loaded_platforms_for_lowest_on_top(
-                    loaded_try,
-                    prefix_df,
-                    trip_platforms,
-                    base_default=base_default,
-                    layer_default=layer_default,
-                    gap_default=gap_default,
-                    allow_beside=allow_beside,
-                    allow_stack=allow_stack,
-                    allow_rotation=allow_rotation,
-                )
+                # Die erste Platzierung bleibt unten kompakt. Danach wird nur die
+                # Z-Reihenfolge je Pritsche gespiegelt, damit bei aufsteigendem
+                # Hauptattribut die niedrigste Nummer oben sichtbar ist. Dadurch
+                # bleiben X/Y stabil und die Vorderansicht behält eine klare Mitte.
+                loaded_try = invert_vertical_order_by_platform(loaded_try, trip_platforms)
                 used_platform_names = loaded_try['Pritsche'].dropna().astype(str).unique().tolist()
                 trip_platforms_used = trip_platforms[trip_platforms['Pritsche'].astype(str).isin(used_platform_names)].copy()
                 summary_prefix = recompute_summary_from_placements(loaded_try, trip_platforms_used)
