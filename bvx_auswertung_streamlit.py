@@ -1370,6 +1370,18 @@ def center_placements_geometrically(placements_df: pd.DataFrame, platforms_df: p
         layer_keys = result.loc[mask_platform, 'Z_mm'].round(1).unique().tolist()
         if not layer_keys:
             continue
+
+        # X nicht mehr je Lage separat mittig schieben. Das hatte in der Seitenansicht
+        # scheinbare Löcher/Überstände erzeugt, weil obere Lagen unabhängig von den
+        # tragenden unteren Lagen verschoben wurden. Die ganze Ladung wird als Block
+        # auf der Pritsche zentriert; die Lagen bleiben zueinander stabil.
+        global_x0 = result.loc[mask_platform, 'X_mm'].min()
+        global_x1 = (result.loc[mask_platform, 'X_mm'] + result.loc[mask_platform, 'Länge_mm']).max()
+        global_span_x = global_x1 - global_x0
+        if 0 < global_span_x <= eff_length:
+            global_shift_x = (eff_length - global_span_x) / 2 - global_x0
+            result.loc[mask_platform, 'X_mm'] = (result.loc[mask_platform, 'X_mm'] + global_shift_x).round(1)
+
         # Oberste echte Bauteil-/Bundlage. Hilfszeilen zählen nicht als obere Restlage.
         if non_helper_mask.any():
             top_layer_key = float(result.loc[non_helper_mask, 'Z_mm'].round(1).max())
@@ -1388,10 +1400,9 @@ def center_placements_geometrically(placements_df: pd.DataFrame, platforms_df: p
             span_x = x1 - x0
             span_y = y1 - y0
 
-            # X: weiterhin als Lage mittig platzieren, damit die Last nicht ganz vorne/hinten klebt.
-            if 0 < span_x <= eff_length:
-                shift_x = (eff_length - span_x) / 2 - x0
-                result.loc[layer_mask, 'X_mm'] = (result.loc[layer_mask, 'X_mm'] + shift_x).round(1)
+            # X wurde bereits global als ganze Ladung zentriert. Je-Lage-X-Verschiebung
+            # bleibt bewusst aus, damit unten keine unnötigen Löcher und oben keine
+            # scheinbaren Überschneidungen entstehen.
 
             # Y: nicht jede Lage mittig machen. Nur vollständige Breitenlagen leicht zentrieren,
             # breite Einzelteile mittig setzen oder die oberste Restlage mittig setzen.
@@ -1461,6 +1472,76 @@ def invert_vertical_order_by_platform(placements_df: pd.DataFrame, platforms_df:
             )
     return result
 
+
+
+def repack_loaded_platforms_for_lowest_on_top(
+    loaded_try: pd.DataFrame,
+    units_ordered: pd.DataFrame,
+    trip_platforms: pd.DataFrame,
+    base_default: float,
+    layer_default: float,
+    gap_default: float,
+    allow_beside: bool,
+    allow_stack: bool,
+    allow_rotation: bool,
+) -> pd.DataFrame:
+    """Packt die bereits zugewiesenen Einheiten je Pritsche stabil neu.
+
+    Ziel:
+    - Die globale Pritschen-Zuordnung bleibt erhalten.
+    - Innerhalb jeder Pritsche liegt bei aufsteigender Sortierung die niedrigste
+      Einheit oben. Dafür wird pro Pritsche der zugewiesene Block physisch in
+      umgekehrter Reihenfolge aufgebaut, statt nachträglich nur die Z-Werte zu
+      spiegeln.
+    - X/Y der Lagen bleiben dadurch tragfähiger; weniger scheinbare Löcher unten
+      und weniger Überschneidungen oben.
+    """
+    if loaded_try is None or loaded_try.empty or units_ordered is None or units_ordered.empty:
+        return loaded_try
+
+    repacked_frames: List[pd.DataFrame] = []
+    unit_lookup = units_ordered.copy()
+    unit_lookup['Einheit_ID'] = unit_lookup['Einheit_ID'].astype(str)
+
+    for _, platform in trip_platforms.sort_values('Pritschen_Reihenfolge', kind='stable').iterrows():
+        pname = str(platform.get('Pritsche', ''))
+        assigned = loaded_try[loaded_try['Pritsche'].astype(str).eq(pname)].copy()
+        if assigned.empty:
+            continue
+        assigned_ids = set(assigned['Einheit_ID'].dropna().astype(str).tolist())
+        units_for_platform = unit_lookup[unit_lookup['Einheit_ID'].isin(assigned_ids)].copy()
+        if units_for_platform.empty:
+            continue
+
+        # Globale Reihenfolge bleibt in units_for_platform enthalten. Physisch wird
+        # von unten nach oben umgekehrt aufgebaut, damit die niedrigste Nummer oben liegt.
+        units_reversed = units_for_platform.iloc[::-1].reset_index(drop=True)
+        platform_df = pd.DataFrame([platform])
+        rp, _ = create_loading_plan(
+            units_reversed,
+            platform_df,
+            base_wood_height=base_default,
+            layer_spacer_height=layer_default,
+            gap_length=gap_default,
+            allow_beside=allow_beside,
+            allow_stack=allow_stack,
+            allow_rotation=allow_rotation,
+        )
+        rp_loaded = rp[rp['Pritsche'] != 'NICHT VERLADEN'].copy() if rp is not None and not rp.empty else pd.DataFrame()
+        rp_ids = set(rp_loaded.get('Einheit_ID', pd.Series(dtype=str)).dropna().astype(str).tolist())
+        if assigned_ids.issubset(rp_ids):
+            if 'Ebene' in rp_loaded.columns:
+                rp_loaded['Ebene'] = rp_loaded['Ebene'].astype(str).apply(
+                    lambda v: v if 'stabil neu gepackt' in v.lower() else f'{v} / stabil neu gepackt'
+                )
+            repacked_frames.append(rp_loaded)
+        else:
+            # Sicherheitsfallback: Wenn die umgekehrte Packung nicht passt, keine Einheiten verlieren.
+            repacked_frames.append(assigned)
+
+    if not repacked_frames:
+        return loaded_try
+    return pd.concat(repacked_frames, ignore_index=True)
 
 def build_trip_platforms(pritschen_df: pd.DataFrame, fuhrenoption: str, fuhre_nr: int) -> pd.DataFrame:
     rows = pritschen_df[
@@ -1590,7 +1671,17 @@ def create_variant_a_loading_plan(
                 if not set(wanted_ids).issubset(loaded_set):
                     break
                 loaded_try = loaded_try_all[loaded_try_all['Einheit_ID'].astype(str).isin(wanted_ids)].copy()
-                loaded_try = invert_vertical_order_by_platform(loaded_try, trip_platforms)
+                loaded_try = repack_loaded_platforms_for_lowest_on_top(
+                    loaded_try,
+                    prefix_df,
+                    trip_platforms,
+                    base_default=base_default,
+                    layer_default=layer_default,
+                    gap_default=gap_default,
+                    allow_beside=allow_beside,
+                    allow_stack=allow_stack,
+                    allow_rotation=allow_rotation,
+                )
                 used_platform_names = loaded_try['Pritsche'].dropna().astype(str).unique().tolist()
                 trip_platforms_used = trip_platforms[trip_platforms['Pritsche'].astype(str).isin(used_platform_names)].copy()
                 summary_prefix = recompute_summary_from_placements(loaded_try, trip_platforms_used)
@@ -3007,9 +3098,8 @@ def create_bsd_matrix_for_platform(
 
         # Bund: jedes enthaltene Bauteil als eigene BSD-Zeile, Einlagen dazwischen.
         labels = (labels + [labels[-1]] * count)[:count]
-        # Für aufsteigende Sortierung gilt: niedrigste Nummer oben.
-        # Da die Z-Position unten beginnt, wird die Reihenfolge intern für die physische Darstellung umgedreht.
-        labels = list(reversed(labels))
+        # Die Reihenfolge innerhalb eines Bundes bleibt fix. Der Bund darf im BSD/PDF
+        # angezeigt, aber nicht intern neu sortiert werden.
         internal_spacer = safe_number(row.get('Einlage_allgemein_mm'), platform_general_spacer)
         # Bundeinlage/Lagenholz wird NICHT innerhalb eines Bundes verwendet.
         # Innerhalb eines Bundes nur dann Einlage, wenn "Einlage allgemein" > 0 ist.
@@ -3047,6 +3137,7 @@ def create_bsd_matrix_for_platform(
     # Einlage allgemein nur dann, wenn sie ausdrücklich > 0 gesetzt ist.
     layer_z_values = sorted({round(float(v), 1) for v in rows['Z_mm'].tolist() if float(v) > base_height + 0.1})
     existing_spacer_keys = {(round(e['z'], 1), e['slot']) for e in entries if 'Einlage' in e['kind'] or 'Lagenholz' in e['kind']}
+    existing_real_keys = {(round(e['z'], 1), e['slot']) for e in entries if 'Bauteil' in e['kind'] or e['kind'] == 'Unterbau'}
     for z_val in layer_z_values:
         layer_rows = rows[rows['Z_mm'].round(1) == z_val].copy()
         for _, lrow in layer_rows.iterrows():
@@ -3054,7 +3145,7 @@ def create_bsd_matrix_for_platform(
             is_bundle_layer = str(lrow.get('Typ', '')).strip() == 'Bund'
             if is_bundle_layer and spacer_height > 0:
                 effective_layer_spacer = spacer_height
-                spacer_label = 'Bundeinlage / Lagenholz'
+                spacer_label = 'Einlage'
                 spacer_kind = 'Lagenholz'
             elif platform_general_spacer > 0:
                 effective_layer_spacer = platform_general_spacer
@@ -3064,7 +3155,9 @@ def create_bsd_matrix_for_platform(
                 continue
             z_spacer = round(max(0.0, z_val - effective_layer_spacer), 1)
             for slot in slots_for_lrow:
-                if (z_spacer, slot) not in existing_spacer_keys:
+                # Einlage nicht in dieselbe BSD-Zeile wie ein Bauteil schreiben.
+                # Sonst entstehen Zellen wie "1809 / Einlage 40".
+                if (z_spacer, slot) not in existing_spacer_keys and (z_spacer, slot) not in existing_real_keys:
                     add_entry(z_spacer, slot, _fmt_bsd_mm_label(spacer_label, effective_layer_spacer), spacer_kind, effective_layer_spacer, lrow['Länge_mm'], lrow['Breite_mm'], 0.0, '')
 
     if not entries:
@@ -3336,7 +3429,7 @@ def _pdf_add_visible_spacer_rows(rows: pd.DataFrame, platform: pd.Series, view: 
         spacer_type = ''
         if typ == 'Bund' and bundle_spacer > 0:
             spacer_h = bundle_spacer
-            spacer_label = _fmt_bsd_mm_label('Bundeinlage', spacer_h)
+            spacer_label = _fmt_bsd_mm_label('Einlage', spacer_h)
             spacer_type = 'Bundeinlage'
         elif general_spacer > 0:
             spacer_h = general_spacer
