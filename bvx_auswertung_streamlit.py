@@ -1346,7 +1346,14 @@ def create_variant_a_loading_plan(
     center_geometric: bool = True,
     max_fuhren: int = 50,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Variante A: erste freigegebene passende Fuhrenoption wird wiederholt, bis alles verladen ist."""
+    """Variante A mit strenger globaler Reihenfolge.
+
+    Die Einheiten bleiben in der Reihenfolge des Hauptattributs. Eine Fuhre darf
+    nur einen fortlaufenden Block vom Anfang der Restliste übernehmen. Wenn eine
+    Einheit nicht mehr sauber passt, werden spätere Einheiten nicht vorgezogen.
+    Dadurch entsteht z. B. F01 LKW -> F01 Anhänger -> F02 LKW -> F02 Anhänger
+    als durchgehende Reihenfolge ohne Zurückspringen.
+    """
     if units.empty:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
@@ -1364,6 +1371,19 @@ def create_variant_a_loading_plan(
     general_default = safe_number(standards.get('Standard_Einlage_allgemein'), 0.0)
     # Im Moment nutzen wir den Versatz als X-Abstand/Versatzwert. Der freie Abstand kann später separat geführt werden.
     gap_default = safe_number(standards.get('Längenversatz_je_Lage'), 100.0)
+
+    def loaded_prefix_ids(remaining_df: pd.DataFrame, loaded_df: pd.DataFrame) -> List[str]:
+        """Gibt nur den fortlaufend verladenen Anfang der Restliste zurück."""
+        if loaded_df is None or loaded_df.empty:
+            return []
+        loaded_set = set(loaded_df['Einheit_ID'].dropna().astype(str).tolist())
+        prefix: List[str] = []
+        for eid in remaining_df['Einheit_ID'].astype(str).tolist():
+            if eid in loaded_set:
+                prefix.append(eid)
+            else:
+                break
+        return prefix
 
     fuhre_nr = 1
     if enabled_options.empty:
@@ -1383,8 +1403,8 @@ def create_variant_a_loading_plan(
         progress = False
 
         # Alle freigegebenen Fuhrenoptionen simulieren und die Option wählen,
-        # die pro Fuhre am meisten Einheiten/Gewicht sauber mitnimmt.
-        # Ziel: weniger Pritschen/Fuhren, ohne chaotische Lückenfüllung.
+        # die den längsten fortlaufenden Block ab Anfang der Restliste mitnimmt.
+        # Ziel: wenig Pritschen/Fuhren, aber ohne Zurückspringen der Sortierung.
         best_try = None
         for _, option_row in enabled_options.iterrows():
             option_name = str(option_row['Fuhrenoption'])
@@ -1412,26 +1432,32 @@ def create_variant_a_loading_plan(
             if placements_try.empty:
                 continue
 
-            loaded_try = placements_try[placements_try['Pritsche'] != 'NICHT VERLADEN'].copy()
-            loaded_ids = loaded_try['Einheit_ID'].dropna().astype(str).unique().tolist() if not loaded_try.empty else []
-            if not loaded_ids:
+            loaded_try_all = placements_try[placements_try['Pritsche'] != 'NICHT VERLADEN'].copy()
+            prefix_ids = loaded_prefix_ids(remaining, loaded_try_all)
+            if not prefix_ids:
                 continue
 
+            # Nur der fortlaufende Block wird übernommen. Spätere Einheiten, die
+            # zufällig noch Platz hätten, bleiben für die nächste Pritsche/Fuhre.
+            loaded_try = loaded_try_all[loaded_try_all['Einheit_ID'].astype(str).isin(prefix_ids)].copy()
+            if loaded_try.empty:
+                continue
+
+            summary_prefix = recompute_summary_from_placements(loaded_try, trip_platforms)
             loaded_weight = float(loaded_try['Gewicht_kg'].sum())
             used_platforms = int(loaded_try['Pritsche'].nunique())
             priority = safe_number(option_row.get('Priorität'), 999)
-            # Hauptkriterium: möglichst viele Einheiten je Fuhre.
+            # Hauptkriterium: möglichst viele Einheiten im fortlaufenden Block.
             # Danach Gewichtsausnutzung. Bei Gleichstand bleibt die höhere Priorität besser.
-            score = (len(loaded_ids) * 1000000.0) + loaded_weight - (priority * 10.0) - (used_platforms * 0.01)
+            score = (len(prefix_ids) * 1000000.0) + loaded_weight - (priority * 10.0) - (used_platforms * 0.01)
             if best_try is None or score > best_try['score']:
                 best_try = {
                     'score': score,
                     'option_name': option_name,
                     'trip_platforms': trip_platforms,
-                    'placements_try': placements_try,
-                    'summary_try': summary_try,
+                    'summary_try': summary_prefix,
                     'loaded_try': loaded_try,
-                    'loaded_ids': loaded_ids,
+                    'loaded_ids': prefix_ids,
                     'loaded_weight': loaded_weight,
                 }
 
@@ -1449,6 +1475,9 @@ def create_variant_a_loading_plan(
                 'Verladeeinheiten': len(loaded_ids),
                 'Gewicht_kg': round(float(best_try['loaded_weight']), 2),
                 'Pritschen': ', '.join(trip_platforms['Pritschenname'].astype(str).tolist()),
+                'Reihenfolge': 'fortlaufend',
+                'Erste_Einheit': loaded_ids[0] if loaded_ids else '',
+                'Letzte_Einheit': loaded_ids[-1] if loaded_ids else '',
             })
             remaining = remaining[~remaining['Einheit_ID'].astype(str).isin(loaded_ids)].copy().reset_index(drop=True)
             progress = True
@@ -3842,7 +3871,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
     )
 
     st.subheader('5. Fuhrenoptionen und Pritschen aus Excel')
-    st.caption('Variante A: Die freigegebenen Fuhrenoptionen werden nach Priorität geprüft. Die erste passende Option wird wiederholt, bis alles verladen ist.')
+    st.caption('Variante A: Freigegebene Fuhrenoptionen werden geprüft. Es wird die Option gewählt, die den längsten fortlaufenden Block der Sortierung sauber mitnimmt. Die Reihenfolge springt nicht zurück.')
 
     fcol1, fcol2 = st.columns([1, 2])
     with fcol1:
