@@ -2164,6 +2164,172 @@ def clean_placements_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
+
+
+def _rect_overlap_area(ax: float, ay: float, aw: float, ah: float, bx: float, by: float, bw: float, bh: float) -> float:
+    """Überlappungsfläche zweier Rechtecke in der Pritschen-Draufsicht."""
+    x0 = max(ax, bx)
+    y0 = max(ay, by)
+    x1 = min(ax + aw, bx + bw)
+    y1 = min(ay + ah, by + bh)
+    if x1 <= x0 or y1 <= y0:
+        return 0.0
+    return float((x1 - x0) * (y1 - y0))
+
+
+def _platform_row_for_name(platforms_df: pd.DataFrame, pname: str) -> Optional[pd.Series]:
+    if platforms_df is None or platforms_df.empty:
+        return None
+    match = platforms_df[platforms_df['Pritsche'].astype(str) == str(pname)]
+    if match.empty:
+        return None
+    return match.iloc[0]
+
+
+def calculate_underbau_rows_for_platform(
+    placements_df: pd.DataFrame,
+    platform: pd.Series,
+    min_support_ratio: float = 0.65,
+    min_underbau_height: float = 20.0,
+    tolerance: float = 1.0,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Ermittelt notwendigen Unterbau / Aufdopplung für eine Pritsche.
+
+    Die Logik ist bewusst als Verlade-Hinweis aufgebaut:
+    - Wenn über einer darunterliegenden Lage eine grössere freie Höhe entsteht,
+      wird ein Unterbau-Eintrag erzeugt.
+    - Wenn die Auflagefläche zu klein ist, wird zusätzlich eine Warnung erzeugt.
+    - Es wird keine neue Verladung gerechnet und die Bauteile werden nicht verschoben.
+    """
+    columns = list(placements_df.columns) if placements_df is not None and not placements_df.empty else []
+    warning_cols = ['Typ', 'Pritsche', 'Einheit_ID', 'Warnung', 'Details']
+    if placements_df is None or placements_df.empty or platform is None:
+        return pd.DataFrame(columns=columns), pd.DataFrame(columns=warning_cols)
+
+    pname = str(platform.get('Pritsche', ''))
+    rows = placements_df[placements_df['Pritsche'].astype(str) == pname].copy()
+    rows = rows[rows['X_mm'].notna() & rows['Y_mm'].notna() & rows['Z_mm'].notna()].copy()
+    if rows.empty:
+        return pd.DataFrame(columns=columns), pd.DataFrame(columns=warning_cols)
+
+    helper_types = {'Unterbau', 'Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz'}
+    rows = rows[~rows.get('Typ', pd.Series(dtype=str)).astype(str).isin(helper_types)].copy()
+    if rows.empty:
+        return pd.DataFrame(columns=columns), pd.DataFrame(columns=warning_cols)
+
+    for col in ['X_mm', 'Y_mm', 'Z_mm', 'Länge_mm', 'Breite_mm', 'Höhe_mm']:
+        rows[col] = pd.to_numeric(rows[col], errors='coerce').fillna(0.0)
+
+    base_height = safe_number(platform.get('Kantholz_erste_Lage_mm'), 0.0)
+    bundle_spacer = safe_number(platform.get('Einlage_zwischen_Lagen_mm'), 0.0)
+    general_spacer = safe_number(platform.get('Einlage_allgemein_mm'), 0.0)
+    min_support_ratio = max(0.0, min(1.0, float(min_support_ratio)))
+    min_underbau_height = max(0.0, float(min_underbau_height))
+
+    underbau_rows: List[Dict[str, Any]] = []
+    warnings: List[Dict[str, Any]] = []
+    existing_keys = set()
+
+    # Nur Bauteile/Bunde oberhalb der ersten Ebene prüfen.
+    check_rows = rows[rows['Z_mm'] > base_height + tolerance].copy()
+    for _, row in check_rows.sort_values(['Z_mm', 'X_mm', 'Y_mm'], kind='stable').iterrows():
+        x = safe_number(row.get('X_mm'))
+        y = safe_number(row.get('Y_mm'))
+        z = safe_number(row.get('Z_mm'))
+        lx = safe_number(row.get('Länge_mm'))
+        by = safe_number(row.get('Breite_mm'))
+        footprint = max(1.0, lx * by)
+        row_typ = str(row.get('Typ', '') or '').strip()
+        expected_spacer = bundle_spacer if row_typ == 'Bund' else general_spacer
+
+        below = rows[(rows['Z_mm'] + rows['Höhe_mm']) <= z - tolerance].copy()
+        overlap_area = 0.0
+        closest_top = base_height
+        for _, b in below.iterrows():
+            ov = _rect_overlap_area(x, y, lx, by, safe_number(b.get('X_mm')), safe_number(b.get('Y_mm')), safe_number(b.get('Länge_mm')), safe_number(b.get('Breite_mm')))
+            if ov <= 0:
+                continue
+            overlap_area += ov
+            closest_top = max(closest_top, safe_number(b.get('Z_mm')) + safe_number(b.get('Höhe_mm')))
+        support_ratio = min(1.0, overlap_area / footprint)
+
+        free_gap = max(0.0, z - closest_top - max(0.0, expected_spacer))
+        einheit_id = str(row.get('Einheit_ID', ''))
+        if support_ratio + 1e-6 < min_support_ratio:
+            warnings.append({
+                'Typ': 'Auflage',
+                'Pritsche': pname,
+                'Einheit_ID': einheit_id,
+                'Warnung': 'Auflagefläche prüfen',
+                'Details': f'Auflage ca. {support_ratio*100:.0f}% < {min_support_ratio*100:.0f}% bei Z={z:.0f} mm',
+            })
+
+        if free_gap >= min_underbau_height:
+            ub_h = round(free_gap, 1)
+            ub_z = round(z - ub_h, 1)
+            key = (round(x, 1), round(y, 1), round(ub_z, 1), round(lx, 1), round(by, 1), round(ub_h, 1))
+            if key not in existing_keys:
+                existing_keys.add(key)
+                base = {col: '' for col in columns}
+                for col in columns:
+                    try:
+                        base[col] = row.get(col, '')
+                    except Exception:
+                        pass
+                label = _fmt_bsd_mm_label('Unterbau', ub_h)
+                base.update({
+                    'Typ': 'Unterbau',
+                    'Einheit_ID': f'UB_{einheit_id}' if einheit_id else 'UB',
+                    'Bauteile': label,
+                    'Bauteile_Liste': label,
+                    'Ansicht_Label': label,
+                    'Ansicht_Liste': label,
+                    'Anzahl_Bauteile': 0,
+                    'X_mm': x,
+                    'Y_mm': y,
+                    'Z_mm': ub_z,
+                    'Länge_mm': lx,
+                    'Breite_mm': by,
+                    'Höhe_mm': ub_h,
+                    'Gewicht_kg': 0.0,
+                    'Ebene': 'Unterbau automatisch',
+                })
+                underbau_rows.append(base)
+                warnings.append({
+                    'Typ': 'Unterbau',
+                    'Pritsche': pname,
+                    'Einheit_ID': einheit_id,
+                    'Warnung': 'Unterbau erforderlich',
+                    'Details': f'{ub_h:.0f} mm unter {einheit_id} / Z={z:.0f} mm',
+                })
+
+    return pd.DataFrame(underbau_rows, columns=columns), pd.DataFrame(warnings, columns=warning_cols)
+
+
+def add_underbau_rows_to_placements(
+    placements_df: pd.DataFrame,
+    platforms_df: pd.DataFrame,
+    min_support_ratio: float = 0.65,
+    min_underbau_height: float = 20.0,
+    enabled: bool = True,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Fügt Unterbau-Hilfszeilen für Darstellung/Ladeplan hinzu und liefert Warnungen."""
+    if not enabled or placements_df is None or placements_df.empty or platforms_df is None or platforms_df.empty:
+        return placements_df.copy() if placements_df is not None else pd.DataFrame(), pd.DataFrame(columns=['Typ', 'Pritsche', 'Einheit_ID', 'Warnung', 'Details'])
+    helpers: List[pd.DataFrame] = []
+    warnings: List[pd.DataFrame] = []
+    for _, platform in platforms_df.iterrows():
+        h, w = calculate_underbau_rows_for_platform(placements_df, platform, min_support_ratio=min_support_ratio, min_underbau_height=min_underbau_height)
+        if h is not None and not h.empty:
+            helpers.append(h)
+        if w is not None and not w.empty:
+            warnings.append(w)
+    result = placements_df.copy()
+    if helpers:
+        result = pd.concat([result] + helpers, ignore_index=True, sort=False)
+    warn_df = pd.concat(warnings, ignore_index=True, sort=False) if warnings else pd.DataFrame(columns=['Typ', 'Pritsche', 'Einheit_ID', 'Warnung', 'Details'])
+    return result, warn_df
+
 def compute_loading_warnings(placements_df: pd.DataFrame, platforms_df: pd.DataFrame) -> pd.DataFrame:
     """Prüft Länge, Breite, Höhe, Gewicht, negative Positionen und nicht verladen."""
     warnings: List[Dict[str, Any]] = []
@@ -2492,6 +2658,11 @@ def create_bsd_matrix_for_platform(
         labels = _split_bsd_text_list(row.get('Ansicht_Liste', ''), row.get('Bauteile_Liste', row.get('Bauteile', row.get('Einheit_ID', ''))))
         if not labels:
             labels = [_format_bsd_cell(row)]
+        if typ == 'Unterbau':
+            label = labels[0] if labels else _format_bsd_cell(row)
+            add_entry(row['Z_mm'], slot, label, 'Unterbau', row['Höhe_mm'], row['Länge_mm'], row['Breite_mm'], 0.0, 'Ausgleich / Aufdopplung')
+            continue
+
         if typ != 'Bund' or count <= 1:
             label = labels[0] if labels else _format_bsd_cell(row)
             remark = ''
@@ -2593,7 +2764,7 @@ def create_bsd_matrix_for_platform(
             'Zeilentyp': ', '.join(sorted({e['kind'] for e in level_entries})),
         }
 
-        part_like = [e for e in level_entries if 'Bauteil' in e['kind']]
+        part_like = [e for e in level_entries if ('Bauteil' in e['kind']) or (e['kind'] == 'Unterbau')]
         if part_like:
             out['Breite_mm'] = round(max((e['width'] for e in part_like), default=0.0), 1)
             out['Gesamtlänge_mm'] = round(max((e['length'] for e in part_like), default=0.0), 1)
@@ -2865,6 +3036,9 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
 
     rows = placements[placements['Pritsche'].astype(str) == pname].copy()
     rows = rows[rows['X_mm'].notna() & rows['Y_mm'].notna() & rows['Z_mm'].notna()].copy()
+    if view == 'top' and not rows.empty:
+        # Unterbau, Einlagen und Kanthölzer sind in der Draufsicht in der Regel verdeckt.
+        rows = rows[~rows.get('Typ', pd.Series(dtype=str)).astype(str).isin(['Unterbau', 'Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz'])].copy()
     rows = _pdf_add_visible_spacer_rows(rows, platform, view)
 
     used_len = safe_number((rows['X_mm'] + rows['Länge_mm']).max() - rows['X_mm'].min(), 0.0) if not rows.empty else 0.0
@@ -2949,6 +3123,9 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
         elif row_typ in ['Bundeinlage', 'Einlage']:
             c.setFillColor(colors.HexColor('#e6e6e6'))
             c.setStrokeColor(colors.grey)
+        elif row_typ == 'Unterbau':
+            c.setFillColor(colors.HexColor('#d0d0d0'))
+            c.setStrokeColor(colors.HexColor('#666666'))
         else:
             c.setFillColor(colors.lightgrey)
             c.setStrokeColor(colors.darkgrey)
@@ -3563,6 +3740,13 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
     center_geometric = True
     max_fuhren = col4.number_input('Max. Fuhren Sicherheitslimit', min_value=1, max_value=200, value=50, step=1)
 
+    st.subheader('7. Auflage / Unterbau')
+    st.caption('Diese Kontrolle rechnet keine neue Verladung, sondern erkennt freie Höhe und zu geringe Auflage. Bei Bedarf wird im Ladeplan/PDF ein Unterbau als Hinweis eingezeichnet.')
+    ucol1, ucol2, ucol3 = st.columns(3)
+    underbau_enabled = ucol1.checkbox('Unterbau / Auflage prüfen', value=True)
+    min_support_ratio = ucol2.number_input('Mindestauflagefläche %', min_value=0, max_value=100, value=65, step=5) / 100.0
+    min_underbau_height = ucol3.number_input('Unterbau anzeigen ab mm', min_value=0.0, max_value=500.0, value=20.0, step=5.0)
+
     placements_df, summary_df, platforms_used_df, fuhren_log_df = create_variant_a_loading_plan(
         units_df,
         options_edit,
@@ -3589,6 +3773,15 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
     edited_placements_df = clean_placements_dataframe(placements_df)
     edited_summary_df = recompute_summary_from_placements(edited_placements_df, platforms_used_df) if not platforms_used_df.empty else summary_df
     warnings_plan_df = compute_loading_warnings(edited_placements_df, platforms_used_df)
+    display_placements_df, underbau_warnings_df = add_underbau_rows_to_placements(
+        edited_placements_df,
+        platforms_used_df,
+        min_support_ratio=float(min_support_ratio),
+        min_underbau_height=float(min_underbau_height),
+        enabled=bool(underbau_enabled),
+    )
+    if underbau_warnings_df is not None and not underbau_warnings_df.empty:
+        warnings_plan_df = pd.concat([warnings_plan_df, underbau_warnings_df], ignore_index=True, sort=False) if not warnings_plan_df.empty else underbau_warnings_df
 
     tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(['Verladeeinheiten', 'Fuhrenübersicht', 'Platzierung / manuell', 'Ladeplan BSD', 'Warnungen', 'Ansichten', 'Excel Export'])
 
@@ -3631,12 +3824,21 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
         edited_placements_df = clean_placements_dataframe(edited_placements_df)
         edited_summary_df = recompute_summary_from_placements(edited_placements_df, platforms_used_df) if not platforms_used_df.empty else summary_df
         warnings_plan_df = compute_loading_warnings(edited_placements_df, platforms_used_df)
+        display_placements_df, underbau_warnings_df = add_underbau_rows_to_placements(
+            edited_placements_df,
+            platforms_used_df,
+            min_support_ratio=float(min_support_ratio),
+            min_underbau_height=float(min_underbau_height),
+            enabled=bool(underbau_enabled),
+        )
+        if underbau_warnings_df is not None and not underbau_warnings_df.empty:
+            warnings_plan_df = pd.concat([warnings_plan_df, underbau_warnings_df], ignore_index=True, sort=False) if not warnings_plan_df.empty else underbau_warnings_df
         if not_loaded_count:
             st.error('Nicht alle Verladeeinheiten konnten automatisch platziert werden. Freigegebene Fuhrenoptionen, Pritschenmaße oder Bundbildung prüfen.')
 
     with tab4:
         bsd_header_df, bsd_matrix_df = create_all_bsd_matrices(
-            edited_placements_df,
+            display_placements_df,
             platforms_used_df,
             edited_summary_df,
             warnings_plan_df,
@@ -3696,19 +3898,19 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
 
             col1, col2 = st.columns(2)
             with col1:
-                st.plotly_chart(draw_loading_view(edited_placements_df, platforms_used_df, selected_platform, 'side'), use_container_width=True)
+                st.plotly_chart(draw_loading_view(display_placements_df, platforms_used_df, selected_platform, 'side'), use_container_width=True)
             with col2:
-                st.plotly_chart(draw_loading_view(edited_placements_df, platforms_used_df, selected_platform, 'back'), use_container_width=True)
+                st.plotly_chart(draw_loading_view(display_placements_df, platforms_used_df, selected_platform, 'back'), use_container_width=True)
             col3, col4 = st.columns(2)
             with col3:
-                st.plotly_chart(draw_loading_view(edited_placements_df, platforms_used_df, selected_platform, 'top'), use_container_width=True)
+                st.plotly_chart(draw_loading_view(display_placements_df, platforms_used_df, selected_platform, 'top'), use_container_width=True)
             with col4:
-                st.plotly_chart(draw_loading_view(edited_placements_df, platforms_used_df, selected_platform, 'front'), use_container_width=True)
+                st.plotly_chart(draw_loading_view(display_placements_df, platforms_used_df, selected_platform, 'front'), use_container_width=True)
 
     with tab7:
         # Falls der Ladeplan-BSD-Tab nicht angezeigt wurde, trotzdem für den Export erstellen.
         if 'bsd_header_df' not in locals() or 'bsd_matrix_df' not in locals():
-            bsd_header_df, bsd_matrix_df = create_all_bsd_matrices(edited_placements_df, platforms_used_df, edited_summary_df, warnings_plan_df, project_meta=project_meta)
+            bsd_header_df, bsd_matrix_df = create_all_bsd_matrices(display_placements_df, platforms_used_df, edited_summary_df, warnings_plan_df, project_meta=project_meta)
 
         st.subheader('A3-Pritschenplan PDF')
         st.info(
@@ -3719,7 +3921,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
 
         try:
             pdf_data = create_loading_pdf(
-                edited_placements_df,
+                display_placements_df,
                 platforms_used_df,
                 edited_summary_df,
                 warnings_plan_df,
@@ -3739,12 +3941,12 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
 
         st.divider()
         st.subheader('Excel-Daten / kleine BSD-Zettel')
-        st.caption('Die Excel-Datei enthält nur noch die kleinen BSD-/Pritschenzettel je Pritsche. Die technischen Datenregister werden nicht mehr ausgegeben.')
+        st.caption('Die Excel-Datei enthält die kleinen BSD-/Pritschenzettel und die Zusatzregister Bauteile, Fuhrenoptionen, Ladeplan_BSD_Kopf und Projektkopf.')
 
         excel_data = create_loading_excel(
             sorted_parts,
             units_df,
-            edited_placements_df,
+            display_placements_df,
             platforms_used_df,
             edited_summary_df,
             options_df=options_edit,
