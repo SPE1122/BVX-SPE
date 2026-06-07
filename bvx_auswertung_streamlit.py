@@ -1246,7 +1246,9 @@ def center_placements_geometrically(placements_df: pd.DataFrame, platforms_df: p
     Wichtig: Das ist bewusst keine Gewichts- oder Schwerpunktoptimierung.
     Die bestehende Reihenfolge und Stapellogik bleibt erhalten. Es wird nur die
     fertige Platzierung je Lage in X- und Y-Richtung in die Mitte der jeweiligen
-    Pritsche verschoben.
+    Pritsche verschoben. Dadurch werden 1200-mm-Elemente bei 2450-mm-Pritschen
+    von der Mitte aus nach links/rechts verteilt; breite Einzelteile liegen
+    automatisch mittig.
     """
     if placements_df.empty or platforms_df.empty:
         return placements_df
@@ -1318,6 +1320,47 @@ def center_placements_geometrically(placements_df: pd.DataFrame, platforms_df: p
                     lambda v: v if 'mittig' in v.lower() else f'{v} / geometrisch mittig'
                 )
 
+    return result
+
+
+def invert_vertical_order_by_platform(placements_df: pd.DataFrame, platforms_df: pd.DataFrame) -> pd.DataFrame:
+    """Spiegelt die Z-Reihenfolge je belegter Pritsche.
+
+    Zweck: Bei aufsteigender Hauptattribut-Sortierung soll die niedrigste Nummer
+    oben liegen. Die Verteilung auf die Pritschen bleibt trotzdem global
+    fortlaufend. Es werden keine Bunde aufgelöst und keine X/Y-Positionen
+    verändert; nur die Z-Lage der fertigen Verladeeinheiten wird je Pritsche
+    gespiegelt.
+    """
+    if placements_df is None or placements_df.empty or platforms_df is None or platforms_df.empty:
+        return placements_df.copy() if placements_df is not None else pd.DataFrame()
+
+    result = placements_df.copy()
+    for col in ['X_mm', 'Y_mm', 'Z_mm', 'Länge_mm', 'Breite_mm', 'Höhe_mm']:
+        if col in result.columns:
+            result[col] = pd.to_numeric(result[col], errors='coerce')
+
+    platform_lookup = {str(row.get('Pritsche', '')): row for _, row in platforms_df.iterrows()}
+    helper_types = {'Unterbau', 'Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz'}
+
+    for pname, prow in platform_lookup.items():
+        mask = (
+            result['Pritsche'].astype(str).eq(pname)
+            & result['Z_mm'].notna()
+            & result['Höhe_mm'].notna()
+            & ~result.get('Typ', pd.Series(dtype=str)).astype(str).isin(helper_types)
+        )
+        if not mask.any():
+            continue
+        base_height = safe_number(prow.get('Kantholz_erste_Lage_mm'), 0.0)
+        top_z = float((result.loc[mask, 'Z_mm'] + result.loc[mask, 'Höhe_mm']).max())
+        # Jede Einheit bleibt als Block erhalten. Nur die Höhe wird gespiegelt.
+        new_z = base_height + (top_z - (result.loc[mask, 'Z_mm'] + result.loc[mask, 'Höhe_mm']))
+        result.loc[mask, 'Z_mm'] = new_z.round(1)
+        if 'Ebene' in result.columns:
+            result.loc[mask, 'Ebene'] = result.loc[mask, 'Ebene'].astype(str).apply(
+                lambda v: v if 'niedrigste oben' in v.lower() else f'{v} / niedrigste oben'
+            )
     return result
 
 
@@ -1427,9 +1470,11 @@ def create_variant_a_loading_plan(
             max_try = len(remaining)
             for n in range(1, max_try + 1):
                 prefix_df = remaining.iloc[:n].copy().reset_index(drop=True)
-                placement_input = prefix_df.iloc[::-1].reset_index(drop=True)
+                # Wichtig: Die globale Reihenfolge wird in dieser Reihenfolge auf die
+                # Pritschen verteilt. Erst danach wird je Pritsche die Z-Reihenfolge
+                # gespiegelt, damit die niedrigste Nummer oben liegt.
                 placements_try, _summary_try = create_loading_plan(
-                    placement_input,
+                    prefix_df,
                     trip_platforms,
                     base_wood_height=base_default,
                     layer_spacer_height=layer_default,
@@ -1447,12 +1492,16 @@ def create_variant_a_loading_plan(
                 if not set(wanted_ids).issubset(loaded_set):
                     break
                 loaded_try = loaded_try_all[loaded_try_all['Einheit_ID'].astype(str).isin(wanted_ids)].copy()
-                summary_prefix = recompute_summary_from_placements(loaded_try, trip_platforms)
+                loaded_try = invert_vertical_order_by_platform(loaded_try, trip_platforms)
+                used_platform_names = loaded_try['Pritsche'].dropna().astype(str).unique().tolist()
+                trip_platforms_used = trip_platforms[trip_platforms['Pritsche'].astype(str).isin(used_platform_names)].copy()
+                summary_prefix = recompute_summary_from_placements(loaded_try, trip_platforms_used)
                 loaded_weight = float(loaded_try['Gewicht_kg'].sum())
                 best_prefix = {
                     'loaded_ids': wanted_ids,
                     'loaded_try': loaded_try,
                     'summary_prefix': summary_prefix,
+                    'trip_platforms_used': trip_platforms_used,
                     'loaded_weight': loaded_weight,
                 }
 
@@ -1462,6 +1511,7 @@ def create_variant_a_loading_plan(
             prefix_ids = best_prefix['loaded_ids']
             loaded_try = best_prefix['loaded_try']
             summary_prefix = best_prefix['summary_prefix']
+            trip_platforms_used = best_prefix.get('trip_platforms_used', trip_platforms)
             loaded_weight = float(best_prefix['loaded_weight'])
             used_platforms = int(loaded_try['Pritsche'].nunique())
             priority = safe_number(option_row.get('Priorität'), 999)
@@ -1472,7 +1522,7 @@ def create_variant_a_loading_plan(
                 best_try = {
                     'score': score,
                     'option_name': option_name,
-                    'trip_platforms': trip_platforms,
+                    'trip_platforms': trip_platforms_used,
                     'summary_try': summary_prefix,
                     'loaded_try': loaded_try,
                     'loaded_ids': prefix_ids,
@@ -2653,6 +2703,33 @@ def _position_slot_for_bsd(
     return f'{front_back} {left_right}'
 
 
+def _position_slots_for_bsd(
+    row: pd.Series,
+    eff_length: float,
+    platform_width: float,
+    front_at_x_max: bool = False,
+    left_at_y_max: bool = False,
+) -> List[str]:
+    """Wie _position_slot_for_bsd, aber breite mittige Elemente können beide Seiten belegen.
+
+    - X mittig bleibt fachlich 'Vorne'.
+    - Y wird über die Bauteil-/Bundmitte entschieden.
+    - Elemente/Bunde, die nahezu die ganze Pritschenbreite belegen, werden in
+      links UND rechts angezeigt. Für die Auflage- und BSD-Logik gelten sie als
+      über beide Seiten belegt.
+    """
+    slot = _position_slot_for_bsd(row, eff_length, platform_width, front_at_x_max, left_at_y_max)
+    width = safe_number(row.get('Breite_mm'))
+    y0 = safe_number(row.get('Y_mm'))
+    y1 = y0 + width
+    y_center = platform_width / 2.0 if platform_width else 0.0
+    spans_full_width = platform_width > 0 and width >= platform_width * 0.75 and y0 < y_center < y1
+    if not spans_full_width:
+        return [slot]
+    fb = 'Vorne' if slot.startswith('Vorne') else 'Hinten'
+    return [f'{fb} links', f'{fb} rechts']
+
+
 def create_bsd_header_for_platform(
     platform: pd.Series,
     summary_df: pd.DataFrame,
@@ -2808,8 +2885,10 @@ def create_bsd_matrix_for_platform(
 
     # Bauteile/Bunde in einzelne sichtbare Zeilen zerlegen.
     for _, row in rows.sort_values(['Z_mm', 'X_mm', 'Y_mm'], kind='stable').iterrows():
-        slot = _position_slot_for_bsd(row, eff_length, platform_width, front_at_x_max, left_at_y_max)
-        slot_has_load[slot] = True
+        slots_for_row = _position_slots_for_bsd(row, eff_length, platform_width, front_at_x_max, left_at_y_max)
+        for _slot in slots_for_row:
+            slot_has_load[_slot] = True
+        primary_slot = slots_for_row[0] if slots_for_row else _position_slot_for_bsd(row, eff_length, platform_width, front_at_x_max, left_at_y_max)
         typ = str(row.get('Typ', '') or '').strip()
         count = max(1, int(safe_number(row.get('Anzahl_Bauteile'), 1)))
         labels = _split_bsd_text_list(row.get('Ansicht_Liste', ''), row.get('Bauteile_Liste', row.get('Bauteile', row.get('Einheit_ID', ''))))
@@ -2817,13 +2896,15 @@ def create_bsd_matrix_for_platform(
             labels = [_format_bsd_cell(row)]
         if typ == 'Unterbau':
             label = labels[0] if labels else _format_bsd_cell(row)
-            add_entry(row['Z_mm'], slot, label, 'Unterbau', row['Höhe_mm'], row['Länge_mm'], row['Breite_mm'], 0.0, 'Ausgleich / Aufdopplung')
+            for slot in slots_for_row:
+                add_entry(row['Z_mm'], slot, label, 'Unterbau', row['Höhe_mm'], row['Länge_mm'], row['Breite_mm'], 0.0, 'Ausgleich / Aufdopplung')
             continue
 
         if typ != 'Bund' or count <= 1:
             label = labels[0] if labels else _format_bsd_cell(row)
             remark = ''
-            add_entry(row['Z_mm'], slot, label, 'Bauteil', row['Höhe_mm'], row['Länge_mm'], row['Breite_mm'], row['Gewicht_kg'], remark)
+            for slot in slots_for_row:
+                add_entry(row['Z_mm'], slot, label, 'Bauteil', row['Höhe_mm'], row['Länge_mm'], row['Breite_mm'], row['Gewicht_kg'], remark)
             continue
 
         # Bund: jedes enthaltene Bauteil als eigene BSD-Zeile, Einlagen dazwischen.
@@ -2846,13 +2927,15 @@ def create_bsd_matrix_for_platform(
             pl = safe_number(part_lengths[i] if i < len(part_lengths) else row['Länge_mm'])
             pw = safe_number(part_widths[i] if i < len(part_widths) else row['Breite_mm'])
             remark = ''
-            add_entry(z_cursor, slot, label, 'Bund-Bauteil', ph, pl, pw, part_weight, remark)
+            for slot in slots_for_row:
+                add_entry(z_cursor, slot, label, 'Bund-Bauteil', ph, pl, pw, part_weight, remark)
             z_cursor += ph
             if i < count - 1 and internal_spacer > 0:
                 spacer_label = 'Einlage'
                 spacer_kind = 'Einlage'
                 spacer_remark = ''
-                add_entry(z_cursor, slot, _fmt_bsd_mm_label(spacer_label, internal_spacer), spacer_kind, internal_spacer, row['Länge_mm'], row['Breite_mm'], 0.0, spacer_remark)
+                for slot in slots_for_row:
+                    add_entry(z_cursor, slot, _fmt_bsd_mm_label(spacer_label, internal_spacer), spacer_kind, internal_spacer, row['Länge_mm'], row['Breite_mm'], 0.0, spacer_remark)
                 z_cursor += internal_spacer
 
     # Kantholz erste Lage als eigene unterste Zeile anzeigen.
@@ -2869,7 +2952,7 @@ def create_bsd_matrix_for_platform(
     for z_val in layer_z_values:
         layer_rows = rows[rows['Z_mm'].round(1) == z_val].copy()
         for _, lrow in layer_rows.iterrows():
-            slot = _position_slot_for_bsd(lrow, eff_length, platform_width, front_at_x_max, left_at_y_max)
+            slots_for_lrow = _position_slots_for_bsd(lrow, eff_length, platform_width, front_at_x_max, left_at_y_max)
             is_bundle_layer = str(lrow.get('Typ', '')).strip() == 'Bund'
             if is_bundle_layer and spacer_height > 0:
                 effective_layer_spacer = spacer_height
@@ -2882,8 +2965,9 @@ def create_bsd_matrix_for_platform(
             else:
                 continue
             z_spacer = round(max(0.0, z_val - effective_layer_spacer), 1)
-            if (z_spacer, slot) not in existing_spacer_keys:
-                add_entry(z_spacer, slot, _fmt_bsd_mm_label(spacer_label, effective_layer_spacer), spacer_kind, effective_layer_spacer, lrow['Länge_mm'], lrow['Breite_mm'], 0.0, '')
+            for slot in slots_for_lrow:
+                if (z_spacer, slot) not in existing_spacer_keys:
+                    add_entry(z_spacer, slot, _fmt_bsd_mm_label(spacer_label, effective_layer_spacer), spacer_kind, effective_layer_spacer, lrow['Länge_mm'], lrow['Breite_mm'], 0.0, '')
 
     if not entries:
         return pd.DataFrame(columns=columns)
@@ -4048,7 +4132,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
             project_meta=project_meta,
         )
         st.markdown('**Ladeplan BSD je Pritsche**')
-        st.caption('Die Tabelle wird automatisch für jede belegte Pritsche erstellt. Grundlage ist die vorhandene Platzierung. Fachregel: mittig liegende Bunde werden im BSD immer vorne geführt; links/rechts wird über die Y-Mitte entschieden.')
+        st.caption('Die Tabelle wird automatisch für jede belegte Pritsche erstellt. Grundlage ist die vorhandene Platzierung. Fachregel: X-mittig = vorne; Y wird über die Elementmitte zur Pritschenmitte entschieden; fast volle Breite wird links und rechts angezeigt.')
 
         if bsd_header_df.empty or bsd_matrix_df.empty:
             st.warning('Für die aktuelle Verladung wurde kein Ladeplan BSD erzeugt.')
