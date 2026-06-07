@@ -533,6 +533,83 @@ def parts_to_dataframe(parts: List[Part], density_kg_m3: float = 500.0) -> pd.Da
     return pd.DataFrame(rows)
 
 
+
+def read_parts_excel_to_dataframe(uploaded_excel, density_kg_m3: float = 500.0) -> Tuple[pd.DataFrame, List[str]]:
+    """Liest eine Bauteile-Excel als Ersatz für BVX ein.
+
+    Erwartet bevorzugt ein Blatt "Bauteile". Falls es nicht existiert, wird das
+    erste Blatt gelesen. Mindestfelder sind Länge_mm, Breite_mm und Höhe_mm.
+    Weitere Attribute werden unverändert für Sortierung/Kopfbereiche übernommen.
+    """
+    messages: List[str] = []
+    if uploaded_excel is None:
+        return pd.DataFrame(), ['Keine Bauteile-Excel geladen.']
+
+    try:
+        xls = pd.ExcelFile(uploaded_excel)
+        sheet_name = 'Bauteile' if 'Bauteile' in xls.sheet_names else xls.sheet_names[0]
+        df = normalize_columns(pd.read_excel(xls, sheet_name=sheet_name))
+    except Exception as exc:
+        return pd.DataFrame(), [f'Bauteile-Excel konnte nicht gelesen werden: {exc}']
+
+    if df.empty:
+        return pd.DataFrame(), ['Bauteile-Excel enthält keine Zeilen.']
+
+    # Häufige alternative Spaltennamen normalisieren.
+    alias_map = {
+        'Länge': 'Länge_mm', 'Laenge': 'Länge_mm', 'Laenge_mm': 'Länge_mm', 'Length': 'Länge_mm', 'X': 'Länge_mm', 'DimensionX': 'Länge_mm',
+        'Breite': 'Breite_mm', 'Width': 'Breite_mm', 'Y': 'Breite_mm', 'DimensionY': 'Breite_mm',
+        'Höhe': 'Höhe_mm', 'Hoehe': 'Höhe_mm', 'Hoehe_mm': 'Höhe_mm', 'Height': 'Höhe_mm', 'Z': 'Höhe_mm', 'DimensionZ': 'Höhe_mm',
+        'Bauteilnr': 'Bauteilnummer', 'Bauteil_Nr': 'Bauteilnummer', 'Bauteil-Nr': 'Bauteilnummer', 'PartNo': 'Bauteilnummer', 'Part_No': 'Bauteilnummer',
+        'Paket': 'Pak/Unit', 'Pak': 'Pak/Unit', 'Unit': 'Pak/Unit',
+        'Profile': 'Profil', 'Surface': 'Oberfläche', 'Oberflaeche': 'Oberfläche', 'Grade': 'Qualität', 'Qualitaet': 'Qualität',
+        'Volumen': 'Volumen_m3', 'Volume_m3': 'Volumen_m3', 'Gewicht': 'Gewicht_kg', 'Weight_kg': 'Gewicht_kg',
+    }
+    df = df.rename(columns={c: alias_map.get(str(c).strip(), c) for c in df.columns})
+
+    required_order = [
+        'Index', 'Name', 'Bauteilnummer', 'PartId', 'Pak/Unit', 'Profil', 'Oberfläche', 'Qualität',
+        'User_Attribut_2', 'Länge_mm', 'Breite_mm', 'Höhe_mm', 'Volumen_m3', 'Gewicht_kg'
+    ]
+    for col in required_order:
+        if col not in df.columns:
+            df[col] = '' if col not in {'Index', 'Länge_mm', 'Breite_mm', 'Höhe_mm', 'Volumen_m3', 'Gewicht_kg'} else 0
+
+    df = df.dropna(how='all').copy().reset_index(drop=True)
+    if df.empty:
+        return pd.DataFrame(), ['Bauteile-Excel enthält keine verwertbaren Zeilen.']
+
+    if (pd.to_numeric(df['Index'], errors='coerce').fillna(0) == 0).all():
+        df['Index'] = range(1, len(df) + 1)
+
+    for col in ['Länge_mm', 'Breite_mm', 'Höhe_mm', 'Volumen_m3', 'Gewicht_kg']:
+        df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', '.', regex=False), errors='coerce').fillna(0.0)
+
+    missing_dims = df[(df['Länge_mm'] <= 0) | (df['Breite_mm'] <= 0) | (df['Höhe_mm'] <= 0)]
+    if not missing_dims.empty:
+        messages.append(f'{len(missing_dims)} Zeile(n) haben fehlende Länge/Breite/Höhe und werden trotzdem angezeigt, können aber evtl. nicht verladen werden.')
+
+    # Volumen/Gewicht bei Bedarf berechnen.
+    calc_volume = (df['Länge_mm'] * df['Breite_mm'] * df['Höhe_mm']) / 1_000_000_000
+    df.loc[df['Volumen_m3'] <= 0, 'Volumen_m3'] = calc_volume[df['Volumen_m3'] <= 0]
+    df.loc[df['Gewicht_kg'] <= 0, 'Gewicht_kg'] = df.loc[df['Gewicht_kg'] <= 0, 'Volumen_m3'] * float(density_kg_m3)
+
+    # Pflichttexte auffüllen.
+    df['Name'] = df['Name'].astype(str).replace({'nan': ''})
+    df['Bauteilnummer'] = df['Bauteilnummer'].astype(str).replace({'nan': ''})
+    for idx in df.index:
+        if not str(df.at[idx, 'Bauteilnummer']).strip():
+            fallback = str(df.at[idx, 'Name']).strip() or str(int(safe_number(df.at[idx, 'Index'], idx + 1)))
+            df.at[idx, 'Bauteilnummer'] = fallback
+        if not str(df.at[idx, 'Name']).strip():
+            df.at[idx, 'Name'] = str(df.at[idx, 'Bauteilnummer']).strip()
+
+    # Gewünschte Standardspalten zuerst, Zusatzattribute danach.
+    extra_cols = [c for c in df.columns if c not in required_order]
+    df = df[required_order + extra_cols]
+    messages.append('Bauteile wurden aus Excel geladen.')
+    return df, messages
+
 def _available_bvx_meta_fields(parts_df: pd.DataFrame) -> List[str]:
     """Felder, die sinnvoll für Kopf-/Projektdaten auswählbar sind."""
     if parts_df is None or parts_df.empty:
@@ -1241,14 +1318,14 @@ def create_loading_plan(
 
 
 def center_placements_geometrically(placements_df: pd.DataFrame, platforms_df: pd.DataFrame) -> pd.DataFrame:
-    """Richtet platzierte Einheiten geometrisch mittig auf der Pritsche aus.
+    """Ruhige geometrische Ausrichtung der fertigen Verladung.
 
-    Wichtig: Das ist bewusst keine Gewichts- oder Schwerpunktoptimierung.
-    Die bestehende Reihenfolge und Stapellogik bleibt erhalten. Es wird nur die
-    fertige Platzierung je Lage in X- und Y-Richtung in die Mitte der jeweiligen
-    Pritsche verschoben. Dadurch werden 1200-mm-Elemente bei 2450-mm-Pritschen
-    von der Mitte aus nach links/rechts verteilt; breite Einzelteile liegen
-    automatisch mittig.
+    Wichtig: Nicht mehr jede Lage grundsätzlich in Y mittig setzen.
+    Praxisregel:
+    - Untere/normale Lagen bleiben links/rechts kompakt und werden nur als Gruppe leicht zur Mitte korrigiert, wenn sie fast die ganze Breite belegen.
+    - Einzelne obere Restbunde werden mittig gesetzt.
+    - Breite Elemente/Bunde, die links/rechts nicht sinnvoll aufgeteilt werden können, werden mittig gesetzt.
+    - In X wird die Lage weiterhin als Gruppe mittig auf die nutzbare Pritschenlänge gelegt.
     """
     if placements_df.empty or platforms_df.empty:
         return placements_df
@@ -1257,16 +1334,13 @@ def center_placements_geometrically(placements_df: pd.DataFrame, platforms_df: p
     if 'Pritsche' not in result.columns:
         return result
 
-    # Nur sauber platzierte Zeilen ausrichten. Nicht-verladene Zeilen bleiben unverändert.
     numeric_cols = ['X_mm', 'Y_mm', 'Z_mm', 'Länge_mm', 'Breite_mm', 'Höhe_mm']
     for col in numeric_cols:
         if col in result.columns:
             result[col] = pd.to_numeric(result[col], errors='coerce')
 
-    platform_lookup = {
-        str(row.get('Pritsche', '')): row
-        for _, row in platforms_df.iterrows()
-    }
+    platform_lookup = {str(row.get('Pritsche', '')): row for _, row in platforms_df.iterrows()}
+    helper_types = {'Unterbau', 'Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz'}
 
     for platform_name, platform_row in platform_lookup.items():
         if not platform_name or platform_name == 'NICHT VERLADEN':
@@ -1292,8 +1366,16 @@ def center_placements_geometrically(placements_df: pd.DataFrame, platforms_df: p
         if not mask_platform.any():
             continue
 
-        # Je Lage mittig ausrichten. Eine Lage ist hier die gleiche Z-Position.
+        non_helper_mask = mask_platform & ~result.get('Typ', pd.Series(dtype=str)).astype(str).isin(helper_types)
         layer_keys = result.loc[mask_platform, 'Z_mm'].round(1).unique().tolist()
+        if not layer_keys:
+            continue
+        # Oberste echte Bauteil-/Bundlage. Hilfszeilen zählen nicht als obere Restlage.
+        if non_helper_mask.any():
+            top_layer_key = float(result.loc[non_helper_mask, 'Z_mm'].round(1).max())
+        else:
+            top_layer_key = float(max(layer_keys))
+
         for layer_key in layer_keys:
             layer_mask = mask_platform & result['Z_mm'].round(1).eq(layer_key)
             if not layer_mask.any():
@@ -1303,25 +1385,41 @@ def center_placements_geometrically(placements_df: pd.DataFrame, platforms_df: p
             x1 = (result.loc[layer_mask, 'X_mm'] + result.loc[layer_mask, 'Länge_mm']).max()
             y0 = result.loc[layer_mask, 'Y_mm'].min()
             y1 = (result.loc[layer_mask, 'Y_mm'] + result.loc[layer_mask, 'Breite_mm']).max()
-
             span_x = x1 - x0
             span_y = y1 - y0
 
+            # X: weiterhin als Lage mittig platzieren, damit die Last nicht ganz vorne/hinten klebt.
             if 0 < span_x <= eff_length:
                 shift_x = (eff_length - span_x) / 2 - x0
                 result.loc[layer_mask, 'X_mm'] = (result.loc[layer_mask, 'X_mm'] + shift_x).round(1)
 
-            if 0 < span_y <= platform_width:
+            # Y: nicht jede Lage mittig machen. Nur vollständige Breitenlagen leicht zentrieren,
+            # breite Einzelteile mittig setzen oder die oberste Restlage mittig setzen.
+            real_rows = result.loc[layer_mask & ~result.get('Typ', pd.Series(dtype=str)).astype(str).isin(helper_types)]
+            real_count = len(real_rows)
+            is_top_real_layer = abs(float(layer_key) - top_layer_key) < 0.1
+            almost_full_width = span_y >= platform_width * 0.90
+            has_wide_single = False
+            if real_count == 1:
+                only_width = safe_number(real_rows.iloc[0].get('Breite_mm'), 0.0)
+                has_wide_single = only_width >= platform_width * 0.60
+            center_y = bool(almost_full_width or has_wide_single or (is_top_real_layer and span_y < platform_width * 0.90))
+
+            if center_y and 0 < span_y <= platform_width:
                 shift_y = (platform_width - span_y) / 2 - y0
                 result.loc[layer_mask, 'Y_mm'] = (result.loc[layer_mask, 'Y_mm'] + shift_y).round(1)
+            else:
+                # Normale Lage: seitlich kompakt lassen. Wenn sie durch alte Verschiebung nicht links/rechts sitzt,
+                # auf Y=0 zurücknehmen, damit nicht jede Lage künstlich in der Mitte hängt.
+                if y0 > 0 and span_y < platform_width * 0.75:
+                    result.loc[layer_mask, 'Y_mm'] = (result.loc[layer_mask, 'Y_mm'] - y0).round(1)
 
             if 'Ebene' in result.columns:
                 result.loc[layer_mask, 'Ebene'] = result.loc[layer_mask, 'Ebene'].astype(str).apply(
-                    lambda v: v if 'mittig' in v.lower() else f'{v} / geometrisch mittig'
+                    lambda v: v if 'ruhig ausgerichtet' in v.lower() else f'{v} / ruhig ausgerichtet'
                 )
 
     return result
-
 
 def invert_vertical_order_by_platform(placements_df: pd.DataFrame, platforms_df: pd.DataFrame) -> pd.DataFrame:
     """Spiegelt die Z-Reihenfolge je belegter Pritsche.
@@ -3818,16 +3916,25 @@ def render_analysis_module(uploaded_file) -> None:
             )
 
 
-def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=None) -> None:
+def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=None, parts_excel_file=None) -> None:
     st.header('Verladeplanung')
 
-    if uploaded_file is None:
-        st.info('Bitte laden Sie links eine BVX-Datei für die Verladeplanung hoch.')
+    if uploaded_file is None and parts_excel_file is None:
+        st.info('Bitte laden Sie links eine BVX-Datei oder eine Bauteile-Excel für die Verladeplanung hoch.')
         st.markdown('''
         Die Verladeplanung ist getrennt von der normalen BVX-Auswertung aufgebaut.
         Sie arbeitet mit Bauteilen, Verladeeinheiten, Bunden, Fuhrenoptionen, Pritschen und Positionen.
+
+        Falls keine BVX vorhanden ist, kann eine Excel-Datei mit Blatt **Bauteile** geladen werden.
         ''')
         return
+
+    source_name = uploaded_file.name if uploaded_file is not None else parts_excel_file.name
+    parsed_result = None
+    if uploaded_file is not None:
+        content = read_uploaded_text(uploaded_file)
+        parser = BVXParser()
+        parsed_result = parser.parse(content, uploaded_file.name)
 
     options_df, pritschen_df, standards, config_messages = read_transport_config_excel(transport_excel_file)
     for msg in config_messages:
@@ -3838,11 +3945,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
     else:
         st.info('Noch keine Excel-Stammdaten geladen. Es werden nur Beispielwerte verwendet.')
 
-    content = read_uploaded_text(uploaded_file)
-    parser = BVXParser()
-    result = parser.parse(content, uploaded_file.name)
-
-    st.subheader('1. Grunddaten aus BVX und Excel')
+    st.subheader('1. Grunddaten aus BVX / Bauteile-Excel und Pritschen-Excel')
     default_density = safe_number(standards.get('Holzdichte'), 500.0)
     default_bundle_weight = safe_number(standards.get('Max_Bundgewicht'), 1000.0)
     default_base_wood = safe_number(standards.get('Standard_Kantholz_erste_Lage'), 80.0)
@@ -3855,7 +3958,16 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
     max_bundle_weight = col2.number_input('Max. Bundgewicht kg', min_value=100.0, max_value=5000.0, value=float(default_bundle_weight), step=50.0)
     use_bundles = col3.checkbox('Bunde automatisch bilden', value=True)
 
-    parts_df = parts_to_dataframe(result.parts, density_kg_m3=density)
+    if parsed_result is not None:
+        parts_df = parts_to_dataframe(parsed_result.parts, density_kg_m3=density)
+    else:
+        parts_df, parts_messages = read_parts_excel_to_dataframe(parts_excel_file, density_kg_m3=density)
+        for msg in parts_messages:
+            st.info(msg)
+
+    if parts_df.empty:
+        st.error('Keine Bauteile vorhanden. Bitte BVX oder Bauteile-Excel prüfen.')
+        return
 
     col1, col2, col3, col4 = st.columns(4)
     col1.metric('Bauteile', len(parts_df))
@@ -4019,7 +4131,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
         pritschen_edit['Einlage_allgemein_mm'] = float(general_spacer_height)
 
     st.subheader('6. Platzierung / Automatik')
-    st.caption('Geometrisch mittige Ausrichtung ist fest aktiv. Die fertige Lage wird in X/Y mittig auf der Pritsche verschoben. Keine Gewichts-/Schwerpunktoptimierung. Verladelogik bleibt ruhig: saubere Bunde/Lagen vor Lochfüllung; Unterbau nur als letzte Kontroll-/Notlösung.')
+    st.caption('Ruhige Ausrichtung ist fest aktiv: normale Lagen werden links/rechts kompakt gehalten, fast volle Breitenlagen leicht zentriert und nur obere Restbunde bzw. breite Sonderteile werden mittig gesetzt. Keine chaotische Lochfüllung; Unterbau nur als letzte Kontroll-/Notlösung.')
     col1, col2, col3, col4 = st.columns(4)
     allow_beside = col1.checkbox('Nebeneinander erlauben', value=True)
     allow_stack = col2.checkbox('Übereinander erlauben', value=True)
@@ -4212,14 +4324,14 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                 platforms_used_df,
                 edited_summary_df,
                 warnings_plan_df,
-                project_name=uploaded_file.name,
+                project_name=source_name,
                 project_meta=project_meta,
                 logo_bytes=logo_bytes,
             )
             st.download_button(
                 label='A3-Pritschenplan als PDF herunterladen',
                 data=pdf_data,
-                file_name=f"{uploaded_file.name.replace('.bvx', '').replace('.BVX', '')}_pritschenplan_a3.pdf",
+                file_name=f"{source_name.replace('.bvx', '').replace('.BVX', '').replace('.xlsx', '')}_pritschenplan_a3.pdf",
                 mime='application/pdf',
                 type='primary',
             )
@@ -4247,7 +4359,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
         st.download_button(
             label='Excel-Begleitdatei herunterladen',
             data=excel_data,
-            file_name=f"{uploaded_file.name.replace('.bvx', '').replace('.BVX', '')}_verladeplan_bsd.xlsx",
+            file_name=f"{source_name.replace('.bvx', '').replace('.BVX', '').replace('.xlsx', '')}_verladeplan_bsd.xlsx",
             mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         )
 
@@ -4293,6 +4405,7 @@ def main():
                 help='Normale BVX-Auswertung mit Operationen und Export.'
             )
             loading_file = None
+            parts_excel_file = None
             logo_file = None
             if analysis_file:
                 st.success(f'{analysis_file.name}')
@@ -4303,6 +4416,12 @@ def main():
                 type=['bvx', 'BVX'],
                 key='loading_upload',
                 help='Eigenständiger Import für Verladeplanung.'
+            )
+            parts_excel_file = st.file_uploader(
+                'Bauteile-Excel laden, falls keine BVX vorhanden ist',
+                type=['xlsx'],
+                key='parts_excel_upload',
+                help='Excel mit Blatt Bauteile: Länge_mm, Breite_mm, Höhe_mm usw.'
             )
             transport_excel_file = st.file_uploader(
                 'Excel Pritschen/Fuhren laden',
@@ -4319,6 +4438,8 @@ def main():
             analysis_file = None
             if loading_file:
                 st.success(f'BVX: {loading_file.name}')
+            if parts_excel_file and not loading_file:
+                st.success(f'Bauteile-Excel: {parts_excel_file.name}')
             if transport_excel_file:
                 st.success(f'Excel: {transport_excel_file.name}')
             if logo_file:
@@ -4327,7 +4448,7 @@ def main():
     if module == 'BVX Auswertung':
         render_analysis_module(analysis_file)
     else:
-        render_loading_module(loading_file, transport_excel_file, logo_file)
+        render_loading_module(loading_file, transport_excel_file, logo_file, parts_excel_file)
 
 
 if __name__ == '__main__':
