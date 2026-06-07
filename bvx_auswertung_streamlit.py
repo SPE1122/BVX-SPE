@@ -1418,36 +1418,54 @@ def create_variant_a_loading_plan(
             trip_platforms['Einlage_zwischen_Lagen_mm'] = layer_default
             trip_platforms['Einlage_allgemein_mm'] = general_default
 
-            placements_try, summary_try = create_loading_plan(
-                remaining,
-                trip_platforms,
-                base_wood_height=base_default,
-                layer_spacer_height=layer_default,
-                gap_length=gap_default,
-                allow_beside=allow_beside,
-                allow_stack=allow_stack,
-                allow_rotation=allow_rotation,
-            )
+            # Die globale Sortierreihenfolge bestimmt den fortlaufenden Block.
+            # Für die physische Stapelung wird dieser Block umgekehrt platziert:
+            # bei aufsteigender Sortierung liegt damit die kleinste Nummer oben
+            # und die höchste Nummer unten. Beispiel: 1 oben, 10 unten;
+            # Pritsche 2: 11 oben, 20 unten.
+            best_prefix = None
+            max_try = len(remaining)
+            for n in range(1, max_try + 1):
+                prefix_df = remaining.iloc[:n].copy().reset_index(drop=True)
+                placement_input = prefix_df.iloc[::-1].reset_index(drop=True)
+                placements_try, _summary_try = create_loading_plan(
+                    placement_input,
+                    trip_platforms,
+                    base_wood_height=base_default,
+                    layer_spacer_height=layer_default,
+                    gap_length=gap_default,
+                    allow_beside=allow_beside,
+                    allow_stack=allow_stack,
+                    allow_rotation=allow_rotation,
+                )
+                if placements_try.empty:
+                    break
+                loaded_try_all = placements_try[placements_try['Pritsche'] != 'NICHT VERLADEN'].copy()
+                wanted_ids = prefix_df['Einheit_ID'].astype(str).tolist()
+                loaded_set = set(loaded_try_all['Einheit_ID'].dropna().astype(str).tolist())
+                # Nur wenn der ganze fortlaufende Anfangsblock passt, darf er verwendet werden.
+                if not set(wanted_ids).issubset(loaded_set):
+                    break
+                loaded_try = loaded_try_all[loaded_try_all['Einheit_ID'].astype(str).isin(wanted_ids)].copy()
+                summary_prefix = recompute_summary_from_placements(loaded_try, trip_platforms)
+                loaded_weight = float(loaded_try['Gewicht_kg'].sum())
+                best_prefix = {
+                    'loaded_ids': wanted_ids,
+                    'loaded_try': loaded_try,
+                    'summary_prefix': summary_prefix,
+                    'loaded_weight': loaded_weight,
+                }
 
-            if placements_try.empty:
+            if best_prefix is None:
                 continue
 
-            loaded_try_all = placements_try[placements_try['Pritsche'] != 'NICHT VERLADEN'].copy()
-            prefix_ids = loaded_prefix_ids(remaining, loaded_try_all)
-            if not prefix_ids:
-                continue
-
-            # Nur der fortlaufende Block wird übernommen. Spätere Einheiten, die
-            # zufällig noch Platz hätten, bleiben für die nächste Pritsche/Fuhre.
-            loaded_try = loaded_try_all[loaded_try_all['Einheit_ID'].astype(str).isin(prefix_ids)].copy()
-            if loaded_try.empty:
-                continue
-
-            summary_prefix = recompute_summary_from_placements(loaded_try, trip_platforms)
-            loaded_weight = float(loaded_try['Gewicht_kg'].sum())
+            prefix_ids = best_prefix['loaded_ids']
+            loaded_try = best_prefix['loaded_try']
+            summary_prefix = best_prefix['summary_prefix']
+            loaded_weight = float(best_prefix['loaded_weight'])
             used_platforms = int(loaded_try['Pritsche'].nunique())
             priority = safe_number(option_row.get('Priorität'), 999)
-            # Hauptkriterium: möglichst viele Einheiten im fortlaufenden Block.
+            # Hauptkriterium: möglichst viele fortlaufende Einheiten.
             # Danach Gewichtsausnutzung. Bei Gleichstand bleibt die höhere Priorität besser.
             score = (len(prefix_ids) * 1000000.0) + loaded_weight - (priority * 10.0) - (used_platforms * 0.01)
             if best_try is None or score > best_try['score']:
@@ -2600,11 +2618,10 @@ def _position_slot_for_bsd(
 
     Fachregel für die Praxis:
     - Ein Bund, der die Mitte in X-Richtung berührt/überdeckt, wird im BSD immer
-      unter "Vorne" geführt. Dadurch erscheint ein mittig liegender Bund nicht
-      zufällig einmal vorne und einmal hinten.
-    - Ein Bund, der die Mitte in Y-Richtung berührt/überdeckt, wird im BSD unter
-      "links" geführt. Die Darstellung bleibt dadurch eindeutig.
-    - Für normale Einzelteile bleibt die Orientierung über den Mittelpunkt gültig.
+      unter "Vorne" geführt.
+    - Links/Rechts wird NICHT automatisch nach "Mitte = links" vergeben.
+      Entscheidend ist der Mittelpunkt des Bundes/Elements relativ zur
+      Pritschenmitte. Dadurch wird die Verladung nicht komplett links angezeigt.
     """
     x0 = safe_number(row.get('X_mm'))
     y0 = safe_number(row.get('Y_mm'))
@@ -2628,9 +2645,7 @@ def _position_slot_for_bsd(
     else:
         front_back = 'Vorne' if x_mid <= x_center else 'Hinten'
 
-    if typ == 'Bund' and crosses_y_center:
-        left_right = 'links'
-    elif left_at_y_max:
+    if left_at_y_max:
         left_right = 'links' if y_mid >= y_center else 'rechts'
     else:
         left_right = 'links' if y_mid <= y_center else 'rechts'
@@ -2813,6 +2828,9 @@ def create_bsd_matrix_for_platform(
 
         # Bund: jedes enthaltene Bauteil als eigene BSD-Zeile, Einlagen dazwischen.
         labels = (labels + [labels[-1]] * count)[:count]
+        # Für aufsteigende Sortierung gilt: niedrigste Nummer oben.
+        # Da die Z-Position unten beginnt, wird die Reihenfolge intern für die physische Darstellung umgedreht.
+        labels = list(reversed(labels))
         internal_spacer = safe_number(row.get('Einlage_allgemein_mm'), platform_general_spacer)
         # Bundeinlage/Lagenholz wird NICHT innerhalb eines Bundes verwendet.
         # Innerhalb eines Bundes nur dann Einlage, wenn "Einlage allgemein" > 0 ist.
@@ -3010,7 +3028,8 @@ def _pdf_label_lines(row: pd.Series, view: str) -> List[str]:
         if labels:
             if view == 'top':
                 # Draufsicht: sichtbar ist die oberste Lage im Bund.
-                return [labels[-1]]
+                # Fachregel: bei aufsteigender Sortierung soll die kleinste Nummer oben liegen.
+                return [labels[0]]
             return labels
     return [str(label).replace('<br>', ' ').strip()]
 
@@ -4029,7 +4048,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
             project_meta=project_meta,
         )
         st.markdown('**Ladeplan BSD je Pritsche**')
-        st.caption('Die Tabelle wird automatisch für jede belegte Pritsche erstellt. Grundlage ist die vorhandene Platzierung. Fachregel: mittig liegende Bunde werden im BSD immer vorne geführt; bei Mitte links/rechts werden sie links geführt.')
+        st.caption('Die Tabelle wird automatisch für jede belegte Pritsche erstellt. Grundlage ist die vorhandene Platzierung. Fachregel: mittig liegende Bunde werden im BSD immer vorne geführt; links/rechts wird über die Y-Mitte entschieden.')
 
         if bsd_header_df.empty or bsd_matrix_df.empty:
             st.warning('Für die aktuelle Verladung wurde kein Ladeplan BSD erzeugt.')
