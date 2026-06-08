@@ -1669,9 +1669,10 @@ def center_placements_geometrically(placements_df: pd.DataFrame, platforms_df: p
             span_x = x1 - x0
             span_y = y1 - y0
 
-            # X wurde bereits global als ganze Ladung zentriert. Je-Lage-X-Verschiebung
-            # bleibt bewusst aus, damit unten keine unnötigen Löcher und oben keine
-            # scheinbaren Überschneidungen entstehen.
+            # X wurde bereits global als ganze Ladung zentriert. Dadurch entsteht die
+            # Verladung in der Länge ruhiger von der Mitte aus und nicht einseitig bündig.
+            # Je-Lage-X-Verschiebung bleibt bewusst aus, damit unten keine unnötigen
+            # Löcher und oben keine scheinbaren Überschneidungen entstehen.
 
             # Y: nicht jede Lage mittig machen. Nur vollständige Breitenlagen leicht zentrieren,
             # breite Einzelteile mittig setzen oder die oberste Restlage mittig setzen.
@@ -3956,6 +3957,37 @@ def _pdf_draw_underbau_blocks(c, rx: float, ry: float, rw: float, rh: float, vie
         c.drawCentredString(rx + rw / 2, ry + rh / 2 - 1.4, str(label).replace('Unterbau', 'UB')[:14])
     c.restoreState()
 
+def _pdf_draw_view_orientation_helpers(c, ox: float, oy: float, draw_w: float, draw_h: float, view: str, front_at_x_max: bool, left_at_y_max: bool) -> None:
+    """Kleine Bezugsmarken, damit Seiten-/Vorder-/Rückansicht besser zusammen gelesen werden können."""
+    from reportlab.lib import colors
+    c.saveState()
+    c.setStrokeColor(colors.grey)
+    c.setFillColor(colors.black)
+    c.setLineWidth(0.35)
+    c.setDash(2, 2)
+    # Mittellinie als Bezug
+    if view in ('top', 'side', 'side_left', 'side_right'):
+        c.line(ox + draw_w / 2.0, oy, ox + draw_w / 2.0, oy + draw_h)
+    elif view in ('front', 'back'):
+        c.line(ox + draw_w / 2.0, oy, ox + draw_w / 2.0, oy + draw_h)
+    c.setDash()
+    c.setFont('Helvetica', 5.8)
+
+    if view in ('top', 'side', 'side_left', 'side_right'):
+        left_lbl = 'Hinten' if front_at_x_max else 'Vorne'
+        right_lbl = 'Vorne' if front_at_x_max else 'Hinten'
+        c.drawString(ox, oy + draw_h + 2.5, left_lbl)
+        c.drawRightString(ox + draw_w, oy + draw_h + 2.5, right_lbl)
+        c.drawCentredString(ox + draw_w / 2.0, oy + draw_h + 2.5, 'Mitte X')
+    if view in ('front', 'back'):
+        left_lbl = 'Rechts' if left_at_y_max else 'Links'
+        right_lbl = 'Links' if left_at_y_max else 'Rechts'
+        c.drawString(ox, oy + draw_h + 2.5, left_lbl)
+        c.drawRightString(ox + draw_w, oy + draw_h + 2.5, right_lbl)
+        c.drawCentredString(ox + draw_w / 2.0, oy + draw_h + 2.5, 'Mitte Y')
+    c.restoreState()
+
+
 def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y: float, w: float, h: float, view: str, title: str, front_at_x_max: bool = False, left_at_y_max: bool = False) -> None:
     """Zeichnet eine PDF-Ansicht mit Pritschen- und Ladungsabmessungen.
 
@@ -3985,9 +4017,11 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
     used_hei = safe_number((rows['Z_mm'] + rows['Höhe_mm']).max(), 0.0) if not rows.empty else 0.0
 
     c.setStrokeColor(colors.black)
+    c.setFillColor(colors.white)
+    c.rect(x - 1, y + h + 10, min(max(w, 90), 180), 11, stroke=0, fill=1)
     c.setFillColor(colors.black)
-    c.setFont('Helvetica-Bold', 8.5)
-    c.drawString(x, y + h + 16, title)
+    c.setFont('Helvetica-Bold', 9.4)
+    c.drawString(x, y + h + 13, title)
 
     if view == 'top':
         data_w, data_h = max(eff_length, 1), max(width, 1)
@@ -4012,9 +4046,10 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
     c.setStrokeColor(colors.black)
     c.setLineWidth(0.85)
     c.rect(ox, oy, draw_w, draw_h, stroke=1, fill=0)
+    _pdf_draw_view_orientation_helpers(c, ox, oy, draw_w, draw_h, view, front_at_x_max, left_at_y_max)
 
     # Achsen- und Maßtexte mit Abstand, damit nichts in die Bauteile läuft.
-    c.setFont('Helvetica', 5.7)
+    c.setFont('Helvetica', 6.0)
     c.setFillColor(colors.black)
     c.drawString(ox, oy - 9, x_label)
     c.saveState()
@@ -4022,7 +4057,7 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
     c.rotate(90)
     c.drawString(0, 0, y_label)
     c.restoreState()
-    c.setFont('Helvetica', 5.5)
+    c.setFont('Helvetica', 6.0)
     c.drawString(ox, oy - 20, dim_line)
 
     # Maßlinie unten / links
@@ -4038,7 +4073,7 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
     c.restoreState()
 
     # Grenzwerte klein anschreiben
-    c.setFont('Helvetica', 5.0)
+    c.setFont('Helvetica', 5.4)
     c.drawRightString(ox + draw_w, oy - 10, f'{data_w:.0f}')
     c.drawString(ox - 2, oy + draw_h + 2, f'{data_h:.0f}')
 
@@ -4264,12 +4299,12 @@ def create_loading_pdf(
         for i, line in enumerate(hints):
             c.drawString(hint_x, hint_y - 14 - i * 12, line)
 
-        # Zeichnungsbereiche: Vorder- und Rückansicht stehen untereinander, damit sie breiter werden.
-        _pdf_draw_view(c, placements_df, platform, margin, 395, 700, 220, 'side_left', 'Linke Seitenansicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max)
-        _pdf_draw_view(c, placements_df, platform, margin, 165, 700, 215, 'side_right', 'Rechte Seitenansicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max)
-        _pdf_draw_view(c, placements_df, platform, margin + 735, 390, 340, 190, 'back', 'Rückansicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max)
-        _pdf_draw_view(c, placements_df, platform, margin + 735, 165, 340, 190, 'front', 'Vorderansicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max)
-        _pdf_draw_view(c, placements_df, platform, margin, 25, 1080, 115, 'top', 'Draufsicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max)
+        # Zeichnungsbereiche: mehr Bezug zwischen Seiten- und Vorder/Rückansicht
+        _pdf_draw_view(c, placements_df, platform, margin, 395, 710, 220, 'side_left', 'Linke Seitenansicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max)
+        _pdf_draw_view(c, placements_df, platform, margin, 155, 710, 220, 'side_right', 'Rechte Seitenansicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max)
+        _pdf_draw_view(c, placements_df, platform, margin + 745, 395, 330, 200, 'back', 'Rückansicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max)
+        _pdf_draw_view(c, placements_df, platform, margin + 745, 155, 330, 200, 'front', 'Vorderansicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max)
+        _pdf_draw_view(c, placements_df, platform, margin, 20, 1080, 120, 'top', 'Draufsicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max)
 
         # Qualitätssicherung kompakt oben rechts, getrennt vom Infofeld.
         c.setStrokeColor(colors.black)
