@@ -1917,7 +1917,7 @@ def create_variant_a_loading_plan(
     same_profile: bool = False,
     label_attr: str = 'Bauteilnummer',
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """V21: geprüfte Block-Suche pro Pritsche mit Bundbildung erst nach gültigem Block.
+    """V22: geprüfte Block-Suche pro Pritsche mit getrennter Sortier- und Anzeige-/Stapelrichtung.
 
     Neue Arbeitsweise:
     1. Bauteile werden global sortiert.
@@ -2055,7 +2055,7 @@ def create_variant_a_loading_plan(
     def _find_max_part_block_for_platform(parts_df: pd.DataFrame, platform_row: pd.Series, unit_start: int) -> Dict[str, Any]:
         """Sucht den grössten gültigen, fortlaufenden Bauteilblock für genau diese Pritsche.
 
-        V21-Änderung:
+        V21/V22-Änderung:
         Ein früher Kandidat darf fehlschlagen, ohne dass die Suche sofort abbricht.
         Grund: Durch einen zusätzlichen Bauteil kann sich die Bundbildung ändern; dadurch kann
         ein grösserer Block wieder sauberer packbar sein als ein kleiner Zwischenkandidat.
@@ -3549,8 +3549,11 @@ def create_bsd_matrix_for_platform(
 
         # Bund: jedes enthaltene Bauteil als eigene BSD-Zeile, Einlagen dazwischen.
         labels = (labels + [labels[-1]] * count)[:count]
-        # Die Reihenfolge innerhalb eines Bundes bleibt fix. Der Bund darf im BSD/PDF
-        # angezeigt, aber nicht intern neu sortiert werden.
+        # WICHTIG V22:
+        # Die Liste im Bund ist die logische Reihenfolge VON OBEN NACH UNTEN.
+        # Beim Zerlegen in einzelne Z-Lagen müssen wir aber von unten nach oben
+        # schreiben. Darum werden Labels und Einzelmaße hier nur für die Anzeige
+        # umgedreht. Die Bundbildung selbst bleibt unverändert und wird nicht neu sortiert.
         internal_spacer = safe_number(row.get('Einlage_allgemein_mm'), platform_general_spacer)
         # Bundeinlage/Lagenholz wird NICHT innerhalb eines Bundes verwendet.
         # Innerhalb eines Bundes nur dann Einlage, wenn "Einlage allgemein" > 0 ist.
@@ -3559,12 +3562,16 @@ def create_bsd_matrix_for_platform(
         part_heights = _split_bsd_number_list(row.get('Einzelhöhen_mm', ''), count, row['Höhe_mm'], internal_spacer)
         part_lengths = _split_bsd_number_list(row.get('Einzellängen_mm', ''), count, row['Länge_mm'], 0.0)
         part_widths = _split_bsd_number_list(row.get('Einzelbreiten_mm', ''), count, row['Breite_mm'], 0.0)
+        labels_bottom_to_top = list(reversed(labels))
+        part_heights_bottom_to_top = list(reversed(part_heights))
+        part_lengths_bottom_to_top = list(reversed(part_lengths))
+        part_widths_bottom_to_top = list(reversed(part_widths))
         part_weight = safe_number(row.get('Gewicht_kg')) / count if count else safe_number(row.get('Gewicht_kg'))
         z_cursor = safe_number(row.get('Z_mm'))
-        for i, label in enumerate(labels):
-            ph = safe_number(part_heights[i] if i < len(part_heights) else row['Höhe_mm'])
-            pl = safe_number(part_lengths[i] if i < len(part_lengths) else row['Länge_mm'])
-            pw = safe_number(part_widths[i] if i < len(part_widths) else row['Breite_mm'])
+        for i, label in enumerate(labels_bottom_to_top):
+            ph = safe_number(part_heights_bottom_to_top[i] if i < len(part_heights_bottom_to_top) else row['Höhe_mm'])
+            pl = safe_number(part_lengths_bottom_to_top[i] if i < len(part_lengths_bottom_to_top) else row['Länge_mm'])
+            pw = safe_number(part_widths_bottom_to_top[i] if i < len(part_widths_bottom_to_top) else row['Breite_mm'])
             remark = ''
             for slot in slots_for_row:
                 add_entry(z_cursor, slot, label, 'Bund-Bauteil', ph, pl, pw, part_weight, remark)
@@ -3754,9 +3761,12 @@ def _pdf_label_lines(row: pd.Series, view: str) -> List[str]:
         if labels:
             if view == 'top':
                 # Draufsicht: sichtbar ist die oberste Lage im Bund.
-                # Fachregel: bei aufsteigender Sortierung soll die kleinste Nummer oben liegen.
+                # Die Liste im Bund ist logisch von oben nach unten.
                 return [labels[0]]
-            return labels
+            # Die PDF-Funktion zeichnet mehrere Zeilen von unten nach oben.
+            # Damit die erste Nummer der Bundliste wirklich oben steht, wird nur
+            # die Anzeige-Liste gedreht. Die Bundlogik selbst bleibt unverändert.
+            return list(reversed(labels))
     return [str(label).replace('<br>', ' ').strip()]
 
 
@@ -4825,7 +4835,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
     units_df = units_preview_df.copy()
 
     st.subheader('5. Fuhrenoptionen und Pritschen aus Excel')
-    st.caption('V21: Pritsche für Pritsche. Pro Pritsche wird zuerst der maximale fortlaufende Bauteilblock gesucht, dann sortiert, dann werden daraus die Bunde gebildet. Physisch wird unten mit den höheren Nummern begonnen.')
+    st.caption('V22: Sortierung und Stapel-/Anzeige-Richtung sind getrennt. Die erste Nummer der sortierten Bundliste steht im Bund oben; physisch wird weiter von unten nach oben geladen.')
 
     fcol1, fcol2 = st.columns([1, 2])
     with fcol1:
