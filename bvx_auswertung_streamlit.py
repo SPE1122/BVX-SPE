@@ -1322,48 +1322,74 @@ def create_loading_plan(
 # V17: ruhiger Neuaufbau der Platzierlogik
 # -----------------------------------------------------------------------------
 def _clean_init_runtime_state(state: Dict[str, Any]) -> None:
-    """Initialisiert die einfachen Lagen-/Spurwerte für die V17-Logik."""
+    """Initialisiert die einfachen Lagen-/Spurwerte für die ruhige Verladelogik.
+
+    V24: links und rechts bekommen eigene Höhenentwicklung. Damit wird nicht mehr
+    künstlich versucht, die ganze Pritsche auf gleicher Lagehöhe zu halten.
+    """
+    base_z = float(state.get('base_wood_height', 0.0))
     state['_clean_center_y'] = float(state['Breite_mm']) / 2.0
     state['_clean_lane_x'] = {'left': 0.0, 'right': 0.0}
-    state['_clean_layer_z'] = float(state.get('base_wood_height', 0.0))
+    state['_clean_side_z'] = {'left': base_z, 'right': base_z}
+    state['_clean_side_layer_height'] = {'left': 0.0, 'right': 0.0}
+    state['_clean_side_layer_has_bundle'] = {'left': False, 'right': False}
+    state['_clean_layer_z'] = base_z
     state['_clean_layer_height'] = 0.0
     state['_clean_layer_has_bundle'] = False
     state['_clean_layer_units'] = 0
     state['_clean_side_toggle'] = 'left'
 
 
-def _clean_effective_spacer_for_new_layer(state: Dict[str, Any], unit: pd.Series) -> float:
-    """Bestimmt die Einlage zwischen fertiger Lage und nächster Lage."""
-    if float(state.get('_clean_layer_height', 0.0)) <= 0:
+def _clean_effective_spacer_for_side(state: Dict[str, Any], side: str, unit: pd.Series) -> float:
+    """Bestimmt die Einlage für einen einzelnen Seitenstapel."""
+    side_height = float(state.get('_clean_side_layer_height', {}).get(side, 0.0))
+    if side_height <= 0:
         return 0.0
-    current_has_bundle = bool(state.get('_clean_layer_has_bundle', False))
+    current_has_bundle = bool(state.get('_clean_side_layer_has_bundle', {}).get(side, False))
     next_is_bundle = str(unit.get('Typ', '')).strip() == 'Bund'
     if current_has_bundle or next_is_bundle:
         return float(state.get('layer_spacer_height', 0.0))
     return float(state.get('general_spacer_height', 0.0))
 
 
-def _clean_new_layer(state: Dict[str, Any], unit: pd.Series) -> bool:
-    """Startet eine neue Lage über der aktuellen Lage."""
-    if float(state.get('_clean_layer_height', 0.0)) <= 0:
-        return True
-    spacer = _clean_effective_spacer_for_new_layer(state, unit)
-    new_z = float(state['_clean_layer_z']) + float(state['_clean_layer_height']) + max(0.0, spacer)
+def _clean_start_new_side_layer(state: Dict[str, Any], side: str, unit: pd.Series) -> Optional[Tuple[float, float]]:
+    """Startet nur auf einer Seite eine neue Lage.
+
+    Rückgabe: (new_x, new_z) oder None wenn Höhe nicht mehr passt.
+    """
+    base_z = float(state.get('_clean_side_z', {}).get(side, state.get('base_wood_height', 0.0)))
+    base_h = float(state.get('_clean_side_layer_height', {}).get(side, 0.0))
+    spacer = _clean_effective_spacer_for_side(state, side, unit)
+    new_z = base_z + base_h + max(0.0, spacer)
     if new_z + float(unit['Höhe_mm']) > float(state['Max_Höhe_mm']):
-        return False
-    state['_clean_lane_x'] = {'left': 0.0, 'right': 0.0}
-    state['_clean_layer_z'] = new_z
-    state['_clean_layer_height'] = 0.0
-    state['_clean_layer_has_bundle'] = False
-    state['_clean_layer_units'] = 0
-    state['_clean_side_toggle'] = 'left'
-    state['current_x'] = 0.0
-    state['current_y'] = 0.0
-    state['current_z'] = new_z
-    state['row_max_width'] = 0.0
-    state['layer_max_height'] = 0.0
-    state['current_layer_has_bundle'] = False
-    return True
+        return None
+    return (0.0, new_z)
+
+
+def _clean_start_new_common_layer(state: Dict[str, Any], unit: pd.Series) -> Optional[Tuple[float, float]]:
+    """Startet für breite/mittige Einheiten eine gemeinsame neue Lage über beiden Seiten."""
+    left_top = float(state.get('_clean_side_z', {}).get('left', 0.0)) + float(state.get('_clean_side_layer_height', {}).get('left', 0.0))
+    right_top = float(state.get('_clean_side_z', {}).get('right', 0.0)) + float(state.get('_clean_side_layer_height', {}).get('right', 0.0))
+    next_is_bundle = str(unit.get('Typ', '')).strip() == 'Bund'
+    has_bundle = bool(state.get('_clean_side_layer_has_bundle', {}).get('left', False) or state.get('_clean_side_layer_has_bundle', {}).get('right', False) or next_is_bundle)
+    spacer = float(state.get('layer_spacer_height' if has_bundle else 'general_spacer_height', 0.0))
+    new_z = max(left_top, right_top) + max(0.0, spacer)
+    if new_z + float(unit['Höhe_mm']) > float(state['Max_Höhe_mm']):
+        return None
+    return (0.0, new_z)
+
+
+def _clean_sync_global_layer_fields(state: Dict[str, Any]) -> None:
+    """Hält alte Summary-Felder mit der neuen Seitenlogik synchron."""
+    left_z = float(state.get('_clean_side_z', {}).get('left', 0.0))
+    right_z = float(state.get('_clean_side_z', {}).get('right', 0.0))
+    left_h = float(state.get('_clean_side_layer_height', {}).get('left', 0.0))
+    right_h = float(state.get('_clean_side_layer_height', {}).get('right', 0.0))
+    state['_clean_layer_z'] = min(left_z, right_z)
+    state['_clean_layer_height'] = max(left_z + left_h, right_z + right_h) - state['_clean_layer_z']
+    state['_clean_layer_has_bundle'] = bool(state.get('_clean_side_layer_has_bundle', {}).get('left', False) or state.get('_clean_side_layer_has_bundle', {}).get('right', False))
+    state['layer_max_height'] = max(left_h, right_h)
+    state['current_layer_has_bundle'] = bool(state['_clean_layer_has_bundle'])
 
 
 def _clean_y_for_side(platform_width: float, item_width: float, side: str) -> float:
@@ -1378,75 +1404,96 @@ def _clean_try_place_on_current_layer(
     unit: pd.Series,
     allow_beside: bool,
     allow_rotation: bool,
+    allow_stack: bool = True,
 ) -> Optional[Dict[str, Any]]:
-    """Platziert eine Einheit auf der aktuellen Lage.
+    """Platziert eine Einheit mit unabhängigen Höhen links/rechts.
 
-    Praxislogik:
-    - Normale 1200er-Elemente laufen links/rechts von der Pritschenmitte weg.
-    - Breite Einheiten belegen die Mitte und beide Seiten.
-    - Es wird keine spätere Einheit vorgezogen und kein Bund aufgelöst.
+    V24:
+    - links und rechts dürfen eigene Lagenhöhen haben
+    - breite Einheiten werden als gemeinsame mittige Lage behandelt
+    - die Ladung wird in X später als ganzer Block mittig auf die Pritsche zentriert
     """
     height = float(unit['Höhe_mm'])
     weight = float(unit['Gewicht_kg'])
     platform_width = float(state['Breite_mm'])
-    z = float(state['_clean_layer_z'])
     center = platform_width / 2.0
 
-    best: Optional[Tuple[float, Dict[str, Any], Tuple[str, ...], float]] = None
+    best: Optional[Tuple[float, Dict[str, Any], Tuple[str, ...], float, Dict[str, Any]]] = None
 
     for use_length, use_width, rotation in _unit_orientations_for_state(state, unit, allow_rotation):
         if use_width > platform_width + 0.001:
             continue
 
-        # Breite Einheit: mittig führen und beide Seiten in X blockieren.
         wide = bool(use_width >= platform_width * 0.75 or use_width > center + 1.0)
         if wide:
-            x = max(float(state['_clean_lane_x']['left']), float(state['_clean_lane_x']['right']))
+            cur_x = max(float(state['_clean_lane_x']['left']), float(state['_clean_lane_x']['right']))
+            cur_z = max(float(state['_clean_side_z']['left']), float(state['_clean_side_z']['right']))
             y = max(0.0, (platform_width - use_width) / 2.0)
-            if can_place(state, x, y, z, use_length, use_width, height, weight):
-                # Kleine Bewertung: kurze X-Position und gute Breitenfüllung bevorzugen.
-                score = x * 1000.0 - use_width
+            candidates = []
+            if can_place(state, cur_x, y, cur_z, use_length, use_width, height, weight):
+                candidates.append((cur_x, cur_z, False))
+            if allow_stack:
+                new_common = _clean_start_new_common_layer(state, unit)
+                if new_common is not None:
+                    nx, nz = new_common
+                    if can_place(state, nx, y, nz, use_length, use_width, height, weight):
+                        candidates.append((nx, nz, True))
+            for x, z, new_layer in candidates:
+                score = z * 1000000.0 + x * 1000.0 - use_width
                 candidate = {
                     'x': x, 'y': y, 'z': z, 'length': use_length, 'width': use_width,
-                    'height': height, 'rotation': rotation, 'mode': 'breit/mittig'
+                    'height': height, 'rotation': rotation, 'mode': 'breit/mittig',
+                    'new_layer': new_layer, 'wide': True
                 }
+                updates = {'left': (x + use_length + float(state['gap_length']), z, height), 'right': (x + use_length + float(state['gap_length']), z, height)}
                 if best is None or score < best[0]:
-                    best = (score, candidate, ('left', 'right'), x + use_length + float(state['gap_length']))
+                    best = (score, candidate, ('left', 'right'), x + use_length + float(state['gap_length']), updates)
             continue
 
-        # Normale Einheit: links/rechts von der Mitte aus aufbauen.
         sides = ['left']
         if allow_beside:
             lx = float(state['_clean_lane_x']['left'])
             rx = float(state['_clean_lane_x']['right'])
             if abs(lx - rx) < 1.0:
-                # Bei Gleichstand alternieren, damit nicht alles auf eine Seite fällt.
                 first = str(state.get('_clean_side_toggle', 'left'))
                 sides = [first, 'right' if first == 'left' else 'left']
             elif lx < rx:
                 sides = ['left', 'right']
             else:
                 sides = ['right', 'left']
+
         for side in sides:
-            x = float(state['_clean_lane_x'][side])
             y = _clean_y_for_side(platform_width, use_width, side)
-            if can_place(state, x, y, z, use_length, use_width, height, weight):
-                # Bewertung: zuerst niedrige X-Position, dann Seitenausgleich.
+            side_x = float(state['_clean_lane_x'][side])
+            side_z = float(state['_clean_side_z'][side])
+            candidates = []
+            if can_place(state, side_x, y, side_z, use_length, use_width, height, weight):
+                candidates.append((side_x, side_z, False))
+            if allow_stack:
+                new_side = _clean_start_new_side_layer(state, side, unit)
+                if new_side is not None:
+                    nx, nz = new_side
+                    if can_place(state, nx, y, nz, use_length, use_width, height, weight):
+                        candidates.append((nx, nz, True))
+            for x, z, new_layer in candidates:
                 other = 'right' if side == 'left' else 'left'
                 after_x = x + use_length + float(state['gap_length'])
                 balance = abs(after_x - float(state['_clean_lane_x'][other]))
-                score = x * 1000.0 + balance
+                # Niedrige Z zuerst, dann kompakte X-Position.
+                score = z * 1000000.0 + x * 1000.0 + balance
                 candidate = {
                     'x': x, 'y': y, 'z': z, 'length': use_length, 'width': use_width,
-                    'height': height, 'rotation': rotation, 'mode': f'{side} / Lage verdichtet'
+                    'height': height, 'rotation': rotation, 'mode': f'{side} / unabhängige Stapelhöhe',
+                    'new_layer': new_layer, 'wide': False
                 }
+                updates = {side: (after_x, z, height)}
                 if best is None or score < best[0]:
-                    best = (score, candidate, (side,), after_x)
+                    best = (score, candidate, (side,), after_x, updates)
 
     if best is None:
         return None
 
-    _score, cand, affected_sides, new_lane_x = best
+    _score, cand, affected_sides, new_lane_x, side_updates = best
     state['current_z'] = cand['z']
     placement = commit_place(
         state,
@@ -1455,16 +1502,350 @@ def _clean_try_place_on_current_layer(
         cand['length'], cand['width'], cand['height'],
         cand['rotation'], cand['mode'],
     )
-    for side in affected_sides:
-        state['_clean_lane_x'][side] = max(float(state['_clean_lane_x'][side]), float(new_lane_x))
+
+    is_bundle = str(unit.get('Typ', '')).strip() == 'Bund'
+    for side, (after_x, z, h) in side_updates.items():
+        if cand.get('wide') and cand.get('new_layer'):
+            state['_clean_lane_x'][side] = after_x
+            state['_clean_side_z'][side] = z
+            state['_clean_side_layer_height'][side] = h
+            state['_clean_side_layer_has_bundle'][side] = is_bundle
+        elif cand.get('new_layer'):
+            state['_clean_lane_x'][side] = after_x
+            state['_clean_side_z'][side] = z
+            state['_clean_side_layer_height'][side] = h
+            state['_clean_side_layer_has_bundle'][side] = is_bundle
+        else:
+            state['_clean_lane_x'][side] = max(float(state['_clean_lane_x'][side]), after_x)
+            state['_clean_side_layer_height'][side] = max(float(state['_clean_side_layer_height'][side]), h)
+            state['_clean_side_layer_has_bundle'][side] = bool(state['_clean_side_layer_has_bundle'][side] or is_bundle)
+            # side_z bleibt auf derselben Lage
+
     if len(affected_sides) == 1:
         state['_clean_side_toggle'] = 'right' if affected_sides[0] == 'left' else 'left'
-    state['_clean_layer_height'] = max(float(state['_clean_layer_height']), cand['height'])
-    state['_clean_layer_has_bundle'] = bool(state.get('_clean_layer_has_bundle', False) or str(unit.get('Typ', '')).strip() == 'Bund')
+
     state['_clean_layer_units'] = int(state.get('_clean_layer_units', 0)) + 1
-    # Alte Felder synchron halten, damit Summary und nachgelagerte Funktionen stabil bleiben.
-    state['layer_max_height'] = max(float(state.get('layer_max_height', 0.0)), float(state['_clean_layer_height']))
+    _clean_sync_global_layer_fields(state)
+    return placement
+
+
+def _clean_place_unit(
+    state: Dict[str, Any],
+    unit: pd.Series,
+    allow_beside: bool,
+    allow_stack: bool,
+    allow_rotation: bool,
+) -> Optional[Dict[str, Any]]:
+    """Platziert eine Einheit direkt mit der neuen Seiten-/Stapel-Logik."""
+    return _clean_try_place_on_current_layer(state, unit, allow_beside, allow_rotation, allow_stack=allow_stack)
+
+
+def create_loading_plan(
+    units: pd.DataFrame,
+    platforms: pd.DataFrame,
+    base_wood_height: float,
+    layer_spacer_height: float,
+    gap_length: float,
+    allow_beside: bool,
+    allow_stack: bool,
+    allow_rotation: bool,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Greedy-Verladevorschlag für eine einzelne Fuhre."""
+    if units.empty or platforms.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    active_platforms = platforms[platforms['Freigabe'] == True].copy()
+    states = [init_platform_state(row, base_wood_height, layer_spacer_height, gap_length) for _, row in active_platforms.iterrows()]
+    not_loaded: List[Dict[str, Any]] = []
+
+    pending: List[pd.Series] = [row for _, row in units.iterrows()]
+
+    def append_not_loaded(unit: pd.Series) -> None:
+        not_loaded.append({
+            'Fuhre_Nr': None,
+            'Fuhrenoption': '',
+            'Pritschenname': '',
+            'Pritsche': 'NICHT VERLADEN',
+            'Einheit_ID': unit['Einheit_ID'],
+            'Typ': unit['Typ'],
+            'Anzahl_Bauteile': int(unit['Anzahl_Bauteile']),
+            'Bauteile': unit['Bauteile'],
+            'Bauteile_Liste': unit.get('Bauteile_Liste', unit.get('Bauteile', '')),
+            'Ansicht_Attribut': unit.get('Ansicht_Attribut', ''),
+            'Ansicht_Label': unit.get('Ansicht_Label', unit.get('Einheit_ID', '')),
+            'Ansicht_Liste': unit.get('Ansicht_Liste', unit.get('Ansicht_Label', '')),
+            'Einzellängen_mm': unit.get('Einzellängen_mm', ''),
+            'Einzelbreiten_mm': unit.get('Einzelbreiten_mm', ''),
+            'Einzelhöhen_mm': unit.get('Einzelhöhen_mm', ''),
+            'Einlage_allgemein_mm': safe_number(unit.get('Einlage_allgemein_mm'), 0.0),
+            'Bundeinlage_mm': safe_number(unit.get('Bundeinlage_mm'), 0.0),
+            'X_mm': None,
+            'Y_mm': None,
+            'Z_mm': None,
+            'Länge_mm': unit['Länge_mm'],
+            'Breite_mm': unit['Breite_mm'],
+            'Höhe_mm': unit['Höhe_mm'],
+            'Drehung': None,
+            'Ebene': 'nicht passend',
+            'Gewicht_kg': round(float(unit['Gewicht_kg']), 2),
+        })
+
+    while pending:
+        placed = False
+
+        # Ruhige Praxislogik:
+        # Keine aggressive Lückenfüllung mit späteren Einzelteilen/Bunden.
+        # Die Reihenfolge bleibt stabil; dadurch entstehen weniger chaotische Stapel
+        # und deutlich weniger künstlicher Unterbau.
+        unit = pending.pop(0)
+        for state in states:
+            result = try_place_unit(
+                state,
+                unit,
+                allow_beside=allow_beside,
+                allow_stack=allow_stack,
+                allow_rotation=allow_rotation,
+            )
+            if result is not None:
+                placed = True
+                break
+        if not placed:
+            append_not_loaded(unit)
+
+    placements = []
+    summary = []
+    for state in states:
+        placements.extend(state['placements'])
+        summary.append({
+            'Fuhre_Nr': state['Fuhre_Nr'],
+            'Fuhrenoption': state['Fuhrenoption'],
+            'Pritschenname': state['Pritschenname'],
+            'Pritsche': state['Pritsche'],
+            'Länge genutzt_mm': round(state['used_length'], 1),
+            'Breite genutzt_mm': round(state['used_width'], 1),
+            'Höhe genutzt_mm': round(state['used_height'], 1),
+            'Gewicht genutzt_kg': round(state['total_weight'], 2),
+            'Eigengewicht Pritsche_kg': round(state.get('Eigengewicht_Pritsche_kg', 0.0), 2),
+            'Gesamtgewicht inkl. Pritsche_kg': round(state['total_weight'] + state.get('Eigengewicht_Pritsche_kg', 0.0), 2),
+            'Max Länge effektiv_mm': round(state['Eff_Länge_mm'], 1),
+            'Max Breite_mm': round(state['Breite_mm'], 1),
+            'Max Höhe_mm': round(state['Max_Höhe_mm'], 1),
+            'Max Gewicht_kg': round(state['Max_Gewicht_kg'], 1),
+        })
+
+    placements.extend(not_loaded)
+    return pd.DataFrame(placements), pd.DataFrame(summary)
+
+
+
+# -----------------------------------------------------------------------------
+# V17: ruhiger Neuaufbau der Platzierlogik
+# -----------------------------------------------------------------------------
+def _clean_init_runtime_state(state: Dict[str, Any]) -> None:
+    """Initialisiert die einfachen Lagen-/Spurwerte für die ruhige Verladelogik.
+
+    V24: links und rechts bekommen eigene Höhenentwicklung. Damit wird nicht mehr
+    künstlich versucht, die ganze Pritsche auf gleicher Lagehöhe zu halten.
+    """
+    base_z = float(state.get('base_wood_height', 0.0))
+    state['_clean_center_y'] = float(state['Breite_mm']) / 2.0
+    state['_clean_lane_x'] = {'left': 0.0, 'right': 0.0}
+    state['_clean_side_z'] = {'left': base_z, 'right': base_z}
+    state['_clean_side_layer_height'] = {'left': 0.0, 'right': 0.0}
+    state['_clean_side_layer_has_bundle'] = {'left': False, 'right': False}
+    state['_clean_layer_z'] = base_z
+    state['_clean_layer_height'] = 0.0
+    state['_clean_layer_has_bundle'] = False
+    state['_clean_layer_units'] = 0
+    state['_clean_side_toggle'] = 'left'
+
+
+def _clean_effective_spacer_for_side(state: Dict[str, Any], side: str, unit: pd.Series) -> float:
+    """Bestimmt die Einlage für einen einzelnen Seitenstapel."""
+    side_height = float(state.get('_clean_side_layer_height', {}).get(side, 0.0))
+    if side_height <= 0:
+        return 0.0
+    current_has_bundle = bool(state.get('_clean_side_layer_has_bundle', {}).get(side, False))
+    next_is_bundle = str(unit.get('Typ', '')).strip() == 'Bund'
+    if current_has_bundle or next_is_bundle:
+        return float(state.get('layer_spacer_height', 0.0))
+    return float(state.get('general_spacer_height', 0.0))
+
+
+def _clean_start_new_side_layer(state: Dict[str, Any], side: str, unit: pd.Series) -> Optional[Tuple[float, float]]:
+    """Startet nur auf einer Seite eine neue Lage.
+
+    Rückgabe: (new_x, new_z) oder None wenn Höhe nicht mehr passt.
+    """
+    base_z = float(state.get('_clean_side_z', {}).get(side, state.get('base_wood_height', 0.0)))
+    base_h = float(state.get('_clean_side_layer_height', {}).get(side, 0.0))
+    spacer = _clean_effective_spacer_for_side(state, side, unit)
+    new_z = base_z + base_h + max(0.0, spacer)
+    if new_z + float(unit['Höhe_mm']) > float(state['Max_Höhe_mm']):
+        return None
+    return (0.0, new_z)
+
+
+def _clean_start_new_common_layer(state: Dict[str, Any], unit: pd.Series) -> Optional[Tuple[float, float]]:
+    """Startet für breite/mittige Einheiten eine gemeinsame neue Lage über beiden Seiten."""
+    left_top = float(state.get('_clean_side_z', {}).get('left', 0.0)) + float(state.get('_clean_side_layer_height', {}).get('left', 0.0))
+    right_top = float(state.get('_clean_side_z', {}).get('right', 0.0)) + float(state.get('_clean_side_layer_height', {}).get('right', 0.0))
+    next_is_bundle = str(unit.get('Typ', '')).strip() == 'Bund'
+    has_bundle = bool(state.get('_clean_side_layer_has_bundle', {}).get('left', False) or state.get('_clean_side_layer_has_bundle', {}).get('right', False) or next_is_bundle)
+    spacer = float(state.get('layer_spacer_height' if has_bundle else 'general_spacer_height', 0.0))
+    new_z = max(left_top, right_top) + max(0.0, spacer)
+    if new_z + float(unit['Höhe_mm']) > float(state['Max_Höhe_mm']):
+        return None
+    return (0.0, new_z)
+
+
+def _clean_sync_global_layer_fields(state: Dict[str, Any]) -> None:
+    """Hält alte Summary-Felder mit der neuen Seitenlogik synchron."""
+    left_z = float(state.get('_clean_side_z', {}).get('left', 0.0))
+    right_z = float(state.get('_clean_side_z', {}).get('right', 0.0))
+    left_h = float(state.get('_clean_side_layer_height', {}).get('left', 0.0))
+    right_h = float(state.get('_clean_side_layer_height', {}).get('right', 0.0))
+    state['_clean_layer_z'] = min(left_z, right_z)
+    state['_clean_layer_height'] = max(left_z + left_h, right_z + right_h) - state['_clean_layer_z']
+    state['_clean_layer_has_bundle'] = bool(state.get('_clean_side_layer_has_bundle', {}).get('left', False) or state.get('_clean_side_layer_has_bundle', {}).get('right', False))
+    state['layer_max_height'] = max(left_h, right_h)
     state['current_layer_has_bundle'] = bool(state['_clean_layer_has_bundle'])
+
+
+def _clean_y_for_side(platform_width: float, item_width: float, side: str) -> float:
+    center = platform_width / 2.0
+    if side == 'left':
+        return max(0.0, center - item_width)
+    return min(center, max(0.0, platform_width - item_width))
+
+
+def _clean_try_place_on_current_layer(
+    state: Dict[str, Any],
+    unit: pd.Series,
+    allow_beside: bool,
+    allow_rotation: bool,
+    allow_stack: bool = True,
+) -> Optional[Dict[str, Any]]:
+    """Platziert eine Einheit mit unabhängigen Höhen links/rechts.
+
+    V24:
+    - links und rechts dürfen eigene Lagenhöhen haben
+    - breite Einheiten werden als gemeinsame mittige Lage behandelt
+    - die Ladung wird in X später als ganzer Block mittig auf die Pritsche zentriert
+    """
+    height = float(unit['Höhe_mm'])
+    weight = float(unit['Gewicht_kg'])
+    platform_width = float(state['Breite_mm'])
+    center = platform_width / 2.0
+
+    best: Optional[Tuple[float, Dict[str, Any], Tuple[str, ...], float, Dict[str, Any]]] = None
+
+    for use_length, use_width, rotation in _unit_orientations_for_state(state, unit, allow_rotation):
+        if use_width > platform_width + 0.001:
+            continue
+
+        wide = bool(use_width >= platform_width * 0.75 or use_width > center + 1.0)
+        if wide:
+            cur_x = max(float(state['_clean_lane_x']['left']), float(state['_clean_lane_x']['right']))
+            cur_z = max(float(state['_clean_side_z']['left']), float(state['_clean_side_z']['right']))
+            y = max(0.0, (platform_width - use_width) / 2.0)
+            candidates = []
+            if can_place(state, cur_x, y, cur_z, use_length, use_width, height, weight):
+                candidates.append((cur_x, cur_z, False))
+            if allow_stack:
+                new_common = _clean_start_new_common_layer(state, unit)
+                if new_common is not None:
+                    nx, nz = new_common
+                    if can_place(state, nx, y, nz, use_length, use_width, height, weight):
+                        candidates.append((nx, nz, True))
+            for x, z, new_layer in candidates:
+                score = z * 1000000.0 + x * 1000.0 - use_width
+                candidate = {
+                    'x': x, 'y': y, 'z': z, 'length': use_length, 'width': use_width,
+                    'height': height, 'rotation': rotation, 'mode': 'breit/mittig',
+                    'new_layer': new_layer, 'wide': True
+                }
+                updates = {'left': (x + use_length + float(state['gap_length']), z, height), 'right': (x + use_length + float(state['gap_length']), z, height)}
+                if best is None or score < best[0]:
+                    best = (score, candidate, ('left', 'right'), x + use_length + float(state['gap_length']), updates)
+            continue
+
+        sides = ['left']
+        if allow_beside:
+            lx = float(state['_clean_lane_x']['left'])
+            rx = float(state['_clean_lane_x']['right'])
+            if abs(lx - rx) < 1.0:
+                first = str(state.get('_clean_side_toggle', 'left'))
+                sides = [first, 'right' if first == 'left' else 'left']
+            elif lx < rx:
+                sides = ['left', 'right']
+            else:
+                sides = ['right', 'left']
+
+        for side in sides:
+            y = _clean_y_for_side(platform_width, use_width, side)
+            side_x = float(state['_clean_lane_x'][side])
+            side_z = float(state['_clean_side_z'][side])
+            candidates = []
+            if can_place(state, side_x, y, side_z, use_length, use_width, height, weight):
+                candidates.append((side_x, side_z, False))
+            if allow_stack:
+                new_side = _clean_start_new_side_layer(state, side, unit)
+                if new_side is not None:
+                    nx, nz = new_side
+                    if can_place(state, nx, y, nz, use_length, use_width, height, weight):
+                        candidates.append((nx, nz, True))
+            for x, z, new_layer in candidates:
+                other = 'right' if side == 'left' else 'left'
+                after_x = x + use_length + float(state['gap_length'])
+                balance = abs(after_x - float(state['_clean_lane_x'][other]))
+                # Niedrige Z zuerst, dann kompakte X-Position.
+                score = z * 1000000.0 + x * 1000.0 + balance
+                candidate = {
+                    'x': x, 'y': y, 'z': z, 'length': use_length, 'width': use_width,
+                    'height': height, 'rotation': rotation, 'mode': f'{side} / unabhängige Stapelhöhe',
+                    'new_layer': new_layer, 'wide': False
+                }
+                updates = {side: (after_x, z, height)}
+                if best is None or score < best[0]:
+                    best = (score, candidate, (side,), after_x, updates)
+
+    if best is None:
+        return None
+
+    _score, cand, affected_sides, new_lane_x, side_updates = best
+    state['current_z'] = cand['z']
+    placement = commit_place(
+        state,
+        unit,
+        cand['x'], cand['y'], cand['z'],
+        cand['length'], cand['width'], cand['height'],
+        cand['rotation'], cand['mode'],
+    )
+
+    is_bundle = str(unit.get('Typ', '')).strip() == 'Bund'
+    for side, (after_x, z, h) in side_updates.items():
+        if cand.get('wide') and cand.get('new_layer'):
+            state['_clean_lane_x'][side] = after_x
+            state['_clean_side_z'][side] = z
+            state['_clean_side_layer_height'][side] = h
+            state['_clean_side_layer_has_bundle'][side] = is_bundle
+        elif cand.get('new_layer'):
+            state['_clean_lane_x'][side] = after_x
+            state['_clean_side_z'][side] = z
+            state['_clean_side_layer_height'][side] = h
+            state['_clean_side_layer_has_bundle'][side] = is_bundle
+        else:
+            state['_clean_lane_x'][side] = max(float(state['_clean_lane_x'][side]), after_x)
+            state['_clean_side_layer_height'][side] = max(float(state['_clean_side_layer_height'][side]), h)
+            state['_clean_side_layer_has_bundle'][side] = bool(state['_clean_side_layer_has_bundle'][side] or is_bundle)
+            # side_z bleibt auf derselben Lage
+
+    if len(affected_sides) == 1:
+        state['_clean_side_toggle'] = 'right' if affected_sides[0] == 'left' else 'left'
+
+    state['_clean_layer_units'] = int(state.get('_clean_layer_units', 0)) + 1
+    _clean_sync_global_layer_fields(state)
     return placement
 
 
@@ -4915,7 +5296,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
         pritschen_edit['Einlage_allgemein_mm'] = float(general_spacer_height)
 
     st.subheader('6. Platzierung / Automatik')
-    st.caption('Ruhige Ausrichtung ist fest aktiv: normale Lagen werden links/rechts kompakt gehalten, fast volle Breitenlagen leicht zentriert und nur obere Restbunde bzw. breite Sonderteile werden mittig gesetzt. Keine chaotische Lochfüllung; Unterbau nur als letzte Kontroll-/Notlösung.')
+    st.caption('Ruhige Ausrichtung ist fest aktiv: normale Stapel werden links/rechts kompakt gehalten, breite Sonderteile mittig gesetzt und die ganze Ladung in der Länge als Block mittig auf der Pritsche ausgerichtet. Links und rechts dürfen unterschiedliche Stapelhöhen haben. Keine chaotische Lochfüllung; Unterbau nur als letzte Kontroll-/Notlösung.')
     col1, col2, col3, col4 = st.columns(4)
     allow_beside = col1.checkbox('Nebeneinander erlauben', value=True)
     allow_stack = col2.checkbox('Übereinander erlauben', value=True)
