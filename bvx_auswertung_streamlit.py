@@ -893,8 +893,8 @@ def _part_display_label(row: pd.Series, label_attr: str) -> str:
 
 def build_loading_units(
     sorted_parts: pd.DataFrame,
-    use_bundles: bool,
     max_bundle_weight: float,
+    use_bundles: bool,
     bundle_spacer_height: float,
     general_spacer_height: float,
     same_height: bool,
@@ -903,11 +903,85 @@ def build_loading_units(
     same_profile: bool,
     label_attr: str = 'Bauteilnummer',
 ) -> pd.DataFrame:
-    """Erzeugt Verladeeinheiten: einzelnes Bauteil oder Bund."""
+    """Erzeugt Verladeeinheiten: einzelnes Bauteil oder Bund.
+
+    V29:
+    - Wenn ein gleichartiger Bund am Gewichtsende "unschön" abbrechen würde,
+      wird die letzte Bundgruppe lokal neu aufgeteilt.
+    - Ziel: weniger kleine Restbunde und weniger Löcher auf der Pritsche.
+    """
     if sorted_parts.empty:
         return pd.DataFrame()
 
     units: List[Dict[str, Any]] = []
+
+    def _rows_to_unit(bundle_rows: List[pd.Series]) -> Dict[str, Any]:
+        count = len(bundle_rows)
+        length = max(float(r['Länge_mm']) for r in bundle_rows)
+        width = max(float(r['Breite_mm']) for r in bundle_rows)
+        internal_spacer = general_spacer_height if general_spacer_height > 0 else 0.0
+        height = sum(float(r['Höhe_mm']) for r in bundle_rows) + max(0, count - 1) * internal_spacer
+        volume = sum(float(r['Volumen_m3']) for r in bundle_rows)
+        weight = sum(float(r['Gewicht_kg']) for r in bundle_rows)
+        part_labels = [str(r.get('Bauteilnummer') or r.get('Name')) for r in bundle_rows]
+        view_labels = [_part_display_label(r, label_attr) for r in bundle_rows]
+        view_list = '|'.join(view_labels)
+        if len(view_labels) <= 3:
+            view_label = ', '.join(view_labels)
+        else:
+            view_label = ', '.join(view_labels[:3]) + ' ...'
+        part_lengths = [str(float(r['Länge_mm'])) for r in bundle_rows]
+        part_widths = [str(float(r['Breite_mm'])) for r in bundle_rows]
+        part_heights = [str(float(r['Höhe_mm'])) for r in bundle_rows]
+        return {
+            'Einheit_ID': f'B{len(units) + 1:03d}',
+            'Typ': 'Bund' if count > 1 else 'Bauteil',
+            'Anzahl_Bauteile': count,
+            'Bauteile': ', '.join(part_labels),
+            'Bauteile_Liste': '|'.join(part_labels),
+            'Ansicht_Attribut': label_attr,
+            'Ansicht_Label': view_label,
+            'Ansicht_Liste': view_list,
+            'Einzellängen_mm': '|'.join(part_lengths),
+            'Einzelbreiten_mm': '|'.join(part_widths),
+            'Einzelhöhen_mm': '|'.join(part_heights),
+            'Einlage_allgemein_mm': float(general_spacer_height),
+            'Bundeinlage_mm': float(bundle_spacer_height),
+            'Länge_mm': length,
+            'Breite_mm': width,
+            'Höhe_mm': height,
+            'Volumen_m3': volume,
+            'Gewicht_kg': weight,
+            'Warnung': 'über max. Bundgewicht' if weight > max_bundle_weight else '',
+        }
+
+    def _flush_rows(bundle_rows: List[pd.Series]) -> None:
+        if not bundle_rows:
+            return
+        units.append(_rows_to_unit(bundle_rows))
+
+    def _best_local_split(rows: List[pd.Series]) -> Optional[Tuple[List[pd.Series], List[pd.Series]]]:
+        if len(rows) < 2:
+            return None
+        weights = [float(r['Gewicht_kg']) for r in rows]
+        best = None
+        total = len(rows)
+        for cut in range(1, total):
+            left = rows[:cut]
+            right = rows[cut:]
+            wl = sum(float(r['Gewicht_kg']) for r in left)
+            wr = sum(float(r['Gewicht_kg']) for r in right)
+            if wl > max_bundle_weight or wr > max_bundle_weight:
+                continue
+            # Möglichst ähnlich viele Bauteile und ähnliche Gewichte.
+            score = abs(len(left) - len(right)) * 100000 + abs(wl - wr)
+            # Kleine Restbunde vermeiden.
+            min_count = min(len(left), len(right))
+            if min_count == 1:
+                score += 50000
+            if best is None or score < best[0]:
+                best = (score, left, right)
+        return (best[1], best[2]) if best is not None else None
 
     if not use_bundles:
         for idx, row in sorted_parts.iterrows():
@@ -940,65 +1014,40 @@ def build_loading_units(
     current_weight = 0.0
     current_signature: Optional[Tuple[Any, ...]] = None
 
-    def flush_bundle():
-        if not current_rows:
-            return
-        count = len(current_rows)
-        length = max(float(r['Länge_mm']) for r in current_rows)
-        width = max(float(r['Breite_mm']) for r in current_rows)
-        internal_spacer = general_spacer_height if general_spacer_height > 0 else 0.0
-        height = sum(float(r['Höhe_mm']) for r in current_rows) + max(0, count - 1) * internal_spacer
-        volume = sum(float(r['Volumen_m3']) for r in current_rows)
-        weight = sum(float(r['Gewicht_kg']) for r in current_rows)
-        part_labels = [str(r.get('Bauteilnummer') or r.get('Name')) for r in current_rows]
-        view_labels = [_part_display_label(r, label_attr) for r in current_rows]
-        view_list = '|'.join(view_labels)
-        if len(view_labels) <= 3:
-            view_label = ', '.join(view_labels)
-        else:
-            view_label = ', '.join(view_labels[:3]) + ' ...'
-        part_lengths = [str(float(r['Länge_mm'])) for r in current_rows]
-        part_widths = [str(float(r['Breite_mm'])) for r in current_rows]
-        part_heights = [str(float(r['Höhe_mm'])) for r in current_rows]
-        units.append({
-            'Einheit_ID': f'B{len(units) + 1:03d}',
-            'Typ': 'Bund' if count > 1 else 'Bauteil',
-            'Anzahl_Bauteile': count,
-            'Bauteile': ', '.join(part_labels),
-            'Bauteile_Liste': '|'.join(part_labels),
-            'Ansicht_Attribut': label_attr,
-            'Ansicht_Label': view_label,
-            'Ansicht_Liste': view_list,
-            'Einzellängen_mm': '|'.join(part_lengths),
-            'Einzelbreiten_mm': '|'.join(part_widths),
-            'Einzelhöhen_mm': '|'.join(part_heights),
-            'Einlage_allgemein_mm': float(general_spacer_height),
-            'Bundeinlage_mm': float(bundle_spacer_height),
-            'Länge_mm': length,
-            'Breite_mm': width,
-            'Höhe_mm': height,
-            'Volumen_m3': volume,
-            'Gewicht_kg': weight,
-            'Warnung': 'über max. Bundgewicht' if weight > max_bundle_weight else '',
-        })
-
     for _, row in sorted_parts.iterrows():
         row_weight = float(row['Gewicht_kg'])
         row_signature = make_bundle_signature(row, same_height, same_width, same_quality, same_profile)
         signature_break = current_signature is not None and row_signature != current_signature
         weight_break = current_rows and (current_weight + row_weight > max_bundle_weight)
 
-        if signature_break or weight_break:
-            flush_bundle()
+        if signature_break:
+            _flush_rows(current_rows)
             current_rows = []
             current_weight = 0.0
             current_signature = None
+
+        elif weight_break:
+            # Gleichartige Gruppe lokal besser aufteilen, statt einen sehr kleinen Restbund zu erzeugen.
+            candidate_rows = list(current_rows) + [row]
+            split = _best_local_split(candidate_rows)
+            if split is not None:
+                left_rows, right_rows = split
+                _flush_rows(left_rows)
+                current_rows = list(right_rows)
+                current_weight = sum(float(r['Gewicht_kg']) for r in current_rows)
+                current_signature = row_signature if current_rows else None
+                continue
+            else:
+                _flush_rows(current_rows)
+                current_rows = []
+                current_weight = 0.0
+                current_signature = None
 
         current_rows.append(row)
         current_weight += row_weight
         current_signature = row_signature
 
-    flush_bundle()
+    _flush_rows(current_rows)
     return pd.DataFrame(units)
 
 
@@ -3545,13 +3594,22 @@ def calculate_underbau_rows_for_platform(
         below = rows[(rows['Z_mm'] + rows['Höhe_mm']) <= z - tolerance].copy()
         overlap_area = 0.0
         closest_top = base_height
+        overlap_rows = []
         for _, b in below.iterrows():
             ov = _rect_overlap_area(x, y, lx, by, safe_number(b.get('X_mm')), safe_number(b.get('Y_mm')), safe_number(b.get('Länge_mm')), safe_number(b.get('Breite_mm')))
             if ov <= 0:
                 continue
             overlap_area += ov
-            closest_top = max(closest_top, safe_number(b.get('Z_mm')) + safe_number(b.get('Höhe_mm')))
+            top_b = safe_number(b.get('Z_mm')) + safe_number(b.get('Höhe_mm'))
+            closest_top = max(closest_top, top_b)
+            overlap_rows.append((b, ov, top_b))
         support_ratio = min(1.0, overlap_area / footprint)
+
+        # Unterbau nur dann erzwingen, wenn auf der höchsten realen Auflageebene
+        # nicht genug tragende Fläche vorhanden ist. Das vermeidet falschen Unterbau
+        # bei Teilen/Bunden, die über die Y-Mitte spannen oder links/rechts real aufliegen.
+        top_overlap_area = sum(ov for _b, ov, top_b in overlap_rows if abs(top_b - closest_top) <= tolerance + 1e-6)
+        top_support_ratio = min(1.0, top_overlap_area / footprint) if footprint > 0 else 0.0
 
         free_gap = max(0.0, z - closest_top - max(0.0, expected_spacer))
         einheit_id = str(row.get('Einheit_ID', ''))
@@ -3564,7 +3622,7 @@ def calculate_underbau_rows_for_platform(
                 'Details': f'Auflage ca. {support_ratio*100:.0f}% < {min_support_ratio*100:.0f}% bei Z={z:.0f} mm',
             })
 
-        if free_gap >= min_underbau_height:
+        if free_gap >= min_underbau_height and top_support_ratio + 1e-6 < min_support_ratio:
             ub_h = round(free_gap, 1)
             ub_z = round(z - ub_h, 1)
             key = (round(x, 1), round(y, 1), round(ub_z, 1), round(lx, 1), round(by, 1), round(ub_h, 1))
