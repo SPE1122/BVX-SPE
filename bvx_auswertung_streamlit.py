@@ -1324,7 +1324,7 @@ def create_loading_plan(
 def _clean_init_runtime_state(state: Dict[str, Any]) -> None:
     """Initialisiert die einfachen Lagen-/Spurwerte für die ruhige Verladelogik.
 
-    V27: links und rechts bekommen eigene Höhenentwicklung. Damit wird nicht mehr
+    V28: links und rechts bekommen eigene Höhenentwicklung. Damit wird nicht mehr
     künstlich versucht, die ganze Pritsche auf gleicher Lagehöhe zu halten.
     """
     base_z = float(state.get('base_wood_height', 0.0))
@@ -1408,7 +1408,7 @@ def _clean_try_place_on_current_layer(
 ) -> Optional[Dict[str, Any]]:
     """Platziert eine Einheit mit unabhängigen Höhen links/rechts.
 
-    V27:
+    V28:
     - links und rechts dürfen eigene Lagenhöhen haben
     - breite Einheiten werden als gemeinsame mittige Lage behandelt
     - die Ladung wird in X später als ganzer Block mittig auf die Pritsche zentriert
@@ -1644,7 +1644,7 @@ def create_loading_plan(
 def _clean_init_runtime_state(state: Dict[str, Any]) -> None:
     """Initialisiert die einfachen Lagen-/Spurwerte für die ruhige Verladelogik.
 
-    V27: links und rechts bekommen eigene Höhenentwicklung. Damit wird nicht mehr
+    V28: links und rechts bekommen eigene Höhenentwicklung. Damit wird nicht mehr
     künstlich versucht, die ganze Pritsche auf gleicher Lagehöhe zu halten.
     """
     base_z = float(state.get('base_wood_height', 0.0))
@@ -1728,7 +1728,7 @@ def _clean_try_place_on_current_layer(
 ) -> Optional[Dict[str, Any]]:
     """Platziert eine Einheit mit unabhängigen Höhen links/rechts.
 
-    V27:
+    V28:
     - links und rechts dürfen eigene Lagenhöhen haben
     - breite Einheiten werden als gemeinsame mittige Lage behandelt
     - die Ladung wird in X später als ganzer Block mittig auf die Pritsche zentriert
@@ -2089,14 +2089,87 @@ def center_placements_geometrically(placements_df: pd.DataFrame, platforms_df: p
 
 
 def center_length_groups_from_platform_center(placements_df: pd.DataFrame, platforms_df: pd.DataFrame) -> pd.DataFrame:
-    """V27: Keine einzelne Lage mehr separat in X mittig schieben.
+    """Richtet Stapelgruppen in X wieder von der Pritschenmitte aus.
 
-    Die ganze Ladung wird bereits in `center_placements_geometrically` als Block
-    auf die Pritschenmitte gesetzt. Einzelne Lagen separat zu zentrieren hat das
-    oberste Bund optisch über andere Lagen geschoben und im Seitenplan wie eine
-    Überlappung wirken lassen.
+    V28:
+    - Die Ladung wird in der Länge nicht an einer Stirnseite bündig aufgebaut.
+    - Jede echte Stapelgruppe wird in X um die Pritschenmitte gesetzt.
+    - Seitenansichten werden danach seitenbezogen gefiltert, damit linke und
+      rechte Stapel nicht mehr optisch ineinanderlaufen.
     """
-    return placements_df.copy() if placements_df is not None else pd.DataFrame()
+    if placements_df is None or placements_df.empty or platforms_df is None or platforms_df.empty:
+        return placements_df.copy() if placements_df is not None else pd.DataFrame()
+
+    result = placements_df.copy()
+    for col in ['X_mm', 'Y_mm', 'Z_mm', 'Länge_mm', 'Breite_mm']:
+        if col in result.columns:
+            result[col] = pd.to_numeric(result[col], errors='coerce')
+
+    helper_types = {'Unterbau', 'Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz'}
+    platform_lookup = {str(r.get('Pritsche', '')): r for _, r in platforms_df.iterrows()}
+
+    for pname, prow in platform_lookup.items():
+        eff_length = (
+            safe_number(prow.get('Länge_mm'))
+            + safe_number(prow.get('Überhang_vorne_mm'))
+            + safe_number(prow.get('Überhang_hinten_mm'))
+        )
+        width = safe_number(prow.get('Breite_mm'), 0.0)
+        if eff_length <= 0 or width <= 0:
+            continue
+
+        mask = (
+            result['Pritsche'].astype(str).eq(pname)
+            & result['X_mm'].notna()
+            & result['Y_mm'].notna()
+            & result['Z_mm'].notna()
+            & result['Länge_mm'].notna()
+            & ~result.get('Typ', pd.Series(dtype=str)).astype(str).isin(helper_types)
+        )
+        if not mask.any():
+            continue
+
+        center_y = width / 2.0
+        subset = result.loc[mask].copy()
+        side_keys = []
+        for _, r in subset.iterrows():
+            y0 = safe_number(r.get('Y_mm'))
+            by = safe_number(r.get('Breite_mm'))
+            y1 = y0 + by
+            if by >= width * 0.75 or (y0 < center_y < y1):
+                side_keys.append('mittig')
+            elif y0 + by / 2.0 <= center_y:
+                side_keys.append('links')
+            else:
+                side_keys.append('rechts')
+
+        # Gleiche Z-Lage + gleiche Breiten-Seite = eine Stapelgruppe.
+        subset['_x_center_group'] = [f"{round(float(z), 1)}|{s}" for z, s in zip(subset['Z_mm'], side_keys)]
+
+        for _group_key, grp in subset.groupby('_x_center_group', sort=False):
+            idxs = grp.index.tolist()
+            x0 = float(result.loc[idxs, 'X_mm'].min())
+            x1 = float((result.loc[idxs, 'X_mm'] + result.loc[idxs, 'Länge_mm']).max())
+            span = x1 - x0
+            if span <= 0 or span > eff_length:
+                continue
+            target_x0 = (eff_length - span) / 2.0
+            shift = target_x0 - x0
+
+            new_x0 = x0 + shift
+            new_x1 = x1 + shift
+            if new_x0 < 0:
+                shift -= new_x0
+            if new_x1 > eff_length:
+                shift -= (new_x1 - eff_length)
+
+            result.loc[idxs, 'X_mm'] = (result.loc[idxs, 'X_mm'] + shift).round(1)
+            if 'Ebene' in result.columns:
+                result.loc[idxs, 'Ebene'] = result.loc[idxs, 'Ebene'].astype(str).apply(
+                    lambda v: v if 'X mittig je Stapel' in v else f'{v} / X mittig je Stapel'
+                )
+
+    return result
 
 
 def normalize_y_from_platform_center(placements_df: pd.DataFrame, platforms_df: pd.DataFrame) -> pd.DataFrame:
@@ -4404,6 +4477,40 @@ def _pdf_draw_view_orientation_helpers(c, ox: float, oy: float, draw_w: float, d
     c.restoreState()
 
 
+def _pdf_filter_rows_for_side_view(rows: pd.DataFrame, platform: pd.Series, view: str, left_at_y_max: bool = False) -> pd.DataFrame:
+    """Filtert Seitenansichten auf die wirklich sichtbare Breiten-Seite.
+
+    Dadurch laufen linke und rechte Stapel in der Seitenansicht nicht mehr
+    optisch ineinander. Breite/mittige Elemente bleiben in beiden Seitenansichten sichtbar.
+    """
+    if rows is None or rows.empty or view not in ('side', 'side_left', 'side_right'):
+        return rows
+    width = safe_number(platform.get('Breite_mm'), 0.0)
+    if width <= 0:
+        return rows
+    center = width / 2.0
+
+    # Welche physische Seite schaut diese Ansicht an?
+    view_from_y_min = (view in ('side', 'side_left') and not left_at_y_max) or (view == 'side_right' and left_at_y_max)
+
+    keep = []
+    for _, row in rows.iterrows():
+        y0 = safe_number(row.get('Y_mm'))
+        by = safe_number(row.get('Breite_mm'))
+        y1 = y0 + by
+        y_mid = y0 + by / 2.0
+        spans_center = y0 < center < y1
+        is_wide = by >= width * 0.75
+        if is_wide or spans_center:
+            keep.append(True)
+        elif view_from_y_min:
+            keep.append(y_mid <= center)
+        else:
+            keep.append(y_mid >= center)
+
+    return rows.loc[keep].copy()
+
+
 def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y: float, w: float, h: float, view: str, title: str, front_at_x_max: bool = False, left_at_y_max: bool = False) -> None:
     """Zeichnet eine PDF-Ansicht mit Pritschen- und Ladungsabmessungen.
 
@@ -4426,6 +4533,11 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
         # Unterbau wird später nur gestrichelt gezeichnet; Einlagen/Kantholz bleiben verdeckt.
         typ_series = rows.get('Typ', pd.Series(dtype=str)).astype(str)
         rows = rows[~typ_series.isin(['Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz'])].copy()
+    elif view in ('side', 'side_left', 'side_right') and not rows.empty:
+        # Seitenansicht = nur die jeweilige sichtbare Breiten-Seite.
+        # Damit überschneiden sich z. B. 1763 und 1764 nicht mehr optisch,
+        # wenn sie links/rechts auf unterschiedlichen Stapeln liegen.
+        rows = _pdf_filter_rows_for_side_view(rows, platform, view, left_at_y_max=left_at_y_max)
     rows = _pdf_add_visible_spacer_rows(rows, platform, view)
 
     used_len = safe_number((rows['X_mm'] + rows['Länge_mm']).max() - rows['X_mm'].min(), 0.0) if not rows.empty else 0.0
