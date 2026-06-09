@@ -1324,7 +1324,7 @@ def create_loading_plan(
 def _clean_init_runtime_state(state: Dict[str, Any]) -> None:
     """Initialisiert die einfachen Lagen-/Spurwerte für die ruhige Verladelogik.
 
-    V24: links und rechts bekommen eigene Höhenentwicklung. Damit wird nicht mehr
+    V26: links und rechts bekommen eigene Höhenentwicklung. Damit wird nicht mehr
     künstlich versucht, die ganze Pritsche auf gleicher Lagehöhe zu halten.
     """
     base_z = float(state.get('base_wood_height', 0.0))
@@ -1408,7 +1408,7 @@ def _clean_try_place_on_current_layer(
 ) -> Optional[Dict[str, Any]]:
     """Platziert eine Einheit mit unabhängigen Höhen links/rechts.
 
-    V24:
+    V26:
     - links und rechts dürfen eigene Lagenhöhen haben
     - breite Einheiten werden als gemeinsame mittige Lage behandelt
     - die Ladung wird in X später als ganzer Block mittig auf die Pritsche zentriert
@@ -1644,7 +1644,7 @@ def create_loading_plan(
 def _clean_init_runtime_state(state: Dict[str, Any]) -> None:
     """Initialisiert die einfachen Lagen-/Spurwerte für die ruhige Verladelogik.
 
-    V24: links und rechts bekommen eigene Höhenentwicklung. Damit wird nicht mehr
+    V26: links und rechts bekommen eigene Höhenentwicklung. Damit wird nicht mehr
     künstlich versucht, die ganze Pritsche auf gleicher Lagehöhe zu halten.
     """
     base_z = float(state.get('base_wood_height', 0.0))
@@ -1728,7 +1728,7 @@ def _clean_try_place_on_current_layer(
 ) -> Optional[Dict[str, Any]]:
     """Platziert eine Einheit mit unabhängigen Höhen links/rechts.
 
-    V24:
+    V26:
     - links und rechts dürfen eigene Lagenhöhen haben
     - breite Einheiten werden als gemeinsame mittige Lage behandelt
     - die Ladung wird in X später als ganzer Block mittig auf die Pritsche zentriert
@@ -2068,20 +2068,101 @@ def center_placements_geometrically(placements_df: pd.DataFrame, platforms_df: p
             if real_count == 1:
                 only_width = safe_number(real_rows.iloc[0].get('Breite_mm'), 0.0)
                 has_wide_single = only_width >= platform_width * 0.60
-            center_y = bool(almost_full_width or has_wide_single or (is_top_real_layer and span_y < platform_width * 0.90))
+            # Normale 1200er bleiben links/rechts an der Pritschenmitte.
+            # Mittig nur: fast volle Breite, breite Einzelteile oder ein einzelner oberer Restbund.
+            center_y = bool(almost_full_width or has_wide_single or (is_top_real_layer and real_count == 1 and span_y < platform_width * 0.90))
 
             if center_y and 0 < span_y <= platform_width:
                 shift_y = (platform_width - span_y) / 2 - y0
                 result.loc[layer_mask, 'Y_mm'] = (result.loc[layer_mask, 'Y_mm'] + shift_y).round(1)
             else:
-                # Normale Lage: seitlich kompakt lassen. Wenn sie durch alte Verschiebung nicht links/rechts sitzt,
-                # auf Y=0 zurücknehmen, damit nicht jede Lage künstlich in der Mitte hängt.
-                if y0 > 0 and span_y < platform_width * 0.75:
-                    result.loc[layer_mask, 'Y_mm'] = (result.loc[layer_mask, 'Y_mm'] - y0).round(1)
+                # Nicht mehr auf Y=0 zurückschieben. Sonst wird eine korrekt rechts
+                # platzierte Lage fälschlich nach links gezogen.
+                pass
 
             if 'Ebene' in result.columns:
                 result.loc[layer_mask, 'Ebene'] = result.loc[layer_mask, 'Ebene'].astype(str).apply(
                     lambda v: v if 'ruhig ausgerichtet' in v.lower() else f'{v} / ruhig ausgerichtet'
+                )
+
+    return result
+
+
+def center_length_groups_from_platform_center(placements_df: pd.DataFrame, platforms_df: pd.DataFrame) -> pd.DataFrame:
+    """Richtet Stapelgruppen in X von der Pritschenmitte aus.
+
+    Ziel:
+    - nicht mehr alle Pakete mit gleicher Startkante an einer Stirnseite;
+    - jede Seiten-/Lagegruppe wird als Block um die Pritschenmitte gelegt;
+    - die Pritschenbelegung bleibt innerhalb der erlaubten Länge.
+    """
+    if placements_df is None or placements_df.empty or platforms_df is None or platforms_df.empty:
+        return placements_df.copy() if placements_df is not None else pd.DataFrame()
+
+    result = placements_df.copy()
+    for col in ['X_mm', 'Y_mm', 'Z_mm', 'Länge_mm', 'Breite_mm']:
+        if col in result.columns:
+            result[col] = pd.to_numeric(result[col], errors='coerce')
+
+    helper_types = {'Unterbau', 'Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz'}
+    platform_lookup = {str(r.get('Pritsche', '')): r for _, r in platforms_df.iterrows()}
+
+    for pname, prow in platform_lookup.items():
+        eff_length = (
+            safe_number(prow.get('Länge_mm'))
+            + safe_number(prow.get('Überhang_vorne_mm'))
+            + safe_number(prow.get('Überhang_hinten_mm'))
+        )
+        width = safe_number(prow.get('Breite_mm'), 0.0)
+        if eff_length <= 0 or width <= 0:
+            continue
+
+        mask = (
+            result['Pritsche'].astype(str).eq(pname)
+            & result['X_mm'].notna()
+            & result['Y_mm'].notna()
+            & result['Z_mm'].notna()
+            & result['Länge_mm'].notna()
+            & ~result.get('Typ', pd.Series(dtype=str)).astype(str).isin(helper_types)
+        )
+        if not mask.any():
+            continue
+
+        center_y = width / 2.0
+        subset = result.loc[mask].copy()
+        side_keys = []
+        for _, r in subset.iterrows():
+            y0 = safe_number(r.get('Y_mm'))
+            by = safe_number(r.get('Breite_mm'))
+            y1 = y0 + by
+            if by >= width * 0.75 or (y0 < center_y < y1):
+                side_keys.append('mittig')
+            elif y0 + by / 2.0 <= center_y:
+                side_keys.append('links')
+            else:
+                side_keys.append('rechts')
+        subset['_x_center_group'] = [f"{round(float(z), 1)}|{s}" for z, s in zip(subset['Z_mm'], side_keys)]
+
+        for group_key, grp in subset.groupby('_x_center_group', sort=False):
+            idxs = grp.index.tolist()
+            x0 = float(result.loc[idxs, 'X_mm'].min())
+            x1 = float((result.loc[idxs, 'X_mm'] + result.loc[idxs, 'Länge_mm']).max())
+            span = x1 - x0
+            if span <= 0 or span > eff_length:
+                continue
+            target_x0 = (eff_length - span) / 2.0
+            shift = target_x0 - x0
+            # Sicherheit: Gruppe innerhalb der Pritsche halten.
+            new_x0 = x0 + shift
+            new_x1 = x1 + shift
+            if new_x0 < 0:
+                shift -= new_x0
+            if new_x1 > eff_length:
+                shift -= (new_x1 - eff_length)
+            result.loc[idxs, 'X_mm'] = (result.loc[idxs, 'X_mm'] + shift).round(1)
+            if 'Ebene' in result.columns:
+                result.loc[idxs, 'Ebene'] = result.loc[idxs, 'Ebene'].astype(str).apply(
+                    lambda v: v if 'X mittig je Stapel' in v else f'{v} / X mittig je Stapel'
                 )
 
     return result
@@ -2619,6 +2700,7 @@ def create_variant_a_loading_plan(
 
     if center_geometric and not placements_df.empty and not platforms_used_df.empty:
         placements_df = center_placements_geometrically(placements_df, platforms_used_df)
+        placements_df = center_length_groups_from_platform_center(placements_df, platforms_used_df)
         summary_df = recompute_summary_from_placements(placements_df, platforms_used_df)
 
     fuhren_log_df = pd.DataFrame(fuhren_log)
@@ -4006,6 +4088,12 @@ def create_bsd_matrix_for_platform(
     if not entries:
         return pd.DataFrame(columns=columns)
 
+    # Einlage-/Lagenholz-Zeilen nie mit Bauteilzeilen mischen.
+    real_z_levels = {round(e['z'], 1) for e in entries if ('Bauteil' in e['kind']) or e['kind'] == 'Unterbau'}
+    for e in entries:
+        if (('Einlage' in e['kind']) or ('Lagenholz' in e['kind'])) and round(e['z'], 1) in real_z_levels:
+            e['z'] = round(max(0.1, float(e['z']) - 0.2), 1)
+
     # Gesamt belegte Grundfläche für Unterlagen/Einlagen.
     used_width_all = round(float((rows['Y_mm'] + rows['Breite_mm']).max() - rows['Y_mm'].min()), 1)
     used_length_all = round(float((rows['X_mm'] + rows['Länge_mm']).max() - rows['X_mm'].min()), 1)
@@ -4489,7 +4577,15 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
             c.setStrokeColor(colors.darkgrey)
         c.setLineWidth(0.38)
         c.rect(rx, ry, rw, rh, stroke=1, fill=1)
-        _pdf_draw_label_lines(c, rx, ry, rw, rh, _pdf_label_lines(row, view), view)
+        label_lines = _pdf_label_lines(row, view)
+        if view == 'top':
+            # Draufsicht nur beschriften, wenn genug Platz vorhanden ist.
+            # Sonst laufen die Nummern ineinander und der Plan wird unbrauchbar.
+            if rw < 42 or rh < 18:
+                label_lines = []
+            else:
+                label_lines = label_lines[:1]
+        _pdf_draw_label_lines(c, rx, ry, rw, rh, label_lines, view)
 def _pdf_draw_bsd_matrix_page(c, page_w: float, page_h: float, margin: float, platform: pd.Series, matrix_df: pd.DataFrame, header: Dict[str, Any], project_name: str, logo_bytes: Optional[bytes] = None) -> None:
     """Zeichnet eine zweite PDF-Seite pro Pritsche mit Ladeplan-BSD-Matrix."""
     from reportlab.lib import colors
@@ -4582,9 +4678,17 @@ def _pdf_draw_bsd_matrix_page(c, page_w: float, page_h: float, margin: float, pl
             elif col == 'Gewicht_kg':
                 text = f'{safe_number(value):.0f}' if safe_number(value) else ''
             else:
-                text = str(value).replace('\n', ' / ')
-            text = text[:35] if w >= 100 else text[:12]
-            c.drawString(cx + 3, y + 7, text)
+                text = str(value)
+            if '\n' in text:
+                lines = [v.strip() for v in text.split('\n') if v.strip()][:3]
+                c.setFont('Helvetica', 5.2)
+                for li, line in enumerate(lines):
+                    line = line[:32] if w >= 100 else line[:11]
+                    c.drawString(cx + 3, y + row_h - 7 - li * 5.5, line)
+                c.setFont('Helvetica', 6)
+            else:
+                text = text[:35] if w >= 100 else text[:12]
+                c.drawString(cx + 3, y + 7, text)
             cx += w
         y -= row_h
         if y < 30:
