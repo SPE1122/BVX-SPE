@@ -1324,7 +1324,7 @@ def create_loading_plan(
 def _clean_init_runtime_state(state: Dict[str, Any]) -> None:
     """Initialisiert die einfachen Lagen-/Spurwerte für die ruhige Verladelogik.
 
-    V26: links und rechts bekommen eigene Höhenentwicklung. Damit wird nicht mehr
+    V27: links und rechts bekommen eigene Höhenentwicklung. Damit wird nicht mehr
     künstlich versucht, die ganze Pritsche auf gleicher Lagehöhe zu halten.
     """
     base_z = float(state.get('base_wood_height', 0.0))
@@ -1408,7 +1408,7 @@ def _clean_try_place_on_current_layer(
 ) -> Optional[Dict[str, Any]]:
     """Platziert eine Einheit mit unabhängigen Höhen links/rechts.
 
-    V26:
+    V27:
     - links und rechts dürfen eigene Lagenhöhen haben
     - breite Einheiten werden als gemeinsame mittige Lage behandelt
     - die Ladung wird in X später als ganzer Block mittig auf die Pritsche zentriert
@@ -1644,7 +1644,7 @@ def create_loading_plan(
 def _clean_init_runtime_state(state: Dict[str, Any]) -> None:
     """Initialisiert die einfachen Lagen-/Spurwerte für die ruhige Verladelogik.
 
-    V26: links und rechts bekommen eigene Höhenentwicklung. Damit wird nicht mehr
+    V27: links und rechts bekommen eigene Höhenentwicklung. Damit wird nicht mehr
     künstlich versucht, die ganze Pritsche auf gleicher Lagehöhe zu halten.
     """
     base_z = float(state.get('base_wood_height', 0.0))
@@ -1728,7 +1728,7 @@ def _clean_try_place_on_current_layer(
 ) -> Optional[Dict[str, Any]]:
     """Platziert eine Einheit mit unabhängigen Höhen links/rechts.
 
-    V26:
+    V27:
     - links und rechts dürfen eigene Lagenhöhen haben
     - breite Einheiten werden als gemeinsame mittige Lage behandelt
     - die Ladung wird in X später als ganzer Block mittig auf die Pritsche zentriert
@@ -2089,83 +2089,14 @@ def center_placements_geometrically(placements_df: pd.DataFrame, platforms_df: p
 
 
 def center_length_groups_from_platform_center(placements_df: pd.DataFrame, platforms_df: pd.DataFrame) -> pd.DataFrame:
-    """Richtet Stapelgruppen in X von der Pritschenmitte aus.
+    """V27: Keine einzelne Lage mehr separat in X mittig schieben.
 
-    Ziel:
-    - nicht mehr alle Pakete mit gleicher Startkante an einer Stirnseite;
-    - jede Seiten-/Lagegruppe wird als Block um die Pritschenmitte gelegt;
-    - die Pritschenbelegung bleibt innerhalb der erlaubten Länge.
+    Die ganze Ladung wird bereits in `center_placements_geometrically` als Block
+    auf die Pritschenmitte gesetzt. Einzelne Lagen separat zu zentrieren hat das
+    oberste Bund optisch über andere Lagen geschoben und im Seitenplan wie eine
+    Überlappung wirken lassen.
     """
-    if placements_df is None or placements_df.empty or platforms_df is None or platforms_df.empty:
-        return placements_df.copy() if placements_df is not None else pd.DataFrame()
-
-    result = placements_df.copy()
-    for col in ['X_mm', 'Y_mm', 'Z_mm', 'Länge_mm', 'Breite_mm']:
-        if col in result.columns:
-            result[col] = pd.to_numeric(result[col], errors='coerce')
-
-    helper_types = {'Unterbau', 'Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz'}
-    platform_lookup = {str(r.get('Pritsche', '')): r for _, r in platforms_df.iterrows()}
-
-    for pname, prow in platform_lookup.items():
-        eff_length = (
-            safe_number(prow.get('Länge_mm'))
-            + safe_number(prow.get('Überhang_vorne_mm'))
-            + safe_number(prow.get('Überhang_hinten_mm'))
-        )
-        width = safe_number(prow.get('Breite_mm'), 0.0)
-        if eff_length <= 0 or width <= 0:
-            continue
-
-        mask = (
-            result['Pritsche'].astype(str).eq(pname)
-            & result['X_mm'].notna()
-            & result['Y_mm'].notna()
-            & result['Z_mm'].notna()
-            & result['Länge_mm'].notna()
-            & ~result.get('Typ', pd.Series(dtype=str)).astype(str).isin(helper_types)
-        )
-        if not mask.any():
-            continue
-
-        center_y = width / 2.0
-        subset = result.loc[mask].copy()
-        side_keys = []
-        for _, r in subset.iterrows():
-            y0 = safe_number(r.get('Y_mm'))
-            by = safe_number(r.get('Breite_mm'))
-            y1 = y0 + by
-            if by >= width * 0.75 or (y0 < center_y < y1):
-                side_keys.append('mittig')
-            elif y0 + by / 2.0 <= center_y:
-                side_keys.append('links')
-            else:
-                side_keys.append('rechts')
-        subset['_x_center_group'] = [f"{round(float(z), 1)}|{s}" for z, s in zip(subset['Z_mm'], side_keys)]
-
-        for group_key, grp in subset.groupby('_x_center_group', sort=False):
-            idxs = grp.index.tolist()
-            x0 = float(result.loc[idxs, 'X_mm'].min())
-            x1 = float((result.loc[idxs, 'X_mm'] + result.loc[idxs, 'Länge_mm']).max())
-            span = x1 - x0
-            if span <= 0 or span > eff_length:
-                continue
-            target_x0 = (eff_length - span) / 2.0
-            shift = target_x0 - x0
-            # Sicherheit: Gruppe innerhalb der Pritsche halten.
-            new_x0 = x0 + shift
-            new_x1 = x1 + shift
-            if new_x0 < 0:
-                shift -= new_x0
-            if new_x1 > eff_length:
-                shift -= (new_x1 - eff_length)
-            result.loc[idxs, 'X_mm'] = (result.loc[idxs, 'X_mm'] + shift).round(1)
-            if 'Ebene' in result.columns:
-                result.loc[idxs, 'Ebene'] = result.loc[idxs, 'Ebene'].astype(str).apply(
-                    lambda v: v if 'X mittig je Stapel' in v else f'{v} / X mittig je Stapel'
-                )
-
-    return result
+    return placements_df.copy() if placements_df is not None else pd.DataFrame()
 
 
 def normalize_y_from_platform_center(placements_df: pd.DataFrame, platforms_df: pd.DataFrame) -> pd.DataFrame:
@@ -3793,9 +3724,14 @@ def _position_slot_for_bsd(
     x_center = eff_length / 2
     y_center = platform_width / 2
     crosses_x_center = x0 <= x_center <= x1
-    crosses_y_center = y0 <= y_center <= y1
+    # Fachregel: Ein mittiger Bund hat im BSD keine eigene Mitte-Spalte.
+    # Darum wird er immer als "Vorne" geführt. Nicht nur bei exaktem
+    # Überschneiden der Mitte, sondern auch wenn sein Mittelpunkt nahe der
+    # Pritschenmitte liegt.
+    center_tolerance = max(150.0, min(max(length * 0.35, 0.0), eff_length * 0.12))
+    x_is_middle = crosses_x_center or abs(x_mid - x_center) <= center_tolerance
 
-    if typ == 'Bund' and crosses_x_center:
+    if typ == 'Bund' and x_is_middle:
         front_back = 'Vorne'
     elif front_at_x_max:
         front_back = 'Vorne' if x_mid >= x_center else 'Hinten'
@@ -3833,7 +3769,15 @@ def _position_slots_for_bsd(
     spans_full_width = platform_width > 0 and width >= platform_width * 0.75 and y0 < y_center < y1
     if not spans_full_width:
         return [slot]
-    fb = 'Vorne' if slot.startswith('Vorne') else 'Hinten'
+    # Breiter/mittiger Bund belegt links und rechts. Wenn er in X mittig liegt,
+    # bleibt er im BSD vorne.
+    typ = str(row.get('Typ', '') or '').strip()
+    x0 = safe_number(row.get('X_mm'))
+    length = safe_number(row.get('Länge_mm'))
+    x_mid = x0 + length / 2.0
+    x_center = eff_length / 2.0 if eff_length else 0.0
+    x_is_middle = typ == 'Bund' and (x0 <= x_center <= x0 + length or abs(x_mid - x_center) <= max(150.0, min(max(length * 0.35, 0.0), eff_length * 0.12)))
+    fb = 'Vorne' if x_is_middle or slot.startswith('Vorne') else 'Hinten'
     return [f'{fb} links', f'{fb} rechts']
 
 
