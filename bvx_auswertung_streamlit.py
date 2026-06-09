@@ -1856,15 +1856,18 @@ def _clean_place_unit(
     allow_stack: bool,
     allow_rotation: bool,
 ) -> Optional[Dict[str, Any]]:
-    """Platziert eine Einheit in der aktuellen oder nächsten sauberen Lage."""
-    result = _clean_try_place_on_current_layer(state, unit, allow_beside, allow_rotation)
-    if result is not None:
-        return result
-    if not allow_stack:
-        return None
-    if not _clean_new_layer(state, unit):
-        return None
-    return _clean_try_place_on_current_layer(state, unit, allow_beside, allow_rotation)
+    """Platziert eine Einheit direkt mit der Seiten-/Stapel-Logik.
+
+    Wichtig: Es gibt keine gemeinsame _clean_new_layer-Funktion mehr,
+    weil links und rechts unabhängig in der Höhe aufgebaut werden dürfen.
+    """
+    return _clean_try_place_on_current_layer(
+        state,
+        unit,
+        allow_beside,
+        allow_rotation,
+        allow_stack=allow_stack,
+    )
 
 
 def create_loading_plan(
