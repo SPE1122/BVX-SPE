@@ -905,7 +905,7 @@ def build_loading_units(
 ) -> pd.DataFrame:
     """Erzeugt Verladeeinheiten: einzelnes Bauteil oder Bund.
 
-    V29:
+    V30:
     - Wenn ein gleichartiger Bund am Gewichtsende "unschön" abbrechen würde,
       wird die letzte Bundgruppe lokal neu aufgeteilt.
     - Ziel: weniger kleine Restbunde und weniger Löcher auf der Pritsche.
@@ -4526,6 +4526,13 @@ def _pdf_draw_view_orientation_helpers(c, ox: float, oy: float, draw_w: float, d
         c.drawString(ox, oy + draw_h + 2.5, left_lbl)
         c.drawRightString(ox + draw_w, oy + draw_h + 2.5, right_lbl)
         c.drawCentredString(ox + draw_w / 2.0, oy + draw_h + 2.5, 'Mitte X')
+        if view == 'top':
+            # In der Draufsicht sind die schmalen Stirnseiten vorne/hinten.
+            # Die langen Seiten sind links/rechts.
+            top_side = 'Links' if left_at_y_max else 'Rechts'
+            bottom_side = 'Rechts' if left_at_y_max else 'Links'
+            c.drawCentredString(ox + draw_w / 2.0, oy + draw_h + 10.5, top_side)
+            c.drawCentredString(ox + draw_w / 2.0, oy - 14.5, bottom_side)
     if view in ('front', 'back'):
         left_lbl = 'Rechts' if left_at_y_max else 'Links'
         right_lbl = 'Links' if left_at_y_max else 'Rechts'
@@ -4747,6 +4754,9 @@ def _pdf_draw_bsd_matrix_page(c, page_w: float, page_h: float, margin: float, pl
     for i, line in enumerate(right_lines):
         c.drawString(right_x + 8, top_y - 34 - i * 10.5, line)
 
+    c.setFont('Helvetica', 6.4)
+    c.drawString(left_x + 8, top_y - 110, 'Bezug: X = vorne/hinten, Y = links/rechts; X-mittig = vorne im BSD')
+
     table_y = top_y - 155
     table_x = margin
     row_h = 20
@@ -4828,6 +4838,58 @@ def _pdf_draw_logo(c, logo_bytes: Optional[bytes], x: float, y: float, max_w: fl
     except Exception:
         return
 
+def _pdf_draw_bsd_reference_sketch(c, x: float, y: float, w: float = 170, h: float = 72, front_at_x_max: bool = True, left_at_y_max: bool = False) -> None:
+    """Kleine Bezugs-Skizze: Welche Seite der Draufsicht gehört zu BSD VL/VR/HL/HR."""
+    from reportlab.lib import colors
+    c.saveState()
+    c.setStrokeColor(colors.black)
+    c.setFillColor(colors.white)
+    c.setLineWidth(0.6)
+    c.rect(x, y, w, h, stroke=1, fill=0)
+
+    c.setFont('Helvetica-Bold', 6.7)
+    c.setFillColor(colors.black)
+    c.drawString(x + 5, y + h - 10, 'Bezug Draufsicht / BSD')
+
+    pad_x = 34
+    pad_y = 17
+    bx = x + pad_x
+    by = y + pad_y
+    bw = w - pad_x * 2
+    bh = h - pad_y - 16
+    mid_x = bx + bw / 2
+    mid_y = by + bh / 2
+
+    c.setLineWidth(0.7)
+    c.rect(bx, by, bw, bh, stroke=1, fill=0)
+    c.setDash(2, 2)
+    c.line(mid_x, by, mid_x, by + bh)
+    c.line(bx, mid_y, bx + bw, mid_y)
+    c.setDash()
+
+    # Aktuelle feste Darstellung: X läuft horizontal, Y vertikal.
+    left_end = 'Hinten' if front_at_x_max else 'Vorne'
+    right_end = 'Vorne' if front_at_x_max else 'Hinten'
+    top_side = 'Links' if left_at_y_max else 'Rechts'
+    bottom_side = 'Rechts' if left_at_y_max else 'Links'
+
+    c.setFont('Helvetica', 5.8)
+    c.drawRightString(bx - 3, mid_y - 2, left_end)
+    c.drawString(bx + bw + 3, mid_y - 2, right_end)
+    c.drawCentredString(mid_x, by + bh + 3, top_side)
+    c.drawCentredString(mid_x, by - 8, bottom_side)
+
+    c.setFont('Helvetica-Bold', 6.0)
+    c.drawCentredString((bx + mid_x) / 2, (mid_y + by + bh) / 2 - 2, 'HL' if left_end == 'Hinten' and top_side == 'Links' else 'HR')
+    c.drawCentredString((mid_x + bx + bw) / 2, (mid_y + by + bh) / 2 - 2, 'VL' if right_end == 'Vorne' and top_side == 'Links' else 'VR')
+    c.drawCentredString((bx + mid_x) / 2, (by + mid_y) / 2 - 2, 'HL' if left_end == 'Hinten' and bottom_side == 'Links' else 'HR')
+    c.drawCentredString((mid_x + bx + bw) / 2, (by + mid_y) / 2 - 2, 'VL' if right_end == 'Vorne' and bottom_side == 'Links' else 'VR')
+
+    c.setFont('Helvetica', 5.4)
+    c.drawString(x + 5, y + 4, 'kurze Stirnseiten = vorne / hinten')
+    c.restoreState()
+
+
 def create_loading_pdf(
     placements_df: pd.DataFrame,
     platforms_df: pd.DataFrame,
@@ -4900,6 +4962,9 @@ def create_loading_pdf(
         ]
         for i, line in enumerate(hints):
             c.drawString(hint_x, hint_y - 14 - i * 12, line)
+
+        # Kleine fixe Bezugsskizze, damit Draufsicht, Seitenansichten und BSD gleich gelesen werden.
+        _pdf_draw_bsd_reference_sketch(c, margin + 500, page_h - 165, 180, 78, front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max)
 
         # Zeichnungsbereiche: mehr Bezug zwischen Seiten- und Vorder/Rückansicht
         _pdf_draw_view(c, placements_df, platform, margin, 395, 710, 220, 'side_left', 'Linke Seitenansicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max)
