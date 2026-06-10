@@ -905,7 +905,7 @@ def build_loading_units(
 ) -> pd.DataFrame:
     """Erzeugt Verladeeinheiten: einzelnes Bauteil oder Bund.
 
-    V30:
+    V31:
     - Wenn ein gleichartiger Bund am Gewichtsende "unschön" abbrechen würde,
       wird die letzte Bundgruppe lokal neu aufgeteilt.
     - Ziel: weniger kleine Restbunde und weniger Löcher auf der Pritsche.
@@ -1936,7 +1936,7 @@ def create_loading_plan(
     - keine nachträgliche Z-Spiegelung,
     - keine Einzelteile aus Bund herauslösen,
     - normale 1200er von der Y-Mitte links/rechts,
-    - breite/Restbunde nur als Ausnahme mittig,
+    - Restbunde nicht automatisch mittig, sondern links/rechts auf Stapel,
     - Pritschen werden fortlaufend und kompakt gefüllt.
     """
     if units.empty or platforms.empty:
@@ -2025,8 +2025,8 @@ def center_placements_geometrically(placements_df: pd.DataFrame, platforms_df: p
     Wichtig: Nicht mehr jede Lage grundsätzlich in Y mittig setzen.
     Praxisregel:
     - Untere/normale Lagen bleiben links/rechts kompakt und werden nur als Gruppe leicht zur Mitte korrigiert, wenn sie fast die ganze Breite belegen.
-    - Einzelne obere Restbunde werden mittig gesetzt.
-    - Breite Elemente/Bunde, die links/rechts nicht sinnvoll aufgeteilt werden können, werden mittig gesetzt.
+    - Einzelne obere Restbunde werden NICHT automatisch mittig gesetzt.
+    - Nur echte breite Elemente/Bunde, die links/rechts nicht sinnvoll aufgeteilt werden können, werden mittig gesetzt.
     - In X wird die Lage weiterhin als Gruppe mittig auf die nutzbare Pritschenlänge gelegt.
     """
     if placements_df.empty or platforms_df.empty:
@@ -2116,10 +2116,13 @@ def center_placements_geometrically(placements_df: pd.DataFrame, platforms_df: p
             has_wide_single = False
             if real_count == 1:
                 only_width = safe_number(real_rows.iloc[0].get('Breite_mm'), 0.0)
-                has_wide_single = only_width >= platform_width * 0.60
+                # Erst ab echter Breite mittig. Normale 1200er/1180er Restbunde
+                # bleiben auf links oder rechts und werden NICHT in die Mitte gezogen.
+                has_wide_single = only_width >= platform_width * 0.75
             # Normale 1200er bleiben links/rechts an der Pritschenmitte.
-            # Mittig nur: fast volle Breite, breite Einzelteile oder ein einzelner oberer Restbund.
-            center_y = bool(almost_full_width or has_wide_single or (is_top_real_layer and real_count == 1 and span_y < platform_width * 0.90))
+            # Mittig nur: fast volle Breite oder wirklich breite Einzelteile.
+            # Oberste Restbunde werden bewusst NICHT mehr automatisch mittig gesetzt.
+            center_y = bool(almost_full_width or has_wide_single)
 
             if center_y and 0 < span_y <= platform_width:
                 shift_y = (platform_width - span_y) / 2 - y0
@@ -2226,9 +2229,9 @@ def normalize_y_from_platform_center(placements_df: pd.DataFrame, platforms_df: 
 
     Ziel:
     - 1200-mm-Elemente links/rechts treffen sich an der Pritschenmitte.
-    - breite Elemente werden mittig geführt.
-    - einzelne obere Restbunde dürfen mittig liegen.
-    - dadurch ist die Mitte in Vorder-/Rückansicht durchgehend sauber.
+    - nur wirklich breite Elemente werden mittig geführt.
+    - einzelne obere Restbunde werden NICHT mittig gezogen.
+    - dadurch bleibt die reale Auflage links/rechts nachvollziehbar.
     """
     if placements_df is None or placements_df.empty or platforms_df is None or platforms_df.empty:
         return placements_df.copy() if placements_df is not None else pd.DataFrame()
@@ -2273,16 +2276,10 @@ def normalize_y_from_platform_center(placements_df: pd.DataFrame, platforms_df: 
             # Breite Elemente / fast volle Pritschenbreite: sauber mittig.
             if bw >= width * 0.75:
                 new_y = (width - bw) / 2.0
-            # oberster einzelner Restbund darf mittig sein.
-            elif top_z is not None and abs(z - top_z) < 0.1 and bw >= width * 0.45:
-                # Wenn mehrere Reihen oben links/rechts liegen, nicht alle zusammen in die Mitte ziehen.
-                same_top = real[real['Z_mm'].round(1).eq(round(z, 1))]
-                if len(same_top) <= 1:
-                    new_y = (width - bw) / 2.0
-                else:
-                    new_y = center - bw if y_mid <= center else center
             else:
-                # Normale 1200er-Lagen: von der Mitte aus auf links/rechts legen.
+                # Normale 1200er/1180er Restbunde: NICHT mittig.
+                # Sie werden links oder rechts an der Pritschenmitte ausgerichtet,
+                # damit sie real auf einem Stapel aufliegen und nicht optisch überschneiden.
                 new_y = center - bw if y_mid <= center else center
                 # Sicherheit gegen negative Werte bei leicht breiteren Elementen.
                 new_y = max(0.0, min(new_y, width - bw))
