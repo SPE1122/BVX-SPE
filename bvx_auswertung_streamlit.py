@@ -905,7 +905,7 @@ def build_loading_units(
 ) -> pd.DataFrame:
     """Erzeugt Verladeeinheiten: einzelnes Bauteil oder Bund.
 
-    V31:
+    V32:
     - Wenn ein gleichartiger Bund am Gewichtsende "unschön" abbrechen würde,
       wird die letzte Bundgruppe lokal neu aufgeteilt.
     - Ziel: weniger kleine Restbunde und weniger Löcher auf der Pritsche.
@@ -3810,17 +3810,19 @@ def _format_bsd_cell(row: pd.Series) -> str:
 
 
 def _orientation_flags_from_meta(project_meta: Optional[Dict[str, Any]] = None) -> Tuple[bool, bool]:
-    """Liest die Orientierung für Ladeplan/PDF.
+    """Fixe Orientierung für Ladeplan/PDF.
 
-    front_at_x_max: True = Vorne liegt bei grossem X-Wert.
-    left_at_y_max: True = Links liegt bei grossem Y-Wert.
+    V32:
+    Die Orientierung ist nicht mehr über die Oberfläche verstellbar, damit die
+    Darstellung nicht optisch "schön", aber fachlich falsch gedreht werden kann.
+
+    Fix:
+    - Vorne = X=max
+    - Hinten = X=0
+    - Links = Y=0
+    - Rechts = Y=max
     """
-    meta = project_meta or {}
-    front_raw = str(meta.get('Vorne_Orientierung', '') or '').lower()
-    left_raw = str(meta.get('Links_Orientierung', '') or '').lower()
-    front_at_x_max = ('x=max' in front_raw) or ('x max' in front_raw) or ('rechts' in front_raw) or (front_raw.strip() == 'xmax')
-    left_at_y_max = ('y=max' in left_raw) or ('y max' in left_raw) or ('oben' in left_raw) or (left_raw.strip() == 'ymax')
-    return front_at_x_max, left_at_y_max
+    return True, False
 
 
 def _position_slot_for_bsd(
@@ -5437,19 +5439,10 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
     bauabschnitt_auto = _unique_display_values_from_field(parts_df, bauabschnitt_attr)
     bauabschnitt_text = mcol8.text_input('Bauabschnitt', value=bauabschnitt_auto)
 
-    mcol9, mcol10 = st.columns(2)
-    vorne_orientation = mcol9.selectbox(
-        'Orientierung Vorne/Hinten',
-        ['Vorne = X=0 (links im Plan)', 'Vorne = X=max (rechts im Plan)'],
-        index=1,
-        help='Damit Ladeplan BSD und grafische Ansicht dieselbe Richtung verwenden.'
-    )
-    links_orientation = mcol10.selectbox(
-        'Orientierung Links/Rechts',
-        ['Links = Y=0', 'Links = Y=max'],
-        index=0,
-        help='Nur ändern, wenn links/rechts im Ladeplan gegenüber der Ansicht vertauscht ist.'
-    )
+    st.caption('Orientierung fix: Vorne = X=max, Hinten = X=0, Links = Y=0, Rechts = Y=max. Diese Zuordnung ist nicht mehr verstellbar.')
+
+    vorne_orientation = 'Vorne = X=max (rechts im Plan)'
+    links_orientation = 'Links = Y=0'
 
     project_meta = {
         'Objekt_Name': objekt_name,
