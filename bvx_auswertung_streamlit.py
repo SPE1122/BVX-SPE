@@ -905,7 +905,7 @@ def build_loading_units(
 ) -> pd.DataFrame:
     """Erzeugt Verladeeinheiten: einzelnes Bauteil oder Bund.
 
-    V35:
+    V37:
     - Wenn ein gleichartiger Bund am Gewichtsende "unschön" abbrechen würde,
       wird die letzte Bundgruppe lokal neu aufgeteilt.
     - Ziel: weniger kleine Restbunde und weniger Löcher auf der Pritsche.
@@ -3831,7 +3831,7 @@ def _format_bsd_cell(row: pd.Series) -> str:
 def _orientation_flags_from_meta(project_meta: Optional[Dict[str, Any]] = None) -> Tuple[bool, bool]:
     """Fixe Orientierung für Ladeplan/PDF.
 
-    V35:
+    V37:
     Die Orientierung ist nicht mehr über die Oberfläche verstellbar, damit die
     Darstellung nicht optisch "schön", aber fachlich falsch gedreht werden kann.
 
@@ -5522,6 +5522,174 @@ def _manual_place_by_position(
 
 
 
+def _build_manual_platforms_from_excel(pritschen_df: pd.DataFrame, selected_option: str, standards: Dict[str, Any]) -> pd.DataFrame:
+    """Erzeugt F01-Pritschen aus der Excel-Pritschen/Fuhren-Vorlage für den manuellen Modus."""
+    if pritschen_df is None or pritschen_df.empty:
+        return pd.DataFrame()
+
+    rows = pritschen_df.copy()
+    if 'Fuhrenoption' in rows.columns and selected_option:
+        rows = rows[rows['Fuhrenoption'].astype(str).eq(str(selected_option))].copy()
+    if 'Freigabe' in rows.columns:
+        try:
+            rows = rows[rows['Freigabe'].astype(bool)].copy()
+        except Exception:
+            pass
+    if rows.empty:
+        return pd.DataFrame()
+
+    sort_cols = [c for c in ['Pritschen_Reihenfolge', 'Pritschenname'] if c in rows.columns]
+    if sort_cols:
+        rows = rows.sort_values(sort_cols, kind='stable').reset_index(drop=True)
+    else:
+        rows = rows.reset_index(drop=True)
+
+    rows['Fuhre_Nr'] = 1
+    if 'Fuhrenoption' not in rows.columns:
+        rows['Fuhrenoption'] = selected_option
+    rows['Fuhrenoption'] = selected_option or rows['Fuhrenoption'].astype(str)
+    if 'Pritschenname' not in rows.columns:
+        rows['Pritschenname'] = [f'Pritsche {i+1}' for i in range(len(rows))]
+    rows['Pritschenname'] = rows['Pritschenname'].astype(str)
+    rows['Pritsche'] = rows.apply(lambda r: f"F01 {r['Pritschenname']}", axis=1)
+
+    # Defaults aus Standards ergänzen, falls Excel-Zellen leer sind.
+    defaults = {
+        'Kantholz_erste_Lage_mm': safe_number(standards.get('Standard_Kantholz_erste_Lage'), 80.0),
+        'Einlage_zwischen_Lagen_mm': safe_number(standards.get('Standard_Einlage_zwischen_Lagen'), 40.0),
+        'Einlage_allgemein_mm': safe_number(standards.get('Standard_Einlage_allgemein'), 0.0),
+        'Überhang_vorne_mm': 0.0,
+        'Überhang_hinten_mm': 0.0,
+        'Eigengewicht_Pritsche_kg': 0.0,
+    }
+    for col, default in defaults.items():
+        if col not in rows.columns:
+            rows[col] = default
+        rows[col] = pd.to_numeric(rows[col], errors='coerce').fillna(default)
+
+    return _clean_manual_platforms_dataframe(rows)
+
+
+def _build_manual_empty_placements_from_units(units_df: pd.DataFrame) -> pd.DataFrame:
+    """Manueller Modus: alle Verladeeinheiten starten unverladen und werden per Tabelle gesetzt."""
+    if units_df is None or units_df.empty:
+        return pd.DataFrame()
+    rows: List[Dict[str, Any]] = []
+    for _, unit in units_df.reset_index(drop=True).iterrows():
+        rows.append({
+            'Fuhre_Nr': None,
+            'Fuhrenoption': '',
+            'Pritschenname': '',
+            'Pritsche': 'NICHT VERLADEN',
+            'Einheit_ID': unit.get('Einheit_ID', ''),
+            'Typ': unit.get('Typ', ''),
+            'Anzahl_Bauteile': int(safe_number(unit.get('Anzahl_Bauteile'), 1)),
+            'Bauteile': unit.get('Bauteile', ''),
+            'Bauteile_Liste': unit.get('Bauteile_Liste', unit.get('Bauteile', '')),
+            'Ansicht_Attribut': unit.get('Ansicht_Attribut', ''),
+            'Ansicht_Label': unit.get('Ansicht_Label', unit.get('Einheit_ID', '')),
+            'Ansicht_Liste': unit.get('Ansicht_Liste', unit.get('Ansicht_Label', '')),
+            'Einzellängen_mm': unit.get('Einzellängen_mm', ''),
+            'Einzelbreiten_mm': unit.get('Einzelbreiten_mm', ''),
+            'Einzelhöhen_mm': unit.get('Einzelhöhen_mm', ''),
+            'Einlage_allgemein_mm': safe_number(unit.get('Einlage_allgemein_mm'), 0.0),
+            'Bundeinlage_mm': safe_number(unit.get('Bundeinlage_mm'), 0.0),
+            'Einlage_unten_mm': 0.0,
+            'Einlage_oben_mm': 0.0,
+            'X_mm': None,
+            'Y_mm': None,
+            'Z_mm': None,
+            'Länge_mm': safe_number(unit.get('Länge_mm'), 0.0),
+            'Breite_mm': safe_number(unit.get('Breite_mm'), 0.0),
+            'Höhe_mm': safe_number(unit.get('Höhe_mm'), 0.0),
+            'Drehung': 0,
+            'Ebene': 'manuell nicht gesetzt',
+            'Gewicht_kg': round(safe_number(unit.get('Gewicht_kg'), 0.0), 2),
+            'Volumen_m3': safe_number(unit.get('Volumen_m3'), 0.0),
+            'Warnung': '',
+            'Manuelle_Position': 'vorne links',
+            'Manuelle_Lage': 'ganz unten',
+            'Z_manuell_mm': 0.0,
+        })
+    return clean_placements_dataframe(pd.DataFrame(rows))
+
+
+def _derive_manual_position(row: pd.Series, platform_row: Optional[pd.Series]) -> str:
+    """Ermittelt eine grobe Positionsbeschriftung für die manuelle Tabelle."""
+    if platform_row is None or row is None or pd.isna(row.get('X_mm')) or pd.isna(row.get('Y_mm')):
+        return str(row.get('Manuelle_Position', 'vorne links') or 'vorne links')
+    eff_len = _manual_effective_length(platform_row)
+    width = safe_number(platform_row.get('Breite_mm'), 0.0)
+    x_mid = safe_number(row.get('X_mm')) + safe_number(row.get('Länge_mm')) / 2.0
+    y_mid = safe_number(row.get('Y_mm')) + safe_number(row.get('Breite_mm')) / 2.0
+    fb = 'vorne' if x_mid >= eff_len / 2.0 else 'hinten'
+    lr = 'links' if y_mid <= width / 2.0 else 'rechts'
+    return f'{fb} {lr}'
+
+
+def _apply_manual_assignment_table(
+    manual_df: pd.DataFrame,
+    assignment_df: pd.DataFrame,
+    selected_platform_row: Optional[pd.Series],
+    selected_platform: str,
+) -> pd.DataFrame:
+    """Setzt alle in der Tabelle gewählten Verladeeinheiten auf die ausgewählte Pritsche."""
+    if manual_df is None or manual_df.empty or assignment_df is None or assignment_df.empty:
+        return manual_df
+    result = manual_df.copy()
+    id_to_idx = {str(r.get('Einheit_ID')): idx for idx, r in result.iterrows()}
+
+    base_z = safe_number(selected_platform_row.get('Kantholz_erste_Lage_mm'), 0.0) if selected_platform_row is not None else 0.0
+    for _, erow in assignment_df.iterrows():
+        eid = str(erow.get('Einheit_ID', ''))
+        if eid not in id_to_idx:
+            continue
+        idx = id_to_idx[eid]
+        should_load = bool(erow.get('Verladen', False))
+        if not should_load:
+            if str(result.at[idx, 'Pritsche']) == str(selected_platform):
+                result = _manual_update_row(
+                    result, idx,
+                    Pritsche='NICHT VERLADEN',
+                    Fuhre_Nr=None,
+                    Fuhrenoption='',
+                    Pritschenname='',
+                    X_mm=None,
+                    Y_mm=None,
+                    Z_mm=None,
+                    Ebene='manuell nicht gesetzt',
+                )
+            continue
+
+        position = str(erow.get('Position') or result.at[idx, 'Manuelle_Position'] if 'Manuelle_Position' in result.columns else 'vorne links')
+        layer_action = str(erow.get('Lage') or 'ganz unten')
+        spacer = safe_number(erow.get('Einlage unten mm'), safe_number(result.at[idx, 'Einlage_unten_mm'] if 'Einlage_unten_mm' in result.columns else 0.0))
+        z_manual = safe_number(erow.get('Z manuell mm'), base_z)
+        result = _manual_place_by_position(
+            result,
+            idx,
+            selected_platform_row,
+            position=position,
+            layer_action=layer_action,
+            spacer_under=spacer,
+            custom_z=z_manual,
+        )
+        if 'Einlage_oben_mm' not in result.columns:
+            result['Einlage_oben_mm'] = 0.0
+        result.at[idx, 'Einlage_oben_mm'] = safe_number(erow.get('Einlage oben mm'), 0.0)
+        if 'Manuelle_Position' not in result.columns:
+            result['Manuelle_Position'] = ''
+        if 'Manuelle_Lage' not in result.columns:
+            result['Manuelle_Lage'] = ''
+        if 'Z_manuell_mm' not in result.columns:
+            result['Z_manuell_mm'] = 0.0
+        result.at[idx, 'Manuelle_Position'] = position
+        result.at[idx, 'Manuelle_Lage'] = layer_action
+        result.at[idx, 'Z_manuell_mm'] = z_manual
+
+    return clean_placements_dataframe(result)
+
+
 def _manual_platform_row(platforms_used_df: pd.DataFrame, platform_name: str) -> Optional[pd.Series]:
     if platforms_used_df is None or platforms_used_df.empty or 'Pritsche' not in platforms_used_df.columns:
         return None
@@ -5827,8 +5995,19 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
         pritschen_edit['Einlage_zwischen_Lagen_mm'] = float(bundle_spacer_height)
         pritschen_edit['Einlage_allgemein_mm'] = float(general_spacer_height)
 
-    st.subheader('6. Platzierung / Automatik')
-    st.caption('Ruhige Ausrichtung ist fest aktiv: normale Stapel werden links/rechts kompakt gehalten, breite Sonderteile mittig gesetzt und die ganze Ladung in der Länge als Block mittig auf der Pritsche ausgerichtet. Links und rechts dürfen unterschiedliche Stapelhöhen haben. Keine chaotische Lochfüllung; Unterbau nur als letzte Kontroll-/Notlösung.')
+    st.subheader('6. Verladeart')
+    verladeart = st.radio('Verladeart wählen', ['Automatisch', 'Manuell'], horizontal=True, key='verladeart_v37')
+    st.caption('Automatisch = App erstellt Vorschlag. Manuell = du wählst Fuhrenoption/Pritsche und setzt die Bauteile über eine Tabelle selbst.')
+
+    manual_fuhrenoption = ''
+    if verladeart == 'Manuell':
+        option_choices_manual = options_edit['Fuhrenoption'].dropna().astype(str).drop_duplicates().tolist() if options_edit is not None and not options_edit.empty and 'Fuhrenoption' in options_edit.columns else []
+        if not option_choices_manual:
+            option_choices_manual = pritschen_edit['Fuhrenoption'].dropna().astype(str).drop_duplicates().tolist() if pritschen_edit is not None and not pritschen_edit.empty and 'Fuhrenoption' in pritschen_edit.columns else []
+        manual_fuhrenoption = st.selectbox('Fuhrenoption für manuelle Verladung', option_choices_manual, key='manual_fuhrenoption_v37') if option_choices_manual else ''
+
+    st.subheader('6a. Platzierung / Automatik')
+    st.caption('Bei Automatik: ruhige Ausrichtung ist fest aktiv. Bei Manuell: diese Automatik wird übersprungen und du setzt die Einheiten in der Tabelle.')
     col1, col2, col3, col4 = st.columns(4)
     allow_beside = col1.checkbox('Nebeneinander erlauben', value=True)
     allow_stack = col2.checkbox('Übereinander erlauben', value=True)
@@ -5843,35 +6022,51 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
     min_support_ratio = ucol2.number_input('Mindestauflagefläche %', min_value=0, max_value=100, value=65, step=5) / 100.0
     min_underbau_height = ucol3.number_input('Unterbau anzeigen ab mm', min_value=0.0, max_value=500.0, value=20.0, step=5.0)
 
-    placements_df, summary_df, platforms_used_df, fuhren_log_df, plan_units_df = create_variant_a_loading_plan(
-        sorted_parts,
-        options_edit,
-        pritschen_edit,
-        standards=standards,
-        allow_beside=allow_beside,
-        allow_stack=allow_stack,
-        allow_rotation=allow_rotation,
-        center_geometric=center_geometric,
-        max_fuhren=int(max_fuhren),
-        use_bundles=use_bundles,
-        max_bundle_weight=max_bundle_weight,
-        bundle_spacer_height=bundle_spacer_height,
-        general_spacer_height=general_spacer_height,
-        same_height=same_height,
-        same_width=same_width,
-        same_quality=same_quality,
-        same_profile=same_profile,
-        label_attr=main_attr,
-    )
-    # Ab hier arbeitet die App mit den tatsächlich je Pritschenblock gebildeten Verladeeinheiten.
-    if plan_units_df is not None and not plan_units_df.empty:
-        units_df = plan_units_df.copy()
+    if verladeart == 'Automatisch':
+        placements_df, summary_df, platforms_used_df, fuhren_log_df, plan_units_df = create_variant_a_loading_plan(
+            sorted_parts,
+            options_edit,
+            pritschen_edit,
+            standards=standards,
+            allow_beside=allow_beside,
+            allow_stack=allow_stack,
+            allow_rotation=allow_rotation,
+            center_geometric=center_geometric,
+            max_fuhren=int(max_fuhren),
+            use_bundles=use_bundles,
+            max_bundle_weight=max_bundle_weight,
+            bundle_spacer_height=bundle_spacer_height,
+            general_spacer_height=general_spacer_height,
+            same_height=same_height,
+            same_width=same_width,
+            same_quality=same_quality,
+            same_profile=same_profile,
+            label_attr=main_attr,
+        )
+        # Ab hier arbeitet die App mit den tatsächlich je Pritschenblock gebildeten Verladeeinheiten.
+        if plan_units_df is not None and not plan_units_df.empty:
+            units_df = plan_units_df.copy()
+    else:
+        plan_units_df = units_df.copy()
+        platforms_used_df = _build_manual_platforms_from_excel(pritschen_edit, manual_fuhrenoption, standards)
+        placements_df = _build_manual_empty_placements_from_units(units_df)
+        summary_df = recompute_summary_from_placements(placements_df, platforms_used_df) if not platforms_used_df.empty else pd.DataFrame()
+        fuhren_log_df = pd.DataFrame([{
+            'Fuhre_Nr': 1,
+            'Fuhrenoption': manual_fuhrenoption,
+            'Option_Rang': 1,
+            'Pritschen': ', '.join(platforms_used_df['Pritsche'].astype(str).tolist()) if not platforms_used_df.empty else '',
+            'Bauteile von': '',
+            'Bauteile bis': '',
+            'Bauteile Anzahl': 0,
+            'Status': 'Manuell',
+        }])
 
     # Manueller Planstand:
     # Die Automatik erzeugt den Vorschlag. Danach arbeiten Tabelle, Ansichten und Export
     # mit dem manuellen Planstand aus st.session_state, bis bewusst zurückgesetzt wird.
-    manual_signature = _manual_plan_signature(placements_df)
-    platform_signature = _manual_platform_signature(platforms_used_df)
+    manual_signature = f"{verladeart}|{manual_fuhrenoption}|" + _manual_plan_signature(placements_df)
+    platform_signature = f"{verladeart}|{manual_fuhrenoption}|" + _manual_platform_signature(platforms_used_df)
     if (
         st.session_state.get('manual_plan_signature') != manual_signature
         or 'manual_placements_df' not in st.session_state
@@ -5976,217 +6171,163 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
         st.dataframe(edited_summary_df, use_container_width=True, hide_index=True)
 
     with tab3:
-        st.markdown('**Manuelle Verladung**')
-        st.caption('Links wird wie in Excel vergeben. Rechts siehst du sofort Draufsicht und Seitenansichten. Änderungen gelten für BSD, Ansichten, PDF und Excel.')
+        if verladeart == 'Automatisch':
+            st.markdown('**Automatik-Modus**')
+            st.info('Aktuell ist Automatik gewählt. Die App erstellt den Verladevorschlag. Manuelle Korrekturen sind nur aktiv, wenn oben „Manuell“ gewählt wird.')
+            st.dataframe(edited_placements_df, use_container_width=True, hide_index=True)
+        else:
+            st.markdown('**Manuelle Verladung**')
+            st.caption('Ablauf: Manuell wählen → Fuhrenoption wählen → Pritsche wählen → in der Tabelle Bauteile/Bunde anhaken und Position bestimmen.')
 
-        if st.button('Manuelle Änderungen zurücksetzen / Automatik wiederherstellen', key='manual_reset_btn_v35'):
-            manual_init = clean_placements_dataframe(placements_df)
-            if 'Einlage_unten_mm' not in manual_init.columns:
-                manual_init['Einlage_unten_mm'] = 0.0
-            if 'Einlage_oben_mm' not in manual_init.columns:
-                manual_init['Einlage_oben_mm'] = 0.0
-            st.session_state['manual_placements_df'] = manual_init
-            st.session_state['manual_platforms_df'] = _clean_manual_platforms_dataframe(platforms_used_df)
-            st.session_state['manual_plan_signature'] = manual_signature
-            st.session_state['manual_platform_signature'] = platform_signature
-            st.rerun()
-
-        left_col, right_col = st.columns([1.25, 1.0])
-
-        with left_col:
-            st.markdown('**1. Pritschenwerte je verwendeter Pritsche**')
-            st.caption('Kommt aus der Excel-Pritschen/Fuhren-Vorlage und kann pro Pritsche/Fuhre angepasst werden. Überstand vorne/hinten, Kantholz und Einlage wirken auf Prüfung, Ansicht und Export.')
-
-            platform_cols = _manual_default_platform_editor_columns(platforms_used_df)
-            platform_editor_df = platforms_used_df[platform_cols].copy() if platform_cols else platforms_used_df.copy()
-            edited_platform_editor = st.data_editor(
-                platform_editor_df,
-                use_container_width=True,
-                hide_index=True,
-                num_rows='fixed',
-                column_config={
-                    'Länge_mm': st.column_config.NumberColumn('Länge mm'),
-                    'Breite_mm': st.column_config.NumberColumn('Breite mm'),
-                    'Max_Höhe_mm': st.column_config.NumberColumn('max. Höhe mm'),
-                    'Überhang_vorne_mm': st.column_config.NumberColumn('Überstand vorne mm'),
-                    'Überhang_hinten_mm': st.column_config.NumberColumn('Überstand hinten mm'),
-                    'Max_Gewicht_kg': st.column_config.NumberColumn('max. Gewicht kg'),
-                    'Eigengewicht_Pritsche_kg': st.column_config.NumberColumn('Eigengewicht kg'),
-                    'Kantholz_erste_Lage_mm': st.column_config.NumberColumn('Kantholz unten mm'),
-                    'Einlage_zwischen_Lagen_mm': st.column_config.NumberColumn('Einlage Lage/Bund mm'),
-                    'Einlage_allgemein_mm': st.column_config.NumberColumn('Einlage allgemein mm'),
-                },
-                key='manual_platform_editor_v35',
-            )
-            if not edited_platform_editor.empty and platform_cols:
-                platform_full = platforms_used_df.copy()
-                for col in edited_platform_editor.columns:
-                    platform_full[col] = edited_platform_editor[col].values
-                platforms_used_df = _clean_manual_platforms_dataframe(platform_full)
-                st.session_state['manual_platforms_df'] = platforms_used_df
-
-            st.markdown('**2. Einheit auswählen und fachlich setzen**')
             manual_df = clean_placements_dataframe(st.session_state.get('manual_placements_df', edited_placements_df))
             if 'Einlage_unten_mm' not in manual_df.columns:
                 manual_df['Einlage_unten_mm'] = 0.0
             if 'Einlage_oben_mm' not in manual_df.columns:
                 manual_df['Einlage_oben_mm'] = 0.0
+            if 'Manuelle_Position' not in manual_df.columns:
+                manual_df['Manuelle_Position'] = 'vorne links'
+            if 'Manuelle_Lage' not in manual_df.columns:
+                manual_df['Manuelle_Lage'] = 'ganz unten'
+            if 'Z_manuell_mm' not in manual_df.columns:
+                manual_df['Z_manuell_mm'] = 0.0
 
+            platforms_used_df = _clean_manual_platforms_dataframe(st.session_state.get('manual_platforms_df', platforms_used_df))
             platform_names = platforms_used_df['Pritsche'].astype(str).tolist() if platforms_used_df is not None and not platforms_used_df.empty else []
-            selected_manual_platform = st.selectbox('Pritsche für manuelle Verladung', platform_names, key='manual_live_platform_v35') if platform_names else ''
-            rows_for_select = manual_df[manual_df.get('Pritsche', pd.Series(dtype=str)).astype(str) == str(selected_manual_platform)].copy() if selected_manual_platform else manual_df.copy()
-            rows_for_select = rows_for_select[rows_for_select.get('Pritsche', pd.Series(dtype=str)).astype(str) != 'NICHT VERLADEN'].copy() if not rows_for_select.empty else rows_for_select
 
-            if rows_for_select.empty:
-                st.warning('Keine Einheit auf dieser Pritsche vorhanden.')
-                selected_idx = None
-            else:
-                choices = []
-                for idx, r in rows_for_select.iterrows():
-                    choices.append((idx, f"{r.get('Einheit_ID','')} | {r.get('Bauteile','')} | Z={safe_number(r.get('Z_mm')):.0f}"))
-                labels = [label for _, label in choices]
-                label_to_idx = {label: idx for idx, label in choices}
-                selected_label = st.selectbox('Bund / Bauteil auswählen', labels, key='manual_unit_select_v35')
-                selected_idx = label_to_idx.get(selected_label)
+            left_col, right_col = st.columns([1.25, 1.0])
 
-            p_row = _manual_platform_row(platforms_used_df, selected_manual_platform)
-            if selected_idx is not None and p_row is not None:
-                selected_row = manual_df.loc[selected_idx]
-                c1, c2, c3 = st.columns(3)
-                position = c1.selectbox(
-                    'Position',
-                    [
-                        'vorne links', 'vorne rechts',
-                        'hinten links', 'hinten rechts',
-                        'X-Mitte links', 'X-Mitte rechts',
-                        'Y-Mitte', 'X-Mitte / Y-Mitte'
-                    ],
-                    key='manual_position_v35',
+            with left_col:
+                selected_manual_platform = st.selectbox('Pritsche wählen', platform_names, key='manual_table_platform_v37') if platform_names else ''
+                selected_platform_row = _manual_platform_row(platforms_used_df, selected_manual_platform) if selected_manual_platform else None
+
+                if selected_platform_row is not None:
+                    st.info(
+                        f"{selected_manual_platform}: "
+                        f"L {safe_number(selected_platform_row.get('Länge_mm')):.0f} / "
+                        f"B {safe_number(selected_platform_row.get('Breite_mm')):.0f} / "
+                        f"H {safe_number(selected_platform_row.get('Max_Höhe_mm')):.0f} mm · "
+                        f"Überstand hinten {safe_number(selected_platform_row.get('Überhang_hinten_mm')):.0f} / "
+                        f"vorne {safe_number(selected_platform_row.get('Überhang_vorne_mm')):.0f} mm"
+                    )
+
+                    with st.expander('Pritschenwerte ändern', expanded=False):
+                        p_mask = platforms_used_df['Pritsche'].astype(str).eq(str(selected_manual_platform))
+                        p_cols = [c for c in [
+                            'Pritsche', 'Länge_mm', 'Breite_mm', 'Max_Höhe_mm',
+                            'Überhang_hinten_mm', 'Überhang_vorne_mm',
+                            'Kantholz_erste_Lage_mm', 'Einlage_zwischen_Lagen_mm',
+                            'Max_Gewicht_kg', 'Eigengewicht_Pritsche_kg'
+                        ] if c in platforms_used_df.columns]
+                        p_edit = st.data_editor(
+                            platforms_used_df.loc[p_mask, p_cols].copy(),
+                            use_container_width=True,
+                            hide_index=True,
+                            num_rows='fixed',
+                            key='manual_platform_editor_v37',
+                        )
+                        if not p_edit.empty:
+                            for col in p_edit.columns:
+                                platforms_used_df.loc[p_mask, col] = p_edit[col].values
+                            platforms_used_df = _clean_manual_platforms_dataframe(platforms_used_df)
+                            st.session_state['manual_platforms_df'] = platforms_used_df
+                            selected_platform_row = _manual_platform_row(platforms_used_df, selected_manual_platform)
+
+                st.markdown('**Tabelle: Bauteile/Bunde auswählen und Position bestimmen**')
+                if not selected_manual_platform:
+                    st.warning('Keine Pritsche vorhanden. Prüfe Fuhrenoption / Pritschen-Excel.')
+                else:
+                    # In dieser Tabelle erscheinen unverladene Einheiten + Einheiten der gewählten Pritsche.
+                    visible_mask = (
+                        manual_df.get('Pritsche', pd.Series(dtype=str)).astype(str).eq('NICHT VERLADEN')
+                        | manual_df.get('Pritsche', pd.Series(dtype=str)).astype(str).eq(str(selected_manual_platform))
+                    )
+                    visible_df = manual_df.loc[visible_mask].copy()
+                    editor_rows = []
+                    for idx, row in visible_df.iterrows():
+                        is_on_platform = str(row.get('Pritsche', '')) == str(selected_manual_platform)
+                        pos = str(row.get('Manuelle_Position') or _derive_manual_position(row, selected_platform_row))
+                        lage = str(row.get('Manuelle_Lage') or ('behalten' if is_on_platform else 'ganz unten'))
+                        editor_rows.append({
+                            '_idx': idx,
+                            'Verladen': bool(is_on_platform),
+                            'Einheit_ID': row.get('Einheit_ID', ''),
+                            'Typ': row.get('Typ', ''),
+                            'Bauteile': row.get('Bauteile', ''),
+                            'Länge': safe_number(row.get('Länge_mm')),
+                            'Breite': safe_number(row.get('Breite_mm')),
+                            'Höhe': safe_number(row.get('Höhe_mm')),
+                            'Gewicht': safe_number(row.get('Gewicht_kg')),
+                            'Position': pos if pos else 'vorne links',
+                            'Lage': lage if lage else 'ganz unten',
+                            'Einlage unten mm': safe_number(row.get('Einlage_unten_mm'), safe_number(selected_platform_row.get('Einlage_zwischen_Lagen_mm'), 0.0) if selected_platform_row is not None else 0.0),
+                            'Einlage oben mm': safe_number(row.get('Einlage_oben_mm'), 0.0),
+                            'Z manuell mm': safe_number(row.get('Z_manuell_mm'), safe_number(row.get('Z_mm'), safe_number(selected_platform_row.get('Kantholz_erste_Lage_mm'), 0.0) if selected_platform_row is not None else 0.0)),
+                        })
+                    assignment_editor_df = pd.DataFrame(editor_rows)
+
+                    edited_assignment = st.data_editor(
+                        assignment_editor_df,
+                        use_container_width=True,
+                        hide_index=True,
+                        num_rows='fixed',
+                        disabled=['_idx', 'Einheit_ID', 'Typ', 'Bauteile', 'Länge', 'Breite', 'Höhe', 'Gewicht'],
+                        column_config={
+                            'Verladen': st.column_config.CheckboxColumn('Verladen'),
+                            'Position': st.column_config.SelectboxColumn('Position', options=['vorne links', 'vorne rechts', 'hinten links', 'hinten rechts', 'X-Mitte links', 'X-Mitte rechts', 'Y-Mitte', 'X-Mitte / Y-Mitte']),
+                            'Lage': st.column_config.SelectboxColumn('Lage', options=['behalten', 'ganz unten', 'eine Lage höher', 'eine Lage tiefer', 'Z manuell']),
+                            'Einlage unten mm': st.column_config.NumberColumn('Einlage unten mm'),
+                            'Einlage oben mm': st.column_config.NumberColumn('Einlage oben mm'),
+                            'Z manuell mm': st.column_config.NumberColumn('Z manuell mm'),
+                        },
+                        key='manual_assignment_table_v37',
+                    )
+
+                    b1, b2, b3 = st.columns(3)
+                    if b1.button('Tabelle anwenden', key='manual_apply_table_v37', type='primary'):
+                        manual_df = _apply_manual_assignment_table(manual_df, edited_assignment, selected_platform_row, selected_manual_platform)
+                        st.session_state['manual_placements_df'] = manual_df
+                        st.rerun()
+                    if b2.button('Auswahl/Bund aufteilen', key='manual_split_selected_v37'):
+                        selected_rows = edited_assignment[edited_assignment['Verladen'] == True]
+                        if not selected_rows.empty:
+                            first_idx = int(selected_rows.iloc[0]['_idx'])
+                            st.session_state['manual_placements_df'] = _manual_split_bundle_row(manual_df, first_idx)
+                            st.rerun()
+                        else:
+                            st.warning('Zuerst eine Zeile mit Verladen anhaken.')
+                    if b3.button('Alles auf dieser Pritsche leeren', key='manual_clear_platform_v37'):
+                        for idx, row in manual_df[manual_df['Pritsche'].astype(str).eq(str(selected_manual_platform))].iterrows():
+                            manual_df = _manual_update_row(manual_df, idx, Pritsche='NICHT VERLADEN', X_mm=None, Y_mm=None, Z_mm=None, Ebene='manuell nicht gesetzt')
+                        st.session_state['manual_placements_df'] = manual_df
+                        st.rerun()
+
+                # Nach manueller Eingabe alles neu rechnen.
+                edited_placements_df = clean_placements_dataframe(st.session_state.get('manual_placements_df', manual_df))
+                edited_summary_df = recompute_summary_from_placements(edited_placements_df, platforms_used_df) if not platforms_used_df.empty else summary_df
+                warnings_plan_df = compute_loading_warnings(edited_placements_df, platforms_used_df)
+                display_placements_df, underbau_warnings_df = add_underbau_rows_to_placements(
+                    edited_placements_df,
+                    platforms_used_df,
+                    min_support_ratio=float(min_support_ratio),
+                    min_underbau_height=float(min_underbau_height),
+                    enabled=bool(underbau_enabled),
                 )
-                layer_action = c2.selectbox(
-                    'Lage / Höhe',
-                    ['behalten', 'ganz unten', 'eine Lage höher', 'eine Lage tiefer', 'Z manuell'],
-                    key='manual_layer_action_v35',
-                )
-                default_spacer = safe_number(p_row.get('Einlage_zwischen_Lagen_mm'), 0.0)
-                spacer_under = c3.number_input('Einlage unter Auswahl mm', min_value=0.0, max_value=300.0, value=float(default_spacer), step=5.0, key='manual_spacer_under_v35')
+                if underbau_warnings_df is not None and not underbau_warnings_df.empty:
+                    warnings_plan_df = pd.concat([warnings_plan_df, underbau_warnings_df], ignore_index=True, sort=False) if not warnings_plan_df.empty else underbau_warnings_df
 
-                c4, c5, c6 = st.columns(3)
-                custom_z = c4.number_input('Z manuell mm', min_value=0.0, max_value=10000.0, value=float(safe_number(selected_row.get('Z_mm'), 0.0)), step=5.0, key='manual_custom_z_v35')
-                einlage_oben = c5.number_input('Einlage oben mm', min_value=0.0, max_value=300.0, value=float(safe_number(selected_row.get('Einlage_oben_mm'), 0.0)), step=5.0, key='manual_spacer_top_v35')
-                target_platform = c6.selectbox('Ziel-Pritsche', platform_names, index=platform_names.index(selected_manual_platform), key='manual_target_platform_v35') if platform_names else selected_manual_platform
-                target_row = _manual_platform_row(platforms_used_df, target_platform)
-
-                a1, a2, a3 = st.columns(3)
-                if a1.button('Auswahl setzen', key='manual_apply_position_v35', type='primary'):
-                    manual_df = _manual_place_by_position(
-                        manual_df,
-                        selected_idx,
-                        target_row,
-                        position=position,
-                        layer_action=layer_action,
-                        spacer_under=float(spacer_under),
-                        custom_z=float(custom_z),
+            with right_col:
+                st.markdown('**Live-Skizze**')
+                if selected_manual_platform:
+                    view_choice = st.radio('Ansicht', ['Draufsicht', 'Seitenansicht', 'Vorderansicht', 'Rückansicht'], horizontal=True, key='manual_view_v37')
+                    view_map = {'Draufsicht': 'top', 'Seitenansicht': 'side', 'Vorderansicht': 'front', 'Rückansicht': 'back'}
+                    st.plotly_chart(
+                        draw_loading_view(display_placements_df, platforms_used_df, selected_manual_platform, view_map[view_choice]),
+                        use_container_width=True,
+                        key=f"manual_plot_v37_{selected_manual_platform}_{view_map[view_choice]}",
                     )
-                    if 'Einlage_oben_mm' not in manual_df.columns:
-                        manual_df['Einlage_oben_mm'] = 0.0
-                    manual_df.at[selected_idx, 'Einlage_oben_mm'] = float(einlage_oben)
-                    st.session_state['manual_placements_df'] = clean_placements_dataframe(manual_df)
-                    st.rerun()
-
-                if a2.button('Bund aufteilen', key='manual_split_bundle_v35'):
-                    st.session_state['manual_placements_df'] = _manual_split_bundle_row(manual_df, selected_idx)
-                    st.rerun()
-
-                if a3.button('als geprüft markieren', key='manual_checked_v35'):
-                    old_note = str(selected_row.get('Warnung', '')) if 'Warnung' in manual_df.columns else ''
-                    note = 'manuell geprüft' if not old_note else f'{old_note} / manuell geprüft'
-                    st.session_state['manual_placements_df'] = _manual_update_row(manual_df, selected_idx, Warnung=note)
-                    st.rerun()
-
-            st.markdown('**3. Excel-artige Platzierungstabelle**')
-            st.caption('Feinkorrektur direkt in der Tabelle. X/Y/Z bleiben sichtbar, aber die Vergabe oben ist der einfache Weg.')
-            show_cols = [
-                'Einheit_ID', 'Typ', 'Bauteile', 'Pritsche', 'X_mm', 'Y_mm', 'Z_mm',
-                'Länge_mm', 'Breite_mm', 'Höhe_mm', 'Einlage_unten_mm', 'Einlage_oben_mm',
-                'Bundeinlage_mm', 'Einlage_allgemein_mm', 'Gewicht_kg', 'Warnung', 'Ebene'
-            ]
-            table_cols = [c for c in show_cols if c in manual_df.columns]
-            edited_table = st.data_editor(
-                manual_df[table_cols] if table_cols else manual_df,
-                use_container_width=True,
-                hide_index=True,
-                num_rows='fixed',
-                column_config={
-                    'X_mm': st.column_config.NumberColumn('X mm'),
-                    'Y_mm': st.column_config.NumberColumn('Y mm'),
-                    'Z_mm': st.column_config.NumberColumn('Z mm'),
-                    'Länge_mm': st.column_config.NumberColumn('Länge mm'),
-                    'Breite_mm': st.column_config.NumberColumn('Breite mm'),
-                    'Höhe_mm': st.column_config.NumberColumn('Höhe mm'),
-                    'Einlage_unten_mm': st.column_config.NumberColumn('Einlage unten mm'),
-                    'Einlage_oben_mm': st.column_config.NumberColumn('Einlage oben mm'),
-                    'Bundeinlage_mm': st.column_config.NumberColumn('Einlage Lage/Bund mm'),
-                    'Einlage_allgemein_mm': st.column_config.NumberColumn('Einlage allgemein mm'),
-                    'Gewicht_kg': st.column_config.NumberColumn('Gewicht kg'),
-                },
-                key='manual_excel_table_v35',
-            )
-            # Geänderte Spalten zurück in vollständige Tabelle übernehmen.
-            for col in edited_table.columns:
-                manual_df[col] = edited_table[col].values
-            edited_placements_df = clean_placements_dataframe(manual_df)
-            st.session_state['manual_placements_df'] = edited_placements_df
-
-        # Nach manueller Eingabe alles neu rechnen.
-        platforms_used_df = _clean_manual_platforms_dataframe(st.session_state.get('manual_platforms_df', platforms_used_df))
-        edited_placements_df = clean_placements_dataframe(st.session_state.get('manual_placements_df', edited_placements_df))
-        edited_summary_df = recompute_summary_from_placements(edited_placements_df, platforms_used_df) if not platforms_used_df.empty else summary_df
-        warnings_plan_df = compute_loading_warnings(edited_placements_df, platforms_used_df)
-        display_placements_df, underbau_warnings_df = add_underbau_rows_to_placements(
-            edited_placements_df,
-            platforms_used_df,
-            min_support_ratio=float(min_support_ratio),
-            min_underbau_height=float(min_underbau_height),
-            enabled=bool(underbau_enabled),
-        )
-        if underbau_warnings_df is not None and not underbau_warnings_df.empty:
-            warnings_plan_df = pd.concat([warnings_plan_df, underbau_warnings_df], ignore_index=True, sort=False) if not warnings_plan_df.empty else underbau_warnings_df
-
-        with right_col:
-            st.markdown('**Live-Skizze**')
-            st.caption('Gestrichelt = zulässiger Ladebereich inkl. Überstand. Durchgezogen = echte Pritsche. Änderungen links werden sofort in der Skizze verwendet.')
-            live_platforms = platforms_used_df['Pritsche'].astype(str).tolist() if platforms_used_df is not None and not platforms_used_df.empty else []
-            default_live = selected_manual_platform if selected_manual_platform in live_platforms else (live_platforms[0] if live_platforms else '')
-            live_platform = st.selectbox('Skizze Pritsche', live_platforms, index=live_platforms.index(default_live) if default_live in live_platforms else 0, key='manual_sketch_platform_v35') if live_platforms else ''
-
-            if live_platform:
-                prow_live = _manual_platform_row(platforms_used_df, live_platform)
-                if prow_live is not None:
-                    eff_len_live = _manual_effective_length(prow_live)
-                    st.write(
-                        f"Ladebereich: {eff_len_live:.0f} mm Länge inkl. Überstand · "
-                        f"Breite {safe_number(prow_live.get('Breite_mm')):.0f} mm · "
-                        f"max. Höhe {safe_number(prow_live.get('Max_Höhe_mm')):.0f} mm"
-                    )
-                    st.write(
-                        f"Überstand hinten {safe_number(prow_live.get('Überhang_hinten_mm')):.0f} mm · "
-                        f"Überstand vorne {safe_number(prow_live.get('Überhang_vorne_mm')):.0f} mm · "
-                        f"Kantholz {safe_number(prow_live.get('Kantholz_erste_Lage_mm')):.0f} mm · "
-                        f"Einlage {safe_number(prow_live.get('Einlage_zwischen_Lagen_mm')):.0f} mm"
-                    )
-
-                st.plotly_chart(draw_loading_view(display_placements_df, platforms_used_df, live_platform, 'top'), use_container_width=True, key=f'manual_live_top_{live_platform}')
-                sc1, sc2 = st.columns(2)
-                with sc1:
-                    st.plotly_chart(draw_loading_view(display_placements_df, platforms_used_df, live_platform, 'side'), use_container_width=True, key=f'manual_live_side_{live_platform}')
-                    st.plotly_chart(draw_loading_view(display_placements_df, platforms_used_df, live_platform, 'front'), use_container_width=True, key=f'manual_live_front_{live_platform}')
-                with sc2:
-                    st.plotly_chart(draw_loading_view(display_placements_df, platforms_used_df, live_platform, 'back'), use_container_width=True, key=f'manual_live_back_{live_platform}')
-                    st.caption('Rechte/Linke Seitenansicht als einfache Seitenprojektion. Für exakte getrennte linke/rechte Seiten kommt später eine zweite Seitenprojektion dazu.')
-
-        if not_loaded_count:
-            st.error('Nicht alle Verladeeinheiten konnten automatisch platziert werden. Freigegebene Fuhrenoptionen, Pritschenmaße oder Bundbildung prüfen.')
+                    st.caption('Gestrichelt = Ladebereich inkl. Überstand. Durchgezogen = echte Pritsche.')
+                else:
+                    st.info('Pritsche wählen, dann erscheint hier die Skizze.')
 
     with tab4:
         bsd_header_df, bsd_matrix_df = create_all_bsd_matrices(
