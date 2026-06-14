@@ -905,7 +905,7 @@ def build_loading_units(
 ) -> pd.DataFrame:
     """Erzeugt Verladeeinheiten: einzelnes Bauteil oder Bund.
 
-    V34:
+    V35:
     - Wenn ein gleichartiger Bund am Gewichtsende "unschön" abbrechen würde,
       wird die letzte Bundgruppe lokal neu aufgeteilt.
     - Ziel: weniger kleine Restbunde und weniger Löcher auf der Pritsche.
@@ -3831,7 +3831,7 @@ def _format_bsd_cell(row: pd.Series) -> str:
 def _orientation_flags_from_meta(project_meta: Optional[Dict[str, Any]] = None) -> Tuple[bool, bool]:
     """Fixe Orientierung für Ladeplan/PDF.
 
-    V34:
+    V35:
     Die Orientierung ist nicht mehr über die Oberfläche verstellbar, damit die
     Darstellung nicht optisch "schön", aber fachlich falsch gedreht werden kann.
 
@@ -5979,7 +5979,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
         st.markdown('**Manuelle Verladung**')
         st.caption('Links wird wie in Excel vergeben. Rechts siehst du sofort Draufsicht und Seitenansichten. Änderungen gelten für BSD, Ansichten, PDF und Excel.')
 
-        if st.button('Manuelle Änderungen zurücksetzen / Automatik wiederherstellen', key='manual_reset_btn_v34'):
+        if st.button('Manuelle Änderungen zurücksetzen / Automatik wiederherstellen', key='manual_reset_btn_v35'):
             manual_init = clean_placements_dataframe(placements_df)
             if 'Einlage_unten_mm' not in manual_init.columns:
                 manual_init['Einlage_unten_mm'] = 0.0
@@ -6016,7 +6016,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                     'Einlage_zwischen_Lagen_mm': st.column_config.NumberColumn('Einlage Lage/Bund mm'),
                     'Einlage_allgemein_mm': st.column_config.NumberColumn('Einlage allgemein mm'),
                 },
-                key='manual_platform_editor_v34',
+                key='manual_platform_editor_v35',
             )
             if not edited_platform_editor.empty and platform_cols:
                 platform_full = platforms_used_df.copy()
@@ -6033,7 +6033,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                 manual_df['Einlage_oben_mm'] = 0.0
 
             platform_names = platforms_used_df['Pritsche'].astype(str).tolist() if platforms_used_df is not None and not platforms_used_df.empty else []
-            selected_manual_platform = st.selectbox('Pritsche für manuelle Verladung', platform_names, key='manual_live_platform_v34') if platform_names else ''
+            selected_manual_platform = st.selectbox('Pritsche für manuelle Verladung', platform_names, key='manual_live_platform_v35') if platform_names else ''
             rows_for_select = manual_df[manual_df.get('Pritsche', pd.Series(dtype=str)).astype(str) == str(selected_manual_platform)].copy() if selected_manual_platform else manual_df.copy()
             rows_for_select = rows_for_select[rows_for_select.get('Pritsche', pd.Series(dtype=str)).astype(str) != 'NICHT VERLADEN'].copy() if not rows_for_select.empty else rows_for_select
 
@@ -6046,7 +6046,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                     choices.append((idx, f"{r.get('Einheit_ID','')} | {r.get('Bauteile','')} | Z={safe_number(r.get('Z_mm')):.0f}"))
                 labels = [label for _, label in choices]
                 label_to_idx = {label: idx for idx, label in choices}
-                selected_label = st.selectbox('Bund / Bauteil auswählen', labels, key='manual_unit_select_v34')
+                selected_label = st.selectbox('Bund / Bauteil auswählen', labels, key='manual_unit_select_v35')
                 selected_idx = label_to_idx.get(selected_label)
 
             p_row = _manual_platform_row(platforms_used_df, selected_manual_platform)
@@ -6061,24 +6061,24 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                         'X-Mitte links', 'X-Mitte rechts',
                         'Y-Mitte', 'X-Mitte / Y-Mitte'
                     ],
-                    key='manual_position_v34',
+                    key='manual_position_v35',
                 )
                 layer_action = c2.selectbox(
                     'Lage / Höhe',
                     ['behalten', 'ganz unten', 'eine Lage höher', 'eine Lage tiefer', 'Z manuell'],
-                    key='manual_layer_action_v34',
+                    key='manual_layer_action_v35',
                 )
                 default_spacer = safe_number(p_row.get('Einlage_zwischen_Lagen_mm'), 0.0)
-                spacer_under = c3.number_input('Einlage unter Auswahl mm', min_value=0.0, max_value=300.0, value=float(default_spacer), step=5.0, key='manual_spacer_under_v34')
+                spacer_under = c3.number_input('Einlage unter Auswahl mm', min_value=0.0, max_value=300.0, value=float(default_spacer), step=5.0, key='manual_spacer_under_v35')
 
                 c4, c5, c6 = st.columns(3)
-                custom_z = c4.number_input('Z manuell mm', min_value=0.0, max_value=10000.0, value=float(safe_number(selected_row.get('Z_mm'), 0.0)), step=5.0, key='manual_custom_z_v34')
-                einlage_oben = c5.number_input('Einlage oben mm', min_value=0.0, max_value=300.0, value=float(safe_number(selected_row.get('Einlage_oben_mm'), 0.0)), step=5.0, key='manual_spacer_top_v34')
-                target_platform = c6.selectbox('Ziel-Pritsche', platform_names, index=platform_names.index(selected_manual_platform), key='manual_target_platform_v34') if platform_names else selected_manual_platform
+                custom_z = c4.number_input('Z manuell mm', min_value=0.0, max_value=10000.0, value=float(safe_number(selected_row.get('Z_mm'), 0.0)), step=5.0, key='manual_custom_z_v35')
+                einlage_oben = c5.number_input('Einlage oben mm', min_value=0.0, max_value=300.0, value=float(safe_number(selected_row.get('Einlage_oben_mm'), 0.0)), step=5.0, key='manual_spacer_top_v35')
+                target_platform = c6.selectbox('Ziel-Pritsche', platform_names, index=platform_names.index(selected_manual_platform), key='manual_target_platform_v35') if platform_names else selected_manual_platform
                 target_row = _manual_platform_row(platforms_used_df, target_platform)
 
                 a1, a2, a3 = st.columns(3)
-                if a1.button('Auswahl setzen', key='manual_apply_position_v34', type='primary'):
+                if a1.button('Auswahl setzen', key='manual_apply_position_v35', type='primary'):
                     manual_df = _manual_place_by_position(
                         manual_df,
                         selected_idx,
@@ -6094,11 +6094,11 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                     st.session_state['manual_placements_df'] = clean_placements_dataframe(manual_df)
                     st.rerun()
 
-                if a2.button('Bund aufteilen', key='manual_split_bundle_v34'):
+                if a2.button('Bund aufteilen', key='manual_split_bundle_v35'):
                     st.session_state['manual_placements_df'] = _manual_split_bundle_row(manual_df, selected_idx)
                     st.rerun()
 
-                if a3.button('als geprüft markieren', key='manual_checked_v34'):
+                if a3.button('als geprüft markieren', key='manual_checked_v35'):
                     old_note = str(selected_row.get('Warnung', '')) if 'Warnung' in manual_df.columns else ''
                     note = 'manuell geprüft' if not old_note else f'{old_note} / manuell geprüft'
                     st.session_state['manual_placements_df'] = _manual_update_row(manual_df, selected_idx, Warnung=note)
@@ -6130,7 +6130,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                     'Einlage_allgemein_mm': st.column_config.NumberColumn('Einlage allgemein mm'),
                     'Gewicht_kg': st.column_config.NumberColumn('Gewicht kg'),
                 },
-                key='manual_excel_table_v34',
+                key='manual_excel_table_v35',
             )
             # Geänderte Spalten zurück in vollständige Tabelle übernehmen.
             for col in edited_table.columns:
@@ -6158,7 +6158,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
             st.caption('Gestrichelt = zulässiger Ladebereich inkl. Überstand. Durchgezogen = echte Pritsche. Änderungen links werden sofort in der Skizze verwendet.')
             live_platforms = platforms_used_df['Pritsche'].astype(str).tolist() if platforms_used_df is not None and not platforms_used_df.empty else []
             default_live = selected_manual_platform if selected_manual_platform in live_platforms else (live_platforms[0] if live_platforms else '')
-            live_platform = st.selectbox('Skizze Pritsche', live_platforms, index=live_platforms.index(default_live) if default_live in live_platforms else 0, key='manual_sketch_platform_v34') if live_platforms else ''
+            live_platform = st.selectbox('Skizze Pritsche', live_platforms, index=live_platforms.index(default_live) if default_live in live_platforms else 0, key='manual_sketch_platform_v35') if live_platforms else ''
 
             if live_platform:
                 prow_live = _manual_platform_row(platforms_used_df, live_platform)
@@ -6176,13 +6176,13 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                         f"Einlage {safe_number(prow_live.get('Einlage_zwischen_Lagen_mm')):.0f} mm"
                     )
 
-                st.plotly_chart(draw_loading_view(display_placements_df, platforms_used_df, live_platform, 'top'), use_container_width=True)
+                st.plotly_chart(draw_loading_view(display_placements_df, platforms_used_df, live_platform, 'top'), use_container_width=True, key=f'manual_live_top_{live_platform}')
                 sc1, sc2 = st.columns(2)
                 with sc1:
-                    st.plotly_chart(draw_loading_view(display_placements_df, platforms_used_df, live_platform, 'side'), use_container_width=True)
-                    st.plotly_chart(draw_loading_view(display_placements_df, platforms_used_df, live_platform, 'front'), use_container_width=True)
+                    st.plotly_chart(draw_loading_view(display_placements_df, platforms_used_df, live_platform, 'side'), use_container_width=True, key=f'manual_live_side_{live_platform}')
+                    st.plotly_chart(draw_loading_view(display_placements_df, platforms_used_df, live_platform, 'front'), use_container_width=True, key=f'manual_live_front_{live_platform}')
                 with sc2:
-                    st.plotly_chart(draw_loading_view(display_placements_df, platforms_used_df, live_platform, 'back'), use_container_width=True)
+                    st.plotly_chart(draw_loading_view(display_placements_df, platforms_used_df, live_platform, 'back'), use_container_width=True, key=f'manual_live_back_{live_platform}')
                     st.caption('Rechte/Linke Seitenansicht als einfache Seitenprojektion. Für exakte getrennte linke/rechte Seiten kommt später eine zweite Seitenprojektion dazu.')
 
         if not_loaded_count:
@@ -6250,14 +6250,14 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
 
             col1, col2 = st.columns(2)
             with col1:
-                st.plotly_chart(draw_loading_view(display_placements_df, platforms_used_df, selected_platform, 'side'), use_container_width=True)
+                st.plotly_chart(draw_loading_view(display_placements_df, platforms_used_df, selected_platform, 'side'), use_container_width=True, key=f'ansicht_side_{selected_platform}')
             with col2:
-                st.plotly_chart(draw_loading_view(display_placements_df, platforms_used_df, selected_platform, 'back'), use_container_width=True)
+                st.plotly_chart(draw_loading_view(display_placements_df, platforms_used_df, selected_platform, 'back'), use_container_width=True, key=f'ansicht_back_{selected_platform}')
             col3, col4 = st.columns(2)
             with col3:
-                st.plotly_chart(draw_loading_view(display_placements_df, platforms_used_df, selected_platform, 'top'), use_container_width=True)
+                st.plotly_chart(draw_loading_view(display_placements_df, platforms_used_df, selected_platform, 'top'), use_container_width=True, key=f'ansicht_top_{selected_platform}')
             with col4:
-                st.plotly_chart(draw_loading_view(display_placements_df, platforms_used_df, selected_platform, 'front'), use_container_width=True)
+                st.plotly_chart(draw_loading_view(display_placements_df, platforms_used_df, selected_platform, 'front'), use_container_width=True, key=f'ansicht_front_{selected_platform}')
 
     with tab7:
         # Falls der Ladeplan-BSD-Tab nicht angezeigt wurde, trotzdem für den Export erstellen.
