@@ -686,11 +686,27 @@ def sort_parts_dataframe(
         return df.copy()
 
     result = df.copy()
-    for col in sort_cols:
-        # leere Werte sauber ans Ende bringen
-        if result[col].dtype == object:
-            result[col] = result[col].fillna('').astype(str)
-    return result.sort_values(by=sort_cols, ascending=sort_ascending, kind='stable').reset_index(drop=True)
+
+    # Natürliche Sortierung: Textwerte mit Zahlen werden wie Zahlen sortiert
+    # (1, 2, 10 statt 1, 10, 2). Die Sortierung bleibt stabil und läuft
+    # weiterhin Hauptattribut -> Nebenattribute. Leere Werte bleiben hinten.
+    helper_cols: List[str] = []
+    specs: List[Tuple[str, str, str, bool]] = []
+    for idx, (col, asc) in enumerate(zip(sort_cols, sort_ascending)):
+        key_col = f'__sort_key_{idx}'
+        empty_col = f'__sort_empty_{idx}'
+        result[empty_col] = result[col].apply(lambda v: _format_label_value(v) == '')
+        if pd.api.types.is_numeric_dtype(result[col]):
+            result[key_col] = pd.to_numeric(result[col], errors='coerce')
+        else:
+            result[key_col] = result[col].apply(_natural_sort_text)
+        helper_cols.extend([key_col, empty_col])
+        specs.append((empty_col, key_col, col, bool(asc)))
+
+    for empty_col, key_col, _col, asc in reversed(specs):
+        result = result.sort_values(by=[empty_col, key_col], ascending=[True, asc], kind='stable')
+
+    return result.drop(columns=helper_cols, errors='ignore').reset_index(drop=True)
 
 
 # =============================================================================
@@ -889,6 +905,49 @@ def _format_label_value(value: Any) -> str:
     if text.lower() == 'nan':
         return ''
     return text
+
+
+def _natural_sort_text(value: Any) -> str:
+    """Textsortierung mit Zahlen natürlich behandeln: 1, 2, 10 statt 1, 10, 2."""
+    text = _format_label_value(value)
+    if not text:
+        return ''
+    parts = re.split(r'(\d+)', str(text))
+    out: List[str] = []
+    for part in parts:
+        if not part:
+            continue
+        if part.isdigit():
+            out.append(part.zfill(18))
+        else:
+            out.append(part.lower())
+    return ''.join(out)
+
+
+def _compact_bundle_id(value: Any) -> str:
+    """B001 -> B1, B010 -> B10. Andere IDs bleiben erhalten."""
+    raw = str(value or '').strip()
+    if not raw:
+        return ''
+    m = re.match(r'^B0*(\d+)$', raw, flags=re.IGNORECASE)
+    if m:
+        return f'B{int(m.group(1))}'
+    return raw
+
+
+def _bundle_display_tag(row: pd.Series) -> str:
+    """Kurze Bundbeschriftung für reduzierte Verladeplan-Anzeige."""
+    tag = _compact_bundle_id(row.get('Einheit_ID', ''))
+    if tag:
+        return tag
+    label = _format_label_value(row.get('Ansicht_Label'))
+    return label or _format_label_value(row.get('Bauteile')) or 'Bund'
+
+
+def _project_meta_bool(project_meta: Optional[Dict[str, Any]], key: str, default: bool = False) -> bool:
+    if not project_meta or key not in project_meta:
+        return bool(default)
+    return yes_no_to_bool(project_meta.get(key))
 
 
 def _part_display_label(row: pd.Series, label_attr: str) -> str:
@@ -1190,14 +1249,19 @@ def commit_place(
     return placement
 
 
-def _unit_orientations_for_state(state: Dict[str, Any], unit: pd.Series, allow_rotation: bool) -> List[Tuple[float, float, int]]:
-    """Mögliche Drehungen einer Verladeeinheit."""
+def _unit_orientations_for_state(state: Dict[str, Any], unit: pd.Series, allow_rotation: bool) -> List[Tuple[float, float, float, int]]:
+    """Mögliche Drehungen einer Verladeeinheit.
+
+    90° bedeutet hier hochkant: Länge bleibt gleich, Breite und Höhe werden getauscht.
+    Beispiel: 240 mm breit / 120 mm hoch -> 120 mm breit / 240 mm hoch.
+    """
     length = float(unit['Länge_mm'])
     width = float(unit['Breite_mm'])
+    height = float(unit['Höhe_mm'])
     rotation_allowed = bool(allow_rotation and state.get('allow_rotation_platform', False))
-    orientations = [(length, width, 0)]
-    if rotation_allowed and abs(length - width) > 0.001:
-        orientations.append((width, length, 90))
+    orientations = [(length, width, height, 0)]
+    if rotation_allowed and abs(width - height) > 0.001:
+        orientations.append((length, height, width, 90))
     return orientations
 
 
@@ -1213,9 +1277,9 @@ def _current_gap_fit(state: Dict[str, Any], unit: pd.Series, allow_rotation: boo
     x = float(state['current_x'])
     y = float(state['current_y'])
     z = float(state['current_z'])
-    for use_length, use_width, rotation in _unit_orientations_for_state(state, unit, allow_rotation):
-        if can_place(state, x, y, z, use_length, use_width, height, weight):
-            return (x, y, z, use_length, use_width, height, rotation, 'Lücke gefüllt')
+    for use_length, use_width, use_height, rotation in _unit_orientations_for_state(state, unit, allow_rotation):
+        if can_place(state, x, y, z, use_length, use_width, use_height, weight):
+            return (x, y, z, use_length, use_width, use_height, rotation, 'Lücke gefüllt')
     return None
 
 
@@ -1261,24 +1325,24 @@ def try_place_unit(
     height = float(unit['Höhe_mm'])
     weight = float(unit['Gewicht_kg'])
 
-    for use_length, use_width, rotation in _unit_orientations_for_state(state, unit, allow_rotation):
+    for use_length, use_width, use_height, rotation in _unit_orientations_for_state(state, unit, allow_rotation):
         # 1. hintereinander in aktueller Reihe
         x = state['current_x']
         y = state['current_y']
         z = state['current_z']
-        if can_place(state, x, y, z, use_length, use_width, height, weight):
-            return commit_place(state, unit, x, y, z, use_length, use_width, height, rotation, 'hintereinander')
+        if can_place(state, x, y, z, use_length, use_width, use_height, weight):
+            return commit_place(state, unit, x, y, z, use_length, use_width, use_height, rotation, 'hintereinander')
 
         # 2. neue Reihe daneben
         if allow_beside and state['row_max_width'] > 0:
             x = 0.0
             y = state['current_y'] + state['row_max_width']
             z = state['current_z']
-            if can_place(state, x, y, z, use_length, use_width, height, weight):
+            if can_place(state, x, y, z, use_length, use_width, use_height, weight):
                 state['current_x'] = 0.0
                 state['current_y'] = y
                 state['row_max_width'] = 0.0
-                return commit_place(state, unit, x, y, z, use_length, use_width, height, rotation, 'nebeneinander')
+                return commit_place(state, unit, x, y, z, use_length, use_width, use_height, rotation, 'nebeneinander')
 
         # 3. neue Lage darüber
         if allow_stack and state['layer_max_height'] > 0:
@@ -1295,14 +1359,14 @@ def try_place_unit(
             else:
                 effective_layer_spacer = float(state.get('general_spacer_height', 0.0))
             z = state['current_z'] + state['layer_max_height'] + max(0.0, effective_layer_spacer)
-            if can_place(state, x, y, z, use_length, use_width, height, weight):
+            if can_place(state, x, y, z, use_length, use_width, use_height, weight):
                 state['current_x'] = 0.0
                 state['current_y'] = 0.0
                 state['current_z'] = z
                 state['row_max_width'] = 0.0
                 state['layer_max_height'] = 0.0
                 state['current_layer_has_bundle'] = False
-                return commit_place(state, unit, x, y, z, use_length, use_width, height, rotation, 'übereinander')
+                return commit_place(state, unit, x, y, z, use_length, use_width, use_height, rotation, 'übereinander')
 
     return None
 
@@ -1439,7 +1503,7 @@ def _clean_effective_spacer_for_side(state: Dict[str, Any], side: str, unit: pd.
     return float(state.get('general_spacer_height', 0.0))
 
 
-def _clean_start_new_side_layer(state: Dict[str, Any], side: str, unit: pd.Series) -> Optional[Tuple[float, float]]:
+def _clean_start_new_side_layer(state: Dict[str, Any], side: str, unit: pd.Series, height_mm: Optional[float] = None) -> Optional[Tuple[float, float]]:
     """Startet nur auf einer Seite eine neue Lage.
 
     Rückgabe: (new_x, new_z) oder None wenn Höhe nicht mehr passt.
@@ -1447,21 +1511,23 @@ def _clean_start_new_side_layer(state: Dict[str, Any], side: str, unit: pd.Serie
     base_z = float(state.get('_clean_side_z', {}).get(side, state.get('base_wood_height', 0.0)))
     base_h = float(state.get('_clean_side_layer_height', {}).get(side, 0.0))
     spacer = _clean_effective_spacer_for_side(state, side, unit)
+    check_height = float(unit['Höhe_mm'] if height_mm is None else height_mm)
     new_z = base_z + base_h + max(0.0, spacer)
-    if new_z + float(unit['Höhe_mm']) > float(state['Max_Höhe_mm']):
+    if new_z + check_height > float(state['Max_Höhe_mm']):
         return None
     return (0.0, new_z)
 
 
-def _clean_start_new_common_layer(state: Dict[str, Any], unit: pd.Series) -> Optional[Tuple[float, float]]:
+def _clean_start_new_common_layer(state: Dict[str, Any], unit: pd.Series, height_mm: Optional[float] = None) -> Optional[Tuple[float, float]]:
     """Startet für breite/mittige Einheiten eine gemeinsame neue Lage über beiden Seiten."""
     left_top = float(state.get('_clean_side_z', {}).get('left', 0.0)) + float(state.get('_clean_side_layer_height', {}).get('left', 0.0))
     right_top = float(state.get('_clean_side_z', {}).get('right', 0.0)) + float(state.get('_clean_side_layer_height', {}).get('right', 0.0))
     next_is_bundle = str(unit.get('Typ', '')).strip() == 'Bund'
     has_bundle = bool(state.get('_clean_side_layer_has_bundle', {}).get('left', False) or state.get('_clean_side_layer_has_bundle', {}).get('right', False) or next_is_bundle)
     spacer = float(state.get('layer_spacer_height' if has_bundle else 'general_spacer_height', 0.0))
+    check_height = float(unit['Höhe_mm'] if height_mm is None else height_mm)
     new_z = max(left_top, right_top) + max(0.0, spacer)
-    if new_z + float(unit['Höhe_mm']) > float(state['Max_Höhe_mm']):
+    if new_z + check_height > float(state['Max_Höhe_mm']):
         return None
     return (0.0, new_z)
 
@@ -1507,7 +1573,7 @@ def _clean_try_place_on_current_layer(
 
     best: Optional[Tuple[float, Dict[str, Any], Tuple[str, ...], float, Dict[str, Any]]] = None
 
-    for use_length, use_width, rotation in _unit_orientations_for_state(state, unit, allow_rotation):
+    for use_length, use_width, use_height, rotation in _unit_orientations_for_state(state, unit, allow_rotation):
         if use_width > platform_width + 0.001:
             continue
 
@@ -1517,22 +1583,22 @@ def _clean_try_place_on_current_layer(
             cur_z = max(float(state['_clean_side_z']['left']), float(state['_clean_side_z']['right']))
             y = max(0.0, (platform_width - use_width) / 2.0)
             candidates = []
-            if can_place(state, cur_x, y, cur_z, use_length, use_width, height, weight):
+            if can_place(state, cur_x, y, cur_z, use_length, use_width, use_height, weight):
                 candidates.append((cur_x, cur_z, False))
             if allow_stack:
-                new_common = _clean_start_new_common_layer(state, unit)
+                new_common = _clean_start_new_common_layer(state, unit, use_height)
                 if new_common is not None:
                     nx, nz = new_common
-                    if can_place(state, nx, y, nz, use_length, use_width, height, weight):
+                    if can_place(state, nx, y, nz, use_length, use_width, use_height, weight):
                         candidates.append((nx, nz, True))
             for x, z, new_layer in candidates:
                 score = z * 1000000.0 + x * 1000.0 - use_width
                 candidate = {
                     'x': x, 'y': y, 'z': z, 'length': use_length, 'width': use_width,
-                    'height': height, 'rotation': rotation, 'mode': 'breit/mittig',
+                    'height': use_height, 'rotation': rotation, 'mode': 'breit/mittig',
                     'new_layer': new_layer, 'wide': True
                 }
-                updates = {'left': (x + use_length + float(state['gap_length']), z, height), 'right': (x + use_length + float(state['gap_length']), z, height)}
+                updates = {'left': (x + use_length + float(state['gap_length']), z, use_height), 'right': (x + use_length + float(state['gap_length']), z, use_height)}
                 if best is None or score < best[0]:
                     best = (score, candidate, ('left', 'right'), x + use_length + float(state['gap_length']), updates)
             continue
@@ -1554,13 +1620,13 @@ def _clean_try_place_on_current_layer(
             side_x = float(state['_clean_lane_x'][side])
             side_z = float(state['_clean_side_z'][side])
             candidates = []
-            if can_place(state, side_x, y, side_z, use_length, use_width, height, weight):
+            if can_place(state, side_x, y, side_z, use_length, use_width, use_height, weight):
                 candidates.append((side_x, side_z, False))
             if allow_stack:
-                new_side = _clean_start_new_side_layer(state, side, unit)
+                new_side = _clean_start_new_side_layer(state, side, unit, use_height)
                 if new_side is not None:
                     nx, nz = new_side
-                    if can_place(state, nx, y, nz, use_length, use_width, height, weight):
+                    if can_place(state, nx, y, nz, use_length, use_width, use_height, weight):
                         candidates.append((nx, nz, True))
             for x, z, new_layer in candidates:
                 other = 'right' if side == 'left' else 'left'
@@ -1570,10 +1636,10 @@ def _clean_try_place_on_current_layer(
                 score = z * 1000000.0 + x * 1000.0 + balance
                 candidate = {
                     'x': x, 'y': y, 'z': z, 'length': use_length, 'width': use_width,
-                    'height': height, 'rotation': rotation, 'mode': f'{side} / unabhängige Stapelhöhe',
+                    'height': use_height, 'rotation': rotation, 'mode': f'{side} / unabhängige Stapelhöhe',
                     'new_layer': new_layer, 'wide': False
                 }
-                updates = {side: (after_x, z, height)}
+                updates = {side: (after_x, z, use_height)}
                 if best is None or score < best[0]:
                     best = (score, candidate, (side,), after_x, updates)
 
@@ -1759,7 +1825,7 @@ def _clean_effective_spacer_for_side(state: Dict[str, Any], side: str, unit: pd.
     return float(state.get('general_spacer_height', 0.0))
 
 
-def _clean_start_new_side_layer(state: Dict[str, Any], side: str, unit: pd.Series) -> Optional[Tuple[float, float]]:
+def _clean_start_new_side_layer(state: Dict[str, Any], side: str, unit: pd.Series, height_mm: Optional[float] = None) -> Optional[Tuple[float, float]]:
     """Startet nur auf einer Seite eine neue Lage.
 
     Rückgabe: (new_x, new_z) oder None wenn Höhe nicht mehr passt.
@@ -1767,21 +1833,23 @@ def _clean_start_new_side_layer(state: Dict[str, Any], side: str, unit: pd.Serie
     base_z = float(state.get('_clean_side_z', {}).get(side, state.get('base_wood_height', 0.0)))
     base_h = float(state.get('_clean_side_layer_height', {}).get(side, 0.0))
     spacer = _clean_effective_spacer_for_side(state, side, unit)
+    check_height = float(unit['Höhe_mm'] if height_mm is None else height_mm)
     new_z = base_z + base_h + max(0.0, spacer)
-    if new_z + float(unit['Höhe_mm']) > float(state['Max_Höhe_mm']):
+    if new_z + check_height > float(state['Max_Höhe_mm']):
         return None
     return (0.0, new_z)
 
 
-def _clean_start_new_common_layer(state: Dict[str, Any], unit: pd.Series) -> Optional[Tuple[float, float]]:
+def _clean_start_new_common_layer(state: Dict[str, Any], unit: pd.Series, height_mm: Optional[float] = None) -> Optional[Tuple[float, float]]:
     """Startet für breite/mittige Einheiten eine gemeinsame neue Lage über beiden Seiten."""
     left_top = float(state.get('_clean_side_z', {}).get('left', 0.0)) + float(state.get('_clean_side_layer_height', {}).get('left', 0.0))
     right_top = float(state.get('_clean_side_z', {}).get('right', 0.0)) + float(state.get('_clean_side_layer_height', {}).get('right', 0.0))
     next_is_bundle = str(unit.get('Typ', '')).strip() == 'Bund'
     has_bundle = bool(state.get('_clean_side_layer_has_bundle', {}).get('left', False) or state.get('_clean_side_layer_has_bundle', {}).get('right', False) or next_is_bundle)
     spacer = float(state.get('layer_spacer_height' if has_bundle else 'general_spacer_height', 0.0))
+    check_height = float(unit['Höhe_mm'] if height_mm is None else height_mm)
     new_z = max(left_top, right_top) + max(0.0, spacer)
-    if new_z + float(unit['Höhe_mm']) > float(state['Max_Höhe_mm']):
+    if new_z + check_height > float(state['Max_Höhe_mm']):
         return None
     return (0.0, new_z)
 
@@ -1827,7 +1895,7 @@ def _clean_try_place_on_current_layer(
 
     best: Optional[Tuple[float, Dict[str, Any], Tuple[str, ...], float, Dict[str, Any]]] = None
 
-    for use_length, use_width, rotation in _unit_orientations_for_state(state, unit, allow_rotation):
+    for use_length, use_width, use_height, rotation in _unit_orientations_for_state(state, unit, allow_rotation):
         if use_width > platform_width + 0.001:
             continue
 
@@ -1837,22 +1905,22 @@ def _clean_try_place_on_current_layer(
             cur_z = max(float(state['_clean_side_z']['left']), float(state['_clean_side_z']['right']))
             y = max(0.0, (platform_width - use_width) / 2.0)
             candidates = []
-            if can_place(state, cur_x, y, cur_z, use_length, use_width, height, weight):
+            if can_place(state, cur_x, y, cur_z, use_length, use_width, use_height, weight):
                 candidates.append((cur_x, cur_z, False))
             if allow_stack:
-                new_common = _clean_start_new_common_layer(state, unit)
+                new_common = _clean_start_new_common_layer(state, unit, use_height)
                 if new_common is not None:
                     nx, nz = new_common
-                    if can_place(state, nx, y, nz, use_length, use_width, height, weight):
+                    if can_place(state, nx, y, nz, use_length, use_width, use_height, weight):
                         candidates.append((nx, nz, True))
             for x, z, new_layer in candidates:
                 score = z * 1000000.0 + x * 1000.0 - use_width
                 candidate = {
                     'x': x, 'y': y, 'z': z, 'length': use_length, 'width': use_width,
-                    'height': height, 'rotation': rotation, 'mode': 'breit/mittig',
+                    'height': use_height, 'rotation': rotation, 'mode': 'breit/mittig',
                     'new_layer': new_layer, 'wide': True
                 }
-                updates = {'left': (x + use_length + float(state['gap_length']), z, height), 'right': (x + use_length + float(state['gap_length']), z, height)}
+                updates = {'left': (x + use_length + float(state['gap_length']), z, use_height), 'right': (x + use_length + float(state['gap_length']), z, use_height)}
                 if best is None or score < best[0]:
                     best = (score, candidate, ('left', 'right'), x + use_length + float(state['gap_length']), updates)
             continue
@@ -1874,13 +1942,13 @@ def _clean_try_place_on_current_layer(
             side_x = float(state['_clean_lane_x'][side])
             side_z = float(state['_clean_side_z'][side])
             candidates = []
-            if can_place(state, side_x, y, side_z, use_length, use_width, height, weight):
+            if can_place(state, side_x, y, side_z, use_length, use_width, use_height, weight):
                 candidates.append((side_x, side_z, False))
             if allow_stack:
-                new_side = _clean_start_new_side_layer(state, side, unit)
+                new_side = _clean_start_new_side_layer(state, side, unit, use_height)
                 if new_side is not None:
                     nx, nz = new_side
-                    if can_place(state, nx, y, nz, use_length, use_width, height, weight):
+                    if can_place(state, nx, y, nz, use_length, use_width, use_height, weight):
                         candidates.append((nx, nz, True))
             for x, z, new_layer in candidates:
                 other = 'right' if side == 'left' else 'left'
@@ -1890,10 +1958,10 @@ def _clean_try_place_on_current_layer(
                 score = z * 1000000.0 + x * 1000.0 + balance
                 candidate = {
                     'x': x, 'y': y, 'z': z, 'length': use_length, 'width': use_width,
-                    'height': height, 'rotation': rotation, 'mode': f'{side} / unabhängige Stapelhöhe',
+                    'height': use_height, 'rotation': rotation, 'mode': f'{side} / unabhängige Stapelhöhe',
                     'new_layer': new_layer, 'wide': False
                 }
-                updates = {side: (after_x, z, height)}
+                updates = {side: (after_x, z, use_height)}
                 if best is None or score < best[0]:
                     best = (score, candidate, (side,), after_x, updates)
 
@@ -2814,6 +2882,7 @@ def create_loading_excel(
     bsd_matrix_df: Optional[pd.DataFrame] = None,
     project_meta: Optional[Dict[str, Any]] = None,
     logo_bytes: Optional[bytes] = None,
+    bundle_overview_only: bool = False,
 ) -> bytes:
     """Erstellt die Excel-Begleitdatei.
 
@@ -2823,6 +2892,7 @@ def create_loading_excel(
     """
     project_meta = project_meta or {}
     front_at_x_max, left_at_y_max = _orientation_flags_from_meta(project_meta)
+    bundle_overview_only = bool(bundle_overview_only) or _project_meta_bool(project_meta, 'Bundnummern_nur_in_Verladung', False)
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         # Gewünschte Zusatzregister für Kontrolle / Weiterverarbeitung.
@@ -3210,6 +3280,135 @@ def create_loading_excel(
             ws.page_setup.fitToHeight = 1
 
 
+        def _bundle_companion_rows_for_platform(platform: pd.Series) -> List[List[Any]]:
+            """Zeilen für den Bund-Begleitzettel A:K je Pritsche."""
+            pname = str(val(platform, 'Pritsche', ''))
+            loaded = placements_df[placements_df['Pritsche'].astype(str) == pname].copy() if placements_df is not None and not placements_df.empty else pd.DataFrame()
+            if loaded.empty:
+                return []
+            loaded = loaded[loaded.get('Typ', pd.Series(dtype=str)).astype(str) == 'Bund'].copy()
+            if loaded.empty:
+                return []
+            for col in ['X_mm', 'Y_mm', 'Z_mm', 'Länge_mm', 'Breite_mm', 'Höhe_mm', 'Gewicht_kg']:
+                if col in loaded.columns:
+                    loaded[col] = pd.to_numeric(loaded[col], errors='coerce').fillna(0.0)
+            loaded['_bund_sort'] = loaded.get('Einheit_ID', pd.Series(dtype=str)).apply(_natural_sort_text)
+            loaded = loaded.sort_values(['_bund_sort', 'Z_mm', 'X_mm', 'Y_mm'], kind='stable')
+
+            eff_length = safe_number(platform.get('Länge_mm')) + safe_number(platform.get('Überhang_vorne_mm')) + safe_number(platform.get('Überhang_hinten_mm'))
+            platform_width = safe_number(platform.get('Breite_mm'))
+            rows_out: List[List[Any]] = []
+            for _, brow in loaded.iterrows():
+                bund_id = _bundle_display_tag(brow)
+                count = max(1, int(safe_number(brow.get('Anzahl_Bauteile'), 1)))
+                labels = _split_bsd_text_list(brow.get('Bauteile_Liste', ''), brow.get('Bauteile', brow.get('Ansicht_Liste', '')))
+                if not labels:
+                    labels = _split_bsd_text_list(brow.get('Ansicht_Liste', ''), brow.get('Bauteile', ''))
+                if not labels:
+                    labels = [bund_id]
+                labels = (labels + [labels[-1]] * count)[:count]
+                lengths = _split_bsd_number_list(brow.get('Einzellängen_mm', ''), count, brow.get('Länge_mm', 0), 0.0)
+                widths = _split_bsd_number_list(brow.get('Einzelbreiten_mm', ''), count, brow.get('Breite_mm', 0), 0.0)
+                heights = _split_bsd_number_list(brow.get('Einzelhöhen_mm', ''), count, brow.get('Höhe_mm', 0), safe_number(brow.get('Einlage_allgemein_mm'), 0.0))
+                slots = _position_slots_for_bsd(brow, eff_length, platform_width, front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max)
+                position = ' / '.join(slots)
+                weight_each = safe_number(brow.get('Gewicht_kg'), 0.0) / count if count else safe_number(brow.get('Gewicht_kg'), 0.0)
+                internal_spacer = safe_number(brow.get('Einlage_allgemein_mm'), 0.0)
+                for idx in range(count):
+                    rows_out.append([
+                        bund_id,
+                        labels[idx] if idx < len(labels) else '',
+                        idx + 1,
+                        pname,
+                        position,
+                        round(safe_number(lengths[idx] if idx < len(lengths) else brow.get('Länge_mm', 0)), 0),
+                        round(safe_number(widths[idx] if idx < len(widths) else brow.get('Breite_mm', 0)), 0),
+                        round(safe_number(heights[idx] if idx < len(heights) else brow.get('Höhe_mm', 0)), 0),
+                        round(weight_each, 1),
+                        round(internal_spacer, 0) if internal_spacer > 0 and idx < count - 1 else '',
+                        '',
+                    ])
+            return rows_out
+
+        def add_bundle_companion_sheet(header: pd.Series, platform: pd.Series):
+            """Kleiner Bund-Begleitzettel nach Vorlage, nur A:K."""
+            pname = str(val(header, 'Pritsche', 'Pritsche'))
+            ws = wb.create_sheet(unique_sheet_name(f'Bundzettel_{pname}'))
+            ws.sheet_view.showGridLines = True
+            widths = {'A': 11, 'B': 18, 'C': 10, 'D': 14, 'E': 18, 'F': 11, 'G': 11, 'H': 11, 'I': 12, 'J': 12, 'K': 26}
+            for col, width in widths.items():
+                ws.column_dimensions[col].width = width
+            for r in range(1, 80):
+                ws.row_dimensions[r].height = 18
+
+            ws.merge_cells('A1:K1')
+            ws['A1'] = f'Bund-Begleitzettel - {pname}'
+            ws['A1'].font = Font(name='Arial', size=14, bold=True)
+            ws['A1'].fill = fill_lightgray
+            ws['A1'].alignment = Alignment(horizontal='center', vertical='center')
+            style_range(ws, 'A1:K1', border=border_thin)
+
+            info = [
+                ('A2', 'Objekt / Datei:', 'C2', str(val(header, 'Objekt_Name', ''))),
+                ('A3', 'Transport:', 'C3', str(val(header, 'Transport_Name', ''))),
+                ('A4', 'Datum:', 'C4', str(val(header, 'Datum', datetime.now().strftime('%d.%m.%Y')))),
+                ('F2', 'Fuhre:', 'H2', str(val(header, 'Fuhre_Nr', ''))),
+                ('F3', 'Fuhrenoption:', 'H3', str(val(header, 'Fuhrenoption', ''))),
+                ('F4', 'Ladegewicht:', 'H4', f"{fmt_t(val(header, 'Ladegewicht_kg', 0))} to"),
+            ]
+            set_box(ws, 'A2:K4')
+            for lab_cell, lab, val_cell, value in info:
+                write_label(ws, lab_cell, lab)
+                ws[val_cell] = value
+                ws[val_cell].fill = fill_cyan if val_cell in ['C2', 'C3', 'H2', 'H3'] else fill_white
+
+            header_row = 6
+            headers = ['Bund', 'Bauteil', 'Reihenfolge', 'Pritsche', 'BSD-Position', 'Länge mm', 'Breite mm', 'Höhe mm', 'kg ca.', 'Einlage mm', 'Bemerkung']
+            for ci, h in enumerate(headers, start=1):
+                cell = ws.cell(header_row, ci)
+                cell.value = h
+                cell.font = font_head
+                cell.fill = fill_yellow
+                cell.border = border_thin
+                cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+            ws.row_dimensions[header_row].height = 24
+
+            data_rows = _bundle_companion_rows_for_platform(platform)
+            if not data_rows:
+                ws['A8'] = 'Keine Bunde auf dieser Pritsche vorhanden.'
+                ws['A8'].font = font_body
+                ws.print_area = 'A1:K12'
+            else:
+                start = header_row + 1
+                for ri, row_values in enumerate(data_rows, start=start):
+                    for ci, value in enumerate(row_values, start=1):
+                        cell = ws.cell(ri, ci)
+                        cell.value = value
+                        cell.font = font_body
+                        cell.border = border_dotted
+                        cell.alignment = Alignment(horizontal='center' if ci != 11 else 'left', vertical='center', wrap_text=True)
+                    if ri == start or row_values[0] != data_rows[ri - start - 1][0]:
+                        ws.cell(ri, 1).font = Font(name='Arial', size=9, bold=True)
+                for c in range(6, 11):
+                    for r in range(start, start + len(data_rows)):
+                        ws.cell(r, c).number_format = '0'
+                end_row = start + len(data_rows) + 2
+                ws.merge_cells(start_row=end_row, start_column=1, end_row=end_row + 1, end_column=11)
+                ws.cell(end_row, 1).value = 'Hinweis: Im Pritschenplan werden bei aktivierter Option nur Bundnummern angezeigt. Die Bauteile je Bund stehen auf diesem Begleitzettel.'
+                ws.cell(end_row, 1).font = font_small
+                ws.cell(end_row, 1).alignment = Alignment(horizontal='left', vertical='top', wrap_text=True)
+                ws.print_area = f'A1:K{end_row + 1}'
+
+            ws.page_setup.orientation = 'landscape'
+            ws.page_setup.paperSize = ws.PAPERSIZE_A4
+            ws.page_margins.left = 0.25
+            ws.page_margins.right = 0.25
+            ws.page_margins.top = 0.25
+            ws.page_margins.bottom = 0.25
+            ws.sheet_properties.pageSetUpPr.fitToPage = True
+            ws.page_setup.fitToWidth = 1
+            ws.page_setup.fitToHeight = 0
+
         def add_visual_view_sheet(header: pd.Series):
             """Erzeugt pro Pritsche ein zusätzliches Excel-Blatt mit grafischen Ansichten.
 
@@ -3433,6 +3632,10 @@ def create_loading_excel(
                 pname = str(val(header, 'Pritsche', ''))
                 matrix = bsd_matrix_df[bsd_matrix_df['Pritsche'].astype(str) == pname].copy()
                 add_styled_bsd_sheet(header, matrix)
+                if bundle_overview_only and platforms_df is not None and not platforms_df.empty:
+                    platform_match = platforms_df[platforms_df['Pritsche'].astype(str) == pname].copy()
+                    if not platform_match.empty:
+                        add_bundle_companion_sheet(header, platform_match.iloc[0])
 
         if 'Hinweis' in wb.sheetnames and len(wb.sheetnames) > 1:
             wb.remove(wb['Hinweis'])
@@ -4122,6 +4325,7 @@ def create_bsd_matrix_for_platform(
     top_first: bool = True,
     front_at_x_max: bool = False,
     left_at_y_max: bool = False,
+    bundle_overview_only: bool = False,
 ) -> pd.DataFrame:
     """Erstellt eine Ladeplan-BSD-Tabelle je Pritsche.
 
@@ -4379,6 +4583,14 @@ def create_bsd_matrix_for_platform(
                 add_entry(row['Z_mm'], slot, label, 'Bauteil', row['Höhe_mm'], row['Länge_mm'], row['Breite_mm'], row['Gewicht_kg'], '')
             continue
 
+        if bundle_overview_only:
+            # Option v85: bei kleinen Stabbauteilen nur den Bund im BSD/Verladeplan zeigen.
+            # Die einzelnen Bauteile stehen im Bund-Begleitzettel. Geometrie/Verladung bleibt unverändert.
+            label = _bundle_display_tag(row)
+            for slot in slots_for_row:
+                add_entry(row['Z_mm'], slot, label, 'Bund', row['Höhe_mm'], row['Länge_mm'], row['Breite_mm'], row['Gewicht_kg'], '')
+            continue
+
         # Bund: Nummern bleiben einzeln sichtbar, Bundnummer bleibt erhalten.
         labels = (labels + [labels[-1]] * count)[:count]
         internal_spacer = safe_number(row.get('Einlage_allgemein_mm'), platform_general_spacer)
@@ -4484,8 +4696,11 @@ def create_bsd_matrix_for_platform(
             slot_entries = [e for e in level_entries if e['slot'] == slot and str(e.get('label', '')).strip()]
             if not slot_entries:
                 continue
-            slot_entries = sorted(slot_entries, key=lambda e: (str(e.get('kind', '')), str(e.get('label', ''))))
-            out[slot] = '\n'.join(str(e.get('label', '') or '') for e in slot_entries)
+            slot_entries = sorted(slot_entries, key=lambda e: (str(e.get('kind', '')), _natural_sort_text(e.get('label', ''))))
+            if slot_entries and all(str(e.get('kind', '')) == 'Bund' for e in slot_entries):
+                out[slot] = ' / '.join(str(e.get('label', '') or '') for e in slot_entries)
+            else:
+                out[slot] = '\n'.join(str(e.get('label', '') or '') for e in slot_entries)
             remarks = [str(e.get('remark', '') or '').strip() for e in slot_entries if str(e.get('remark', '') or '').strip()]
             if remarks:
                 out[f'Bemerkung {slot.lower()}'] = '\n'.join(remarks)
@@ -4508,6 +4723,7 @@ def create_all_bsd_matrices(
     header_rows: List[Dict[str, Any]] = []
     matrix_frames: List[pd.DataFrame] = []
     front_at_x_max, left_at_y_max = _orientation_flags_from_meta(project_meta)
+    bundle_overview_only = _project_meta_bool(project_meta, 'Bundnummern_nur_in_Verladung', False)
     for _, platform in platforms_df.iterrows():
         pname = str(platform.get('Pritsche', ''))
         has_load = placements_df is not None and not placements_df.empty and (placements_df['Pritsche'].astype(str) == pname).any()
@@ -4515,7 +4731,7 @@ def create_all_bsd_matrices(
             # Leere Pritschen nicht als Ladeplan ausgeben.
             continue
         header_rows.append(create_bsd_header_for_platform(platform, summary_df, warnings_df, project_meta))
-        matrix = create_bsd_matrix_for_platform(placements_df, platform, front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max)
+        matrix = create_bsd_matrix_for_platform(placements_df, platform, front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max, bundle_overview_only=bundle_overview_only)
         if not matrix.empty:
             matrix_frames.append(matrix)
 
@@ -4561,7 +4777,7 @@ def _pdf_visible_sort_value(row: pd.Series, view: str, eff_length: float, width:
     return _pdf_projection_values(row, view, eff_length, width, front_at_x_max, left_at_y_max)[4]
 
 
-def _pdf_label_lines(row: pd.Series, view: str) -> List[str]:
+def _pdf_label_lines(row: pd.Series, view: str, bundle_overview_only: bool = False) -> List[str]:
     """Beschriftung für PDF-Ansichten.
 
     Bei Bunden werden die Nummern nicht nebeneinander geschrieben, sondern
@@ -4575,6 +4791,8 @@ def _pdf_label_lines(row: pd.Series, view: str) -> List[str]:
         label = _format_label_value(row.get('Einheit_ID'))
 
     if str(row.get('Typ', '')).strip() == 'Bund':
+        if bundle_overview_only:
+            return [_bundle_display_tag(row)]
         labels = _split_bsd_text_list(row.get('Ansicht_Liste', ''), row.get('Bauteile_Liste', label))
         labels = [str(v).strip() for v in labels if str(v).strip()]
         if labels:
@@ -4847,7 +5065,7 @@ def _pdf_filter_rows_for_side_view(rows: pd.DataFrame, platform: pd.Series, view
     return rows.loc[keep].copy()
 
 
-def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y: float, w: float, h: float, view: str, title: str, front_at_x_max: bool = False, left_at_y_max: bool = False) -> None:
+def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y: float, w: float, h: float, view: str, title: str, front_at_x_max: bool = False, left_at_y_max: bool = False, bundle_overview_only: bool = False) -> None:
     """Zeichnet eine PDF-Ansicht mit Pritschen- und Ladungsabmessungen.
 
     Beschriftung wurde bewusst reduziert:
@@ -4982,7 +5200,7 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
             c.setStrokeColor(colors.darkgrey)
         c.setLineWidth(0.38)
         c.rect(rx, ry, rw, rh, stroke=1, fill=1)
-        label_lines = _pdf_label_lines(row, view)
+        label_lines = _pdf_label_lines(row, view, bundle_overview_only=bundle_overview_only)
         if view == 'top':
             # Draufsicht nur beschriften, wenn genug Platz vorhanden ist.
             # Sonst laufen die Nummern ineinander und der Plan wird unbrauchbar.
@@ -5606,11 +5824,11 @@ def create_loading_pdf(
         _pdf_draw_bsd_reference_sketch(c, margin + 500, page_h - 165, 180, 78, front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max)
 
         # Zeichnungsbereiche: mehr Bezug zwischen Seiten- und Vorder/Rückansicht
-        _pdf_draw_view(c, placements_df, platform, margin, 395, 710, 220, 'side_left', 'Linke Seitenansicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max)
-        _pdf_draw_view(c, placements_df, platform, margin, 155, 710, 220, 'side_right', 'Rechte Seitenansicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max)
-        _pdf_draw_view(c, placements_df, platform, margin + 745, 395, 330, 200, 'back', 'Rückansicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max)
-        _pdf_draw_view(c, placements_df, platform, margin + 745, 155, 330, 200, 'front', 'Vorderansicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max)
-        _pdf_draw_view(c, placements_df, platform, margin, 20, 1080, 120, 'top', 'Draufsicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max)
+        _pdf_draw_view(c, placements_df, platform, margin, 395, 710, 220, 'side_left', 'Linke Seitenansicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max, bundle_overview_only=bundle_overview_only)
+        _pdf_draw_view(c, placements_df, platform, margin, 155, 710, 220, 'side_right', 'Rechte Seitenansicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max, bundle_overview_only=bundle_overview_only)
+        _pdf_draw_view(c, placements_df, platform, margin + 745, 395, 330, 200, 'back', 'Rückansicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max, bundle_overview_only=bundle_overview_only)
+        _pdf_draw_view(c, placements_df, platform, margin + 745, 155, 330, 200, 'front', 'Vorderansicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max, bundle_overview_only=bundle_overview_only)
+        _pdf_draw_view(c, placements_df, platform, margin, 20, 1080, 120, 'top', 'Draufsicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max, bundle_overview_only=bundle_overview_only)
 
         # Qualitätssicherung kompakt oben rechts, getrennt vom Infofeld.
         c.setStrokeColor(colors.black)
@@ -5623,7 +5841,7 @@ def create_loading_pdf(
         c.showPage()
 
         # Zweite Seite: Ladeplan BSD Matrix je Pritsche, ähnlich Excel-Beispiel PB 6.
-        matrix = create_bsd_matrix_for_platform(placements_df, platform, front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max)
+        matrix = create_bsd_matrix_for_platform(placements_df, platform, front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max, bundle_overview_only=bundle_overview_only)
         if not matrix.empty:
             header = create_bsd_header_for_platform(platform, summary_df, warnings_df, project_meta)
             _pdf_draw_bsd_matrix_page(c, page_w, page_h, margin, platform, matrix, header, project_meta.get('Objekt_Name', project_name) or project_name, logo_bytes=logo_bytes)
@@ -7073,6 +7291,14 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
         same_quality = bcol5.checkbox('Nur gleiche Qualität im Bund', value=False)
         same_profile = bcol6.checkbox('Nur gleiches Profil im Bund', value=False)
 
+        bundle_overview_only = st.checkbox(
+            'In Verladeplan/BSD nur Bundnummer anzeigen',
+            value=False,
+            help='Für kleine Stabbauteile: Im Pritschenplan und BSD steht nur B1 / B2. Die einzelnen Bauteile werden im Bund-Begleitzettel in der Excel-Datei ausgegeben.'
+        )
+
+    project_meta['Bundnummern_nur_in_Verladung'] = bool(bundle_overview_only)
+
     with st.expander('4b. Unterlegholz / Einlagen / Längenversatz', expanded=True):
         st.caption('Kantholz = direkt auf der Pritsche. Bundeinlage/Lagenholz = zwischen Bunden/Lagen. Einlage allgemein = zwischen einzelnen Bauteilen.')
         ucol1, ucol2, ucol3, ucol4 = st.columns(4)
@@ -7128,7 +7354,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
             hide_index=True,
             column_config={
                 'Freigabe': st.column_config.CheckboxColumn('Aktiv'),
-                'Drehen_90_erlaubt': st.column_config.CheckboxColumn('Drehen 90°'),
+                'Drehen_90_erlaubt': st.column_config.CheckboxColumn('Drehen 90° hochkant'),
                 'Pritschen_Reihenfolge': st.column_config.NumberColumn('Reihenfolge'),
                 'Länge_mm': st.column_config.NumberColumn('Länge mm'),
                 'Breite_mm': st.column_config.NumberColumn('Breite mm'),
@@ -7166,7 +7392,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
     col1, col2, col3, col4 = st.columns(4)
     allow_beside = col1.checkbox('Nebeneinander erlauben', value=True)
     allow_stack = col2.checkbox('Übereinander erlauben', value=True)
-    allow_rotation = col3.checkbox('90° drehen erlauben, wenn Pritsche es erlaubt', value=False)
+    allow_rotation = col3.checkbox('90° hochkant drehen erlauben, wenn Pritsche es erlaubt', value=False, help='Hochkant bedeutet: Länge bleibt gleich, Breite und Höhe werden getauscht.')
     center_geometric = True
     max_fuhren = col4.number_input('Max. Fuhren Sicherheitslimit', min_value=1, max_value=200, value=50, step=1)
 
@@ -7789,7 +8015,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
 
         st.divider()
         st.subheader('Excel-Daten / kleine BSD-Zettel')
-        st.caption('Die Excel-Datei enthält die kleinen BSD-/Pritschenzettel und die Zusatzregister Bauteile, Fuhrenoptionen, Ladeplan_BSD_Kopf und Projektkopf.')
+        st.caption('Die Excel-Datei enthält die kleinen BSD-/Pritschenzettel und bei aktivierter Option zusätzliche Bund-Begleitzettel A:K.')
 
         excel_data = create_loading_excel(
             sorted_parts,
@@ -7804,6 +8030,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
             bsd_matrix_df=bsd_matrix_df,
             project_meta=project_meta,
             logo_bytes=logo_bytes,
+            bundle_overview_only=bool(bundle_overview_only),
         )
         st.download_button(
             label='Excel-Begleitdatei herunterladen',
