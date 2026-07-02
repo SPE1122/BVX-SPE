@@ -5766,6 +5766,7 @@ def create_loading_pdf(
 
     project_meta = project_meta or {}
     front_at_x_max, left_at_y_max = _orientation_flags_from_meta(project_meta)
+    bundle_overview_only = _project_meta_bool(project_meta, 'Bundnummern_nur_in_Verladung', False)
     output = io.BytesIO()
     c = canvas.Canvas(output, pagesize=landscape(A3))
     page_w, page_h = landscape(A3)
