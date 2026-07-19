@@ -557,24 +557,37 @@ def read_parts_excel_to_dataframe(uploaded_excel, density_kg_m3: float = 500.0) 
         return pd.DataFrame(), ['Bauteile-Excel enthält keine Zeilen.']
 
     # Häufige alternative Spaltennamen normalisieren.
+    # V92: zusätzlich Produktionslisten-Format lesen, z. B.:
+    # GES, STK, Bezeichnung, Pak, Nr.PL, PB, Höhe, Breite, Länge, Fläche, m3, Gewicht.
     alias_map = {
         'Länge': 'Länge_mm', 'Laenge': 'Länge_mm', 'Laenge_mm': 'Länge_mm', 'Length': 'Länge_mm', 'X': 'Länge_mm', 'DimensionX': 'Länge_mm',
         'Breite': 'Breite_mm', 'Width': 'Breite_mm', 'Y': 'Breite_mm', 'DimensionY': 'Breite_mm',
         'Höhe': 'Höhe_mm', 'Hoehe': 'Höhe_mm', 'Hoehe_mm': 'Höhe_mm', 'Height': 'Höhe_mm', 'Z': 'Höhe_mm', 'DimensionZ': 'Höhe_mm',
         'Bauteilnr': 'Bauteilnummer', 'Bauteil_Nr': 'Bauteilnummer', 'Bauteil-Nr': 'Bauteilnummer', 'PartNo': 'Bauteilnummer', 'Part_No': 'Bauteilnummer',
+        'Bezeichnung': 'Name', 'Beschreibung': 'Name',
         'Paket': 'Pak/Unit', 'Pak': 'Pak/Unit', 'Unit': 'Pak/Unit',
+        'STK': 'Stück', 'Stk': 'Stück', 'Stueck': 'Stück', 'Stückzahl': 'Stück', 'Anzahl': 'Stück', 'GES': 'GES',
         'Profile': 'Profil', 'Surface': 'Oberfläche', 'Oberflaeche': 'Oberfläche', 'Grade': 'Qualität', 'Qualitaet': 'Qualität',
-        'Volumen': 'Volumen_m3', 'Volume_m3': 'Volumen_m3', 'Gewicht': 'Gewicht_kg', 'Weight_kg': 'Gewicht_kg',
+        'Volumen': 'Volumen_m3', 'Volume_m3': 'Volumen_m3', 'm3': 'Volumen_m3', 'M3': 'Volumen_m3',
+        'Gewicht': 'Gewicht_kg', 'Weight_kg': 'Gewicht_kg',
+        'Fläche': 'Fläche_m2', 'Flaeche': 'Fläche_m2', 'm2': 'Fläche_m2', 'M2': 'Fläche_m2',
     }
-    df = df.rename(columns={c: alias_map.get(str(c).strip(), c) for c in df.columns})
+    source_by_target: Dict[str, str] = {}
+    rename_map: Dict[str, str] = {}
+    for c in df.columns:
+        source_name = str(c).strip()
+        target_name = alias_map.get(source_name, source_name)
+        rename_map[c] = target_name
+        source_by_target.setdefault(target_name, source_name)
+    df = df.rename(columns=rename_map)
 
     required_order = [
-        'Index', 'Name', 'Bauteilnummer', 'PartId', 'Pak/Unit', 'Profil', 'Oberfläche', 'Qualität',
+        'Index', 'Stück', 'Name', 'Bauteilnummer', 'PartId', 'Pak/Unit', 'Profil', 'Oberfläche', 'Qualität',
         'User_Attribut_2', 'Länge_mm', 'Breite_mm', 'Höhe_mm', 'Volumen_m3', 'Gewicht_kg'
     ]
     for col in required_order:
         if col not in df.columns:
-            df[col] = '' if col not in {'Index', 'Länge_mm', 'Breite_mm', 'Höhe_mm', 'Volumen_m3', 'Gewicht_kg'} else 0
+            df[col] = 1 if col == 'Stück' else ('' if col not in {'Index', 'Länge_mm', 'Breite_mm', 'Höhe_mm', 'Volumen_m3', 'Gewicht_kg'} else 0)
 
     df = df.dropna(how='all').copy().reset_index(drop=True)
     if df.empty:
@@ -585,6 +598,39 @@ def read_parts_excel_to_dataframe(uploaded_excel, density_kg_m3: float = 500.0) 
 
     for col in ['Länge_mm', 'Breite_mm', 'Höhe_mm', 'Volumen_m3', 'Gewicht_kg']:
         df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', '.', regex=False), errors='coerce').fillna(0.0)
+    df['Stück'] = pd.to_numeric(df['Stück'].astype(str).str.replace(',', '.', regex=False), errors='coerce').fillna(1).round().astype(int).clip(lower=1)
+
+    # V92: Produktionslisten haben Länge/Breite oft in Meter, Höhe aber in mm.
+    # Wenn eine Dimensionsspalte kleine Werte enthält und die Quelle nicht eindeutig _mm ist, wird auf mm umgerechnet.
+    converted_unit_cols: List[str] = []
+    for col in ['Länge_mm', 'Breite_mm', 'Höhe_mm']:
+        source_name = str(source_by_target.get(col, col)).strip().lower()
+        explicit_mm = 'mm' in source_name
+        positive_values = pd.to_numeric(df[col], errors='coerce')
+        positive_values = positive_values[positive_values > 0]
+        if not positive_values.empty and not explicit_mm:
+            # Für Holzbauteile sind Werte wie 10.3 oder 1.2 praktisch Meter.
+            # Werte wie 120/200/240 bleiben mm.
+            if float(positive_values.median()) <= 50.0 and float(positive_values.max()) <= 100.0:
+                df[col] = df[col] * 1000.0
+                converted_unit_cols.append(col.replace('_mm', ''))
+    if converted_unit_cols:
+        messages.append('Excel-Masseinheit erkannt: ' + ', '.join(converted_unit_cols) + ' wurde von m auf mm umgerechnet.')
+
+    # STK/Stückzahl als echte Anzahl einlesen. Bei STK > 1 werden mehrere Verladeeinheiten erzeugt.
+    if (df['Stück'] > 1).any():
+        expanded_rows: List[pd.Series] = []
+        for _, base_row in df.iterrows():
+            qty = max(1, int(base_row.get('Stück', 1)))
+            for piece_idx in range(qty):
+                row = base_row.copy()
+                if qty > 1:
+                    base_no = str(row.get('Bauteilnummer', '')).strip() or str(row.get('Pak/Unit', '')).strip() or str(row.get('Name', '')).strip()
+                    row['Bauteilnummer'] = f'{base_no}-{piece_idx + 1}' if base_no else ''
+                expanded_rows.append(row)
+        df = pd.DataFrame(expanded_rows).reset_index(drop=True)
+        df['Index'] = range(1, len(df) + 1)
+        messages.append('STK/Stückzahl wurde berücksichtigt und in einzelne Verladeeinheiten aufgelöst.')
 
     missing_dims = df[(df['Länge_mm'] <= 0) | (df['Breite_mm'] <= 0) | (df['Höhe_mm'] <= 0)]
     if not missing_dims.empty:
@@ -600,7 +646,11 @@ def read_parts_excel_to_dataframe(uploaded_excel, density_kg_m3: float = 500.0) 
     df['Bauteilnummer'] = df['Bauteilnummer'].astype(str).replace({'nan': ''})
     for idx in df.index:
         if not str(df.at[idx, 'Bauteilnummer']).strip():
-            fallback = str(df.at[idx, 'Name']).strip() or str(int(safe_number(df.at[idx, 'Index'], idx + 1)))
+            fallback = (
+                str(df.at[idx, 'Pak/Unit']).strip()
+                or str(df.at[idx, 'Name']).strip()
+                or str(int(safe_number(df.at[idx, 'Index'], idx + 1)))
+            )
             df.at[idx, 'Bauteilnummer'] = fallback
         if not str(df.at[idx, 'Name']).strip():
             df.at[idx, 'Name'] = str(df.at[idx, 'Bauteilnummer']).strip()
@@ -610,6 +660,36 @@ def read_parts_excel_to_dataframe(uploaded_excel, density_kg_m3: float = 500.0) 
     df = df[required_order + extra_cols]
     messages.append('Bauteile wurden aus Excel geladen.')
     return df, messages
+
+
+
+def swap_part_width_height(parts_df: pd.DataFrame, density_kg_m3: float = 500.0) -> pd.DataFrame:
+    """Tauscht Breite und Höhe der Bauteile nach dem Einlesen.
+
+    Zweck: Manche BVX-Dateien liefern DimensionY/DimensionZ für die Verladung
+    vertauscht. Diese Korrektur passiert vor Sortierung, Bundbildung und Verladung.
+    """
+    if parts_df is None or parts_df.empty:
+        return parts_df
+    if 'Breite_mm' not in parts_df.columns or 'Höhe_mm' not in parts_df.columns:
+        return parts_df
+
+    df = parts_df.copy()
+    old_width = df['Breite_mm'].copy()
+    df['Breite_mm'] = pd.to_numeric(df['Höhe_mm'], errors='coerce').fillna(0.0)
+    df['Höhe_mm'] = pd.to_numeric(old_width, errors='coerce').fillna(0.0)
+
+    if {'Länge_mm', 'Breite_mm', 'Höhe_mm'}.issubset(df.columns):
+        calc_volume = (
+            pd.to_numeric(df['Länge_mm'], errors='coerce').fillna(0.0)
+            * pd.to_numeric(df['Breite_mm'], errors='coerce').fillna(0.0)
+            * pd.to_numeric(df['Höhe_mm'], errors='coerce').fillna(0.0)
+        ) / 1_000_000_000
+        df['Volumen_m3'] = calc_volume
+        df['Gewicht_kg'] = calc_volume * float(density_kg_m3)
+
+    df['Abmessung_Korrektur'] = 'Breite/Höhe getauscht'
+    return df
 
 def _available_bvx_meta_fields(parts_df: pd.DataFrame) -> List[str]:
     """Felder, die sinnvoll für Kopf-/Projektdaten auswählbar sind."""
@@ -7401,9 +7481,17 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
     default_general_spacer = safe_number(standards.get('Standard_Einlage_allgemein'), 0.0)
     default_gap = safe_number(standards.get('Längenversatz_je_Lage'), 100.0)
 
-    col1, col2 = st.columns([1, 2])
+    col1, col2, col3 = st.columns([1, 1, 2])
     density = col1.number_input('Holzdichte kg/m³', min_value=100.0, max_value=1000.0, value=float(default_density), step=10.0)
-    col2.caption('Bundbildung, Bundgewicht und Einlagen sind gesammelt im Abschnitt 4.')
+    product_mode = col2.radio(
+        'Produktart',
+        ['BST', 'Stangen'],
+        horizontal=True,
+        key='product_mode_v92',
+        help='BST erzwingt den Tausch von Breite/Höhe beim Einlesen. Stangen übernimmt die Abmessungen unverändert.'
+    )
+    force_swap_width_height = product_mode == 'BST'
+    col3.caption('BST = Breite/Höhe beim Einlesen zwingend tauschen. Stangen = Abmessungen unverändert. Bundbildung, Sortierung und Verladung gelten danach für beide Varianten gleich.')
 
     if parsed_result is not None:
         parts_df = parts_to_dataframe(parsed_result.parts, density_kg_m3=density)
@@ -7415,6 +7503,12 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
     if parts_df.empty:
         st.error('Keine Bauteile vorhanden. Bitte BVX oder Bauteile-Excel prüfen.')
         return
+
+    if force_swap_width_height:
+        parts_df = swap_part_width_height(parts_df, density_kg_m3=density)
+        st.info('Produktart BST: Breite und Höhe wurden beim Einlesen zwingend für die weitere Verladung getauscht.')
+    else:
+        st.info('Produktart Stangen: Breite und Höhe bleiben beim Einlesen unverändert.')
 
     col1, col2, col3, col4 = st.columns(4)
     col1.metric('Bauteile', len(parts_df))
@@ -7451,6 +7545,8 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
         'Datum': ladeplan_datum,
         'Decke': decke_text,
         'Bauabschnitt': bauabschnitt_text,
+        'Produktart': product_mode,
+        'Breite_Höhe_Korrektur': 'BST erzwungen getauscht' if force_swap_width_height else 'Stangen unverändert',
         'Decke_Attribut': decke_attr,
         'Bauabschnitt_Attribut': bauabschnitt_attr,
         'Vorne_Orientierung': vorne_orientation,
@@ -8427,7 +8523,7 @@ def main():
                 'Bauteile-Excel laden, falls keine BVX vorhanden ist',
                 type=['xlsx'],
                 key='parts_excel_upload',
-                help='Excel mit Blatt Bauteile: Länge_mm, Breite_mm, Höhe_mm usw.'
+                help='Excel mit Blatt Bauteile oder Produktionsliste: Länge/Breite in m oder mm, Höhe in mm, STK, Bezeichnung, Pak usw.'
             )
             transport_excel_file = st.file_uploader(
                 'Excel Pritschen/Fuhren laden',
