@@ -2855,6 +2855,8 @@ def create_variant_a_loading_plan(
     bundle_order_flex_percent: float = 0.0,
     prevent_wide_on_narrow: bool = True,
     min_support_width_ratio: float = 0.80,
+    fuhre_split_attr: str = '',
+    fill_remainder_next_group: bool = False,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """V22: geprüfte Block-Suche pro Pritsche mit getrennter Sortier- und Anzeige-/Stapelrichtung.
 
@@ -2874,6 +2876,23 @@ def create_variant_a_loading_plan(
     enabled_options = enabled_options.sort_values('Priorität', kind='stable').reset_index(drop=True)
 
     remaining_parts = sorted_parts.copy().reset_index(drop=True)
+
+    # V94: Optionale Pritschen-/Fuhren-Grenze nach Attribut.
+    # Wir gruppieren vor der Verladung nur dann, wenn ein gültiges Attribut gewählt ist.
+    # Die eigentliche Bund-/Einzelteil-Logik bleibt unverändert.
+    split_attr_clean = str(fuhre_split_attr or '').strip()
+    if split_attr_clean in ['Aus', 'Keine'] or split_attr_clean not in remaining_parts.columns:
+        split_attr_clean = ''
+    if split_attr_clean:
+        remaining_parts['_Fuhren_Trennung_Key'] = remaining_parts[split_attr_clean].apply(_format_label_value)
+        group_order: List[str] = []
+        for value in remaining_parts['_Fuhren_Trennung_Key'].tolist():
+            key = _format_label_value(value)
+            if key not in group_order:
+                group_order.append(key)
+        grouped_frames = [remaining_parts[remaining_parts['_Fuhren_Trennung_Key'].astype(str).eq(str(key))].copy() for key in group_order]
+        remaining_parts = pd.concat(grouped_frames, ignore_index=True) if grouped_frames else remaining_parts
+
     all_placements: List[pd.DataFrame] = []
     all_summary: List[pd.DataFrame] = []
     all_platforms: List[pd.DataFrame] = []
@@ -3125,12 +3144,40 @@ def create_variant_a_loading_plan(
         not_loaded, units_left = _make_not_loaded_rows_from_parts(remaining_parts, 'keine Fuhrenoption freigegeben', 1)
         return not_loaded, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), units_left
 
+    def _current_split_block(parts_df: pd.DataFrame) -> Tuple[pd.DataFrame, str]:
+        """Liefert den aktuell freigegebenen Bauteilblock für eine Fuhre.
+
+        Wenn Restplatz nicht mit der nächsten Gruppe aufgefüllt werden soll,
+        wird nur die erste Attributgruppe freigegeben. Sonst bleibt die
+        vollständige Restliste gültig.
+        """
+        if (
+            not split_attr_clean
+            or bool(fill_remainder_next_group)
+            or parts_df.empty
+            or '_Fuhren_Trennung_Key' not in parts_df.columns
+        ):
+            return parts_df, ''
+        first_key = _format_label_value(parts_df.iloc[0].get('_Fuhren_Trennung_Key'))
+        block_len = 0
+        for _, r in parts_df.iterrows():
+            if _format_label_value(r.get('_Fuhren_Trennung_Key')) != first_key:
+                break
+            block_len += 1
+        if block_len <= 0:
+            return parts_df.iloc[:0].copy(), first_key
+        return parts_df.iloc[:block_len].copy().reset_index(drop=True), first_key
+
     fuhre_nr = 1
     unit_counter_global = 1
     while not remaining_parts.empty and fuhre_nr <= max_fuhren:
+        allowed_parts_for_fuhre, active_split_group = _current_split_block(remaining_parts)
+        if allowed_parts_for_fuhre.empty:
+            break
+
         best_try = None
         for _, option_row in enabled_options.iterrows():
-            attempt = _simulate_option_by_parts(option_row, remaining_parts, fuhre_nr, unit_counter_global)
+            attempt = _simulate_option_by_parts(option_row, allowed_parts_for_fuhre, fuhre_nr, unit_counter_global)
             if attempt is None:
                 continue
             if best_try is None or attempt['score'] > best_try['score']:
@@ -3155,6 +3202,9 @@ def create_variant_a_loading_plan(
             'Reihenfolge': 'V21 Blockprüfung: Kandidaten testen -> gültigen Max-Block fixieren -> Bund -> unten packen',
             'Erste_Bauteilnummer': best_try.get('first_label', ''),
             'Letzte_Bauteilnummer': best_try.get('last_label', ''),
+            'Pritschen_Trennattribut': split_attr_clean,
+            'Pritschen_Trenngruppe': active_split_group,
+            'Restplatz_mit_naechster_Gruppe_auffuellen': bool(fill_remainder_next_group),
         })
 
         remaining_parts = remaining_parts.iloc[int(best_try['parts_loaded_count']):].copy().reset_index(drop=True)
@@ -7487,11 +7537,20 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
         'Produktart',
         ['BST', 'Stangen'],
         horizontal=True,
-        key='product_mode_v92',
-        help='BST erzwingt den Tausch von Breite/Höhe beim Einlesen. Stangen übernimmt die Abmessungen unverändert.'
+        key='product_mode_v93',
+        help='Produktart wählen. Bei BST kann Breite/Höhe beim Einlesen optional getauscht werden.'
     )
-    force_swap_width_height = product_mode == 'BST'
-    col3.caption('BST = Breite/Höhe beim Einlesen zwingend tauschen. Stangen = Abmessungen unverändert. Bundbildung, Sortierung und Verladung gelten danach für beide Varianten gleich.')
+    if product_mode == 'BST':
+        force_swap_width_height = col3.checkbox(
+            'Breite/Höhe beim Einlesen tauschen',
+            value=True,
+            key='bst_swap_width_height_v93',
+            help='Nur aktivieren, wenn BVX oder Bauteile-Excel Breite und Höhe für BST vertauscht liefert. Passiert vor Sortierung, Bundbildung und Verladung.'
+        )
+        col3.caption('BST: Tausch ist wählbar. Aktiv = Breite/Höhe werden vor der Verladung getauscht.')
+    else:
+        force_swap_width_height = False
+        col3.caption('Stangen: Breite/Höhe bleiben beim Einlesen unverändert.')
 
     if parsed_result is not None:
         parts_df = parts_to_dataframe(parsed_result.parts, density_kg_m3=density)
@@ -7506,7 +7565,9 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
 
     if force_swap_width_height:
         parts_df = swap_part_width_height(parts_df, density_kg_m3=density)
-        st.info('Produktart BST: Breite und Höhe wurden beim Einlesen zwingend für die weitere Verladung getauscht.')
+        st.info(f'Produktart {product_mode}: Breite und Höhe wurden beim Einlesen für die weitere Verladung getauscht.')
+    elif product_mode == 'BST':
+        st.info('Produktart BST: Breite und Höhe bleiben beim Einlesen unverändert, weil der Tausch nicht aktiviert ist.')
     else:
         st.info('Produktart Stangen: Breite und Höhe bleiben beim Einlesen unverändert.')
 
@@ -7546,7 +7607,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
         'Decke': decke_text,
         'Bauabschnitt': bauabschnitt_text,
         'Produktart': product_mode,
-        'Breite_Höhe_Korrektur': 'BST erzwungen getauscht' if force_swap_width_height else 'Stangen unverändert',
+        'Breite_Höhe_Korrektur': 'getauscht' if force_swap_width_height else 'nicht getauscht',
         'Decke_Attribut': decke_attr,
         'Bauabschnitt_Attribut': bauabschnitt_attr,
         'Vorne_Orientierung': vorne_orientation,
@@ -7750,7 +7811,27 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
     center_geometric = True
     max_fuhren = col4.number_input('Max. Fuhren Sicherheitslimit', min_value=1, max_value=200, value=50, step=1)
 
-    with st.expander('6b. Verladung mit Runge', expanded=False):
+    with st.expander('6b. Pritschen-Grenzen / Gruppen', expanded=False):
+        st.caption('Damit kann z. B. Etappe 1 auf eigene Pritsche(n) und Etappe 2 auf eigene Pritsche(n). Gilt für Bundbildung und Einzelteile.')
+        gcol1, gcol2 = st.columns(2)
+        fuhre_split_attr = gcol1.selectbox(
+            'Fuhren/Pritschen nach Attribut trennen',
+            ['Aus'] + sort_options,
+            index=0,
+            key='fuhre_split_attr_v94',
+            help='Beispiel: Unit / Etappe. Ohne Restplatz-Auffüllung wird keine nächste Gruppe auf dieselbe Fuhre geladen.'
+        )
+        fill_remainder_next_group = gcol2.checkbox(
+            'Restplatz mit nächster Gruppe auffüllen',
+            value=False,
+            key='fill_remainder_next_group_v94',
+            help='Aus = harte Pritschengrenze je Gruppe. Ein = nächste Gruppe darf freien Restplatz nutzen.'
+        )
+
+    project_meta['Pritschen_Trennattribut'] = fuhre_split_attr
+    project_meta['Restplatz_mit_naechster_Gruppe_auffuellen'] = bool(fill_remainder_next_group)
+
+    with st.expander('6c. Verladung mit Runge', expanded=False):
         st.caption('Runge = Wand in der Mitte der Pritschenbreite. Unterhalb der Runge werden Bunde links/rechts davon platziert; oberhalb der Runge darf wieder mittig über die Runge verladen werden.')
         rcol1, rcol2, rcol3 = st.columns(3)
         runge_enabled = rcol1.checkbox('Mit Runge verladen', value=False, key='runge_enabled_v88')
@@ -7766,7 +7847,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
         pritschen_edit['Rungendicke_mm'] = float(runge_thickness_mm)
         pritschen_edit['Rungenhoehe_mm'] = float(runge_height_mm)
 
-    with st.expander('6c. Bund-Reihenfolge / Ladesicherheit', expanded=False):
+    with st.expander('6d. Bund-Reihenfolge / Ladesicherheit', expanded=False):
         st.caption('Die Bundfolge kann leicht gelockert werden. Es werden nur ganze Bunde verschoben; ein Bund wird nicht aufgelöst.')
         scol1, scol2, scol3 = st.columns(3)
         bundle_order_flex_percent = scol1.number_input(
@@ -7847,6 +7928,8 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
             bundle_order_flex_percent=float(bundle_order_flex_percent),
             prevent_wide_on_narrow=bool(prevent_wide_on_narrow),
             min_support_width_ratio=float(min_support_width_percent) / 100.0,
+            fuhre_split_attr=fuhre_split_attr,
+            fill_remainder_next_group=bool(fill_remainder_next_group),
         )
         # Ab hier arbeitet die App mit den tatsächlich je Pritschenblock gebildeten Verladeeinheiten.
         if plan_units_df is not None and not plan_units_df.empty:
