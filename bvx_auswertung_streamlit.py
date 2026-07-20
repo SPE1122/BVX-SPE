@@ -2643,6 +2643,88 @@ def center_length_groups_from_platform_center(placements_df: pd.DataFrame, platf
     return result
 
 
+def shift_x_to_use_front_overhang(placements_df: pd.DataFrame, platforms_df: pd.DataFrame) -> pd.DataFrame:
+    """V98: Fertige Ladung je Pritsche in X-Richtung praxisnah ausrichten.
+
+    Pritschenlänge = physisches Auflager. Wenn Ladung länger ist als die
+    Pritsche, wird zuerst der erlaubte vordere Überhang genutzt und der
+    hintere Überhang dadurch reduziert. Bunde/Bauteile bleiben relativ
+    zueinander unverändert; es wird nur der komplette Pritschenblock verschoben.
+    """
+    if placements_df is None or placements_df.empty or platforms_df is None or platforms_df.empty:
+        return placements_df.copy() if placements_df is not None else pd.DataFrame()
+
+    result = placements_df.copy()
+    if 'Pritsche' not in result.columns:
+        return result
+
+    for col in ['X_mm', 'Y_mm', 'Z_mm', 'Länge_mm', 'Breite_mm', 'Höhe_mm']:
+        if col in result.columns:
+            result[col] = pd.to_numeric(result[col], errors='coerce')
+
+    helper_types = {'Unterbau', 'Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz'}
+    platform_lookup = {str(row.get('Pritsche', '')): row for _, row in platforms_df.iterrows()}
+
+    for pname, prow in platform_lookup.items():
+        if not pname or pname == 'NICHT VERLADEN':
+            continue
+
+        base_len = safe_number(prow.get('Länge_mm'), 0.0)
+        front_allow = safe_number(prow.get('Überhang_vorne_mm'), 0.0)
+        back_allow = safe_number(prow.get('Überhang_hinten_mm'), 0.0)
+        eff_len = base_len + front_allow + back_allow
+        if base_len <= 0 or eff_len <= 0:
+            continue
+
+        mask_all = (
+            result['Pritsche'].astype(str).eq(pname)
+            & result['X_mm'].notna()
+            & result['Länge_mm'].notna()
+        )
+        mask_real = mask_all & ~result.get('Typ', pd.Series(dtype=str)).astype(str).isin(helper_types)
+        if not mask_real.any():
+            continue
+
+        load_x0 = float(result.loc[mask_real, 'X_mm'].min())
+        load_x1 = float((result.loc[mask_real, 'X_mm'] + result.loc[mask_real, 'Länge_mm']).max())
+        load_len = load_x1 - load_x0
+        if load_len <= 0 or load_len > eff_len + 0.1:
+            continue
+
+        platform_x0 = back_allow
+        platform_x1 = back_allow + base_len
+
+        if load_len <= base_len:
+            # Ladung passt auf die physische Pritsche: auf dem Auflager zentrieren,
+            # nicht im gesamten Überhang-Zeichenraum.
+            target_x0 = platform_x0 + (base_len - load_len) / 2.0
+        else:
+            # Ladung braucht Überhang: vorne den erlaubten Überhang ausnutzen,
+            # damit hinten weniger freie Länge ohne Auflager entsteht.
+            total_overhang = load_len - base_len
+            target_front = min(front_allow, total_overhang)
+            target_back = total_overhang - target_front
+            if target_back > back_allow:
+                target_back = back_allow
+                target_front = total_overhang - target_back
+            target_front = max(0.0, min(front_allow, target_front))
+            target_back = max(0.0, min(back_allow, target_back))
+            target_x0 = platform_x0 - target_back
+
+        target_x0 = max(0.0, min(target_x0, eff_len - load_len))
+        shift = target_x0 - load_x0
+        if abs(shift) < 0.1:
+            continue
+
+        result.loc[mask_all, 'X_mm'] = (result.loc[mask_all, 'X_mm'] + shift).round(1)
+        if 'Ebene' in result.columns:
+            result.loc[mask_all, 'Ebene'] = result.loc[mask_all, 'Ebene'].astype(str).apply(
+                lambda v: v if 'Überhang vorne genutzt' in v else f'{v} / Überhang vorne genutzt'
+            )
+
+    return result
+
+
 def normalize_y_from_platform_center(placements_df: pd.DataFrame, platforms_df: pd.DataFrame) -> pd.DataFrame:
     """Richtet die Y-Positionen praxisnah von der Pritschenmitte aus.
 
@@ -3236,6 +3318,7 @@ def create_variant_a_loading_plan(
         # Die stabile globale X-Ausrichtung aus center_placements_geometrically
         # bleibt aktiv; die per-Lage-Nachverschiebung wird nicht mehr angewendet.
         placements_df = center_length_groups_from_platform_center(placements_df, platforms_used_df)
+        placements_df = shift_x_to_use_front_overhang(placements_df, platforms_used_df)
         summary_df = recompute_summary_from_placements(placements_df, platforms_used_df)
 
     fuhren_log_df = pd.DataFrame(fuhren_log)
@@ -6322,14 +6405,12 @@ def create_loading_pdf(
 
         # Zeichnungsbereiche leicht nach oben verschoben; unten bleibt Platz für Bemassungen.
         _pdf_draw_view(c, placements_df, platform, margin, 405, 710, 215, 'side_left', 'Linke Seitenansicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
-        # V97: Rechte Seitenansicht im Abstand feinjustiert.
-        # Ziel: Titel nicht mit Überhang-Bemassung kollidieren lassen,
-        # gleichzeitig die Ansicht etwas höher halten, damit zur Draufsicht Abstand bleibt.
-        _pdf_draw_view(c, placements_df, platform, margin, 145, 710, 205, 'side_right', 'Rechte Seitenansicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
+        # V98: Rechte Seitenansicht stärker getrennt von Überhang-Bemassung und Draufsicht.
+        # Der Titel liegt klar unter der Überhang-Zeile; die Ansicht bleibt oberhalb der Draufsicht.
+        _pdf_draw_view(c, placements_df, platform, margin, 150, 710, 170, 'side_right', 'Rechte Seitenansicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
         _pdf_draw_view(c, placements_df, platform, margin + 745, 405, 330, 190, 'back', 'Rückansicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
         _pdf_draw_view(c, placements_df, platform, margin + 745, 165, 330, 190, 'front', 'Vorderansicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
-        # Draufsicht wieder leicht höher gesetzt, damit unten mehr Platz bleibt und die Seitenansicht nicht kollidiert.
-        _pdf_draw_view(c, placements_df, platform, margin, 28, 1080, 105, 'top', 'Draufsicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
+        _pdf_draw_view(c, placements_df, platform, margin, 25, 1080, 105, 'top', 'Draufsicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
 
         # Qualitätssicherung kompakt oben rechts, getrennt vom Infofeld.
         c.setStrokeColor(colors.black)
