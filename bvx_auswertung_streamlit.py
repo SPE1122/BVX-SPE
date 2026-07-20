@@ -6322,13 +6322,14 @@ def create_loading_pdf(
 
         # Zeichnungsbereiche leicht nach oben verschoben; unten bleibt Platz für Bemassungen.
         _pdf_draw_view(c, placements_df, platform, margin, 405, 710, 215, 'side_left', 'Linke Seitenansicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
-        # V96: Rechte Seitenansicht etwas tiefer setzen,
-        # damit der Titel unterhalb der Bemassung/Überhangzeile der linken Seitenansicht liegt.
-        _pdf_draw_view(c, placements_df, platform, margin, 135, 710, 215, 'side_right', 'Rechte Seitenansicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
+        # V97: Rechte Seitenansicht im Abstand feinjustiert.
+        # Ziel: Titel nicht mit Überhang-Bemassung kollidieren lassen,
+        # gleichzeitig die Ansicht etwas höher halten, damit zur Draufsicht Abstand bleibt.
+        _pdf_draw_view(c, placements_df, platform, margin, 145, 710, 205, 'side_right', 'Rechte Seitenansicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
         _pdf_draw_view(c, placements_df, platform, margin + 745, 405, 330, 190, 'back', 'Rückansicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
         _pdf_draw_view(c, placements_df, platform, margin + 745, 165, 330, 190, 'front', 'Vorderansicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
-        # Draufsicht leicht nach unten verschoben, damit der neue Abstand erhalten bleibt.
-        _pdf_draw_view(c, placements_df, platform, margin, 20, 1080, 105, 'top', 'Draufsicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
+        # Draufsicht wieder leicht höher gesetzt, damit unten mehr Platz bleibt und die Seitenansicht nicht kollidiert.
+        _pdf_draw_view(c, placements_df, platform, margin, 28, 1080, 105, 'top', 'Draufsicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
 
         # Qualitätssicherung kompakt oben rechts, getrennt vom Infofeld.
         c.setStrokeColor(colors.black)
