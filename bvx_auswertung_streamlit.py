@@ -6322,10 +6322,13 @@ def create_loading_pdf(
 
         # Zeichnungsbereiche leicht nach oben verschoben; unten bleibt Platz für Bemassungen.
         _pdf_draw_view(c, placements_df, platform, margin, 405, 710, 215, 'side_left', 'Linke Seitenansicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
-        _pdf_draw_view(c, placements_df, platform, margin, 165, 710, 215, 'side_right', 'Rechte Seitenansicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
+        # V96: Rechte Seitenansicht etwas tiefer setzen,
+        # damit der Titel unterhalb der Bemassung/Überhangzeile der linken Seitenansicht liegt.
+        _pdf_draw_view(c, placements_df, platform, margin, 135, 710, 215, 'side_right', 'Rechte Seitenansicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
         _pdf_draw_view(c, placements_df, platform, margin + 745, 405, 330, 190, 'back', 'Rückansicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
         _pdf_draw_view(c, placements_df, platform, margin + 745, 165, 330, 190, 'front', 'Vorderansicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
-        _pdf_draw_view(c, placements_df, platform, margin, 35, 1080, 105, 'top', 'Draufsicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
+        # Draufsicht leicht nach unten verschoben, damit der neue Abstand erhalten bleibt.
+        _pdf_draw_view(c, placements_df, platform, margin, 20, 1080, 105, 'top', 'Draufsicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
 
         # Qualitätssicherung kompakt oben rechts, getrennt vom Infofeld.
         c.setStrokeColor(colors.black)
