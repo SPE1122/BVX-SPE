@@ -6360,14 +6360,18 @@ def _pdf_draw_bsd_reference_sketch(c, x: float, y: float, w: float = 170, h: flo
     c.drawCentredString(mid_x, by + bh + 3, top_side)
     c.drawCentredString(mid_x, by - 8, bottom_side)
 
+    c.setFont('Helvetica', 5.2)
+    c.drawString(x + 5, y + h - 18, 'Blick: von hinten nach vorne')
+
     c.setFont('Helvetica-Bold', 6.0)
     c.drawCentredString((bx + mid_x) / 2, (mid_y + by + bh) / 2 - 2, 'HL' if left_end == 'Hinten' and top_side == 'Links' else 'HR')
     c.drawCentredString((mid_x + bx + bw) / 2, (mid_y + by + bh) / 2 - 2, 'VL' if right_end == 'Vorne' and top_side == 'Links' else 'VR')
     c.drawCentredString((bx + mid_x) / 2, (by + mid_y) / 2 - 2, 'HL' if left_end == 'Hinten' and bottom_side == 'Links' else 'HR')
     c.drawCentredString((mid_x + bx + bw) / 2, (by + mid_y) / 2 - 2, 'VL' if right_end == 'Vorne' and bottom_side == 'Links' else 'VR')
 
-    c.setFont('Helvetica', 5.4)
-    c.drawString(x + 5, y + 4, 'kurze Stirnseiten = vorne / hinten')
+    c.setFont('Helvetica', 5.2)
+    c.drawString(x + 5, y + 10, 'Vorne = Fahrtrichtung / Zugfahrzeug')
+    c.drawString(x + 5, y + 4, 'Links / Rechts = von hinten nach vorne geschaut')
     c.restoreState()
 
 
@@ -6390,6 +6394,9 @@ def create_loading_pdf(
 
     project_meta = project_meta or {}
     front_at_x_max, left_at_y_max = _orientation_flags_from_meta(project_meta)
+    # V100 PDF-Bezug: vorne = Fahrtrichtung; links/rechts = von hinten nach vorne geschaut.
+    pdf_front_at_x_max = True
+    pdf_left_at_y_max = True
     bundle_overview_only = _project_meta_bool(project_meta, 'Bundnummern_nur_in_Verladung', False)
     output = io.BytesIO()
     c = canvas.Canvas(output, pagesize=landscape(A3))
@@ -6446,35 +6453,18 @@ def create_loading_pdf(
         for i, line in enumerate(hints):
             c.drawString(hint_x, hint_y - 14 - i * 12, line)
 
-        # V99: Bezugsskizze / Legende wieder eingeblendet.
-        leg_x = margin + 330
-        leg_y = page_h - 105
-        c.setFont('Helvetica-Bold', 9)
-        c.drawString(leg_x, leg_y, 'Bezug Draufsicht / BSD')
-        c.setFont('Helvetica', 7.2)
-        c.drawString(leg_x, leg_y - 14, 'Hinten                 Vorne')
-        c.drawString(leg_x, leg_y - 28, 'Rechts')
-        c.drawString(leg_x, leg_y - 42, 'Links')
-        c.setStrokeColor(colors.black)
-        c.setLineWidth(0.45)
-        c.rect(leg_x + 70, leg_y - 46, 95, 34, stroke=1, fill=0)
-        c.line(leg_x + 117.5, leg_y - 46, leg_x + 117.5, leg_y - 12)
-        c.line(leg_x + 70, leg_y - 29, leg_x + 165, leg_y - 29)
-        c.setFont('Helvetica', 6.8)
-        c.drawString(leg_x + 74, leg_y - 24, 'HR')
-        c.drawRightString(leg_x + 161, leg_y - 24, 'VR')
-        c.drawString(leg_x + 74, leg_y - 41, 'HL')
-        c.drawRightString(leg_x + 161, leg_y - 41, 'VL')
-        c.drawString(leg_x, leg_y - 58, 'kurze Stirnseiten = vorne / hinten')
+        # V100: Bezugsskizze in der optisch saubereren Variante.
+        _pdf_draw_bsd_reference_sketch(c, margin + 480, page_h - 170, 205, 82, front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max)
 
         # Zeichnungsbereiche leicht nach oben verschoben; unten bleibt Platz für Bemassungen.
-        _pdf_draw_view(c, placements_df, platform, margin, 405, 710, 215, 'side_left', 'Linke Seitenansicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
+        # Zeichnungsbereiche leicht nach oben verschoben; unten bleibt Platz für Bemassungen.
+        _pdf_draw_view(c, placements_df, platform, margin, 405, 710, 215, 'side_left', 'Linke Seitenansicht', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
         # V98: Rechte Seitenansicht stärker getrennt von Überhang-Bemassung und Draufsicht.
         # Der Titel liegt klar unter der Überhang-Zeile; die Ansicht bleibt oberhalb der Draufsicht.
-        _pdf_draw_view(c, placements_df, platform, margin, 150, 710, 170, 'side_right', 'Rechte Seitenansicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
-        _pdf_draw_view(c, placements_df, platform, margin + 745, 405, 330, 190, 'back', 'Rückansicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
-        _pdf_draw_view(c, placements_df, platform, margin + 745, 165, 330, 190, 'front', 'Vorderansicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
-        _pdf_draw_view(c, placements_df, platform, margin, 25, 1080, 105, 'top', 'Draufsicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
+        _pdf_draw_view(c, placements_df, platform, margin, 150, 710, 170, 'side_right', 'Rechte Seitenansicht', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
+        _pdf_draw_view(c, placements_df, platform, margin + 745, 405, 330, 190, 'back', 'Rückansicht (Blick von hinten)', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
+        _pdf_draw_view(c, placements_df, platform, margin + 745, 165, 330, 190, 'front', 'Vorderansicht (Blick von vorne)', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
+        _pdf_draw_view(c, placements_df, platform, margin, 25, 1080, 105, 'top', 'Draufsicht', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
 
         # Qualitätssicherung kompakt oben rechts, getrennt vom Infofeld.
         c.setStrokeColor(colors.black)
