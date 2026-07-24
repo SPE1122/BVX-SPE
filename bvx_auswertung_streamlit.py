@@ -5749,11 +5749,12 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
         data_h = max(eff_length, load_x1, 1)
     elif view in ('side', 'side_left', 'side_right'):
         data_w = max(eff_length, load_x1, 1)
-        # Fester Höhenrahmen = zulässige Ladehöhe ab Oberkante Pritsche.
-        data_h = max(max_height, 1)
+        # V103: Für die Darstellung die tatsächliche Ladungshöhe verwenden,
+        # damit z. B. F05 LKW nicht unnötig klein wirkt.
+        data_h = max(used_hei, 1)
     else:
         data_w = max(width, load_y1, 1)
-        data_h = max(max_height, 1)
+        data_h = max(used_hei, 1)
 
     scale = min(w / data_w, h / data_h)
     draw_w = data_w * scale
@@ -5823,7 +5824,6 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
         if over_front_actual > 0:
             _pdf_dim_line_h(c, ox + right_seg_start * scale, ox + right_seg_end * scale, dim_y, f'Überhang vorne {over_front_actual:.0f} mm')
         _pdf_dim_line_v(c, ox + draw_w + 10, oy, oy + min(used_hei, data_h) * scale, f'Ladehöhe {used_hei:.0f} mm')
-        _pdf_dim_line_v(c, ox + draw_w + 28, oy, oy + min(used_hei, data_h) * scale, f'Ladungshöhe {used_hei:.0f} mm')
 
     if show_dimensions and used_wid > 0 and view == 'top':
         _pdf_dim_line_v(c, ox + draw_w + 10, oy, oy + width * scale, f'Pritschenbreite {width:.0f} mm')
@@ -6511,15 +6511,15 @@ def create_loading_pdf(
         for i, line in enumerate(hints):
             c.drawString(hint_x, hint_y - 14 - i * 12, line)
 
-        # V102: Bezugsskizze und neu angeordnete Ansichten.
-        _pdf_draw_bsd_reference_sketch(c, margin + 585, page_h - 176, 230, 88, front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max)
+        # V103: Bezugsskizze und angepasste Ansichten.
+        _pdf_draw_bsd_reference_sketch(c, margin + 565, page_h - 176, 210, 88, front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max)
 
-        # Seitenansichten mit mehr Platz links, Draufsicht 90° gedreht rechts.
-        _pdf_draw_view(c, placements_df, platform, margin, 450, 770, 155, 'side_left', 'Linke Seitenansicht', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
-        _pdf_draw_view(c, placements_df, platform, margin, 220, 770, 155, 'side_right', 'Rechte Seitenansicht', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
-        _pdf_draw_view(c, placements_df, platform, margin + 830, 470, 250, 90, 'back', 'Rückansicht (Blick von hinten)', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
-        _pdf_draw_view(c, placements_df, platform, margin + 830, 340, 250, 90, 'front', 'Vorderansicht (Blick von vorne)', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
-        _pdf_draw_view(c, placements_df, platform, margin + 830, 45, 230, 255, 'top_rotated', 'Draufsicht 90°', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
+        # Seitenansichten mit mehr Platz; Draufsicht ganz rechts, nicht unter Vorder-/Rückansicht.
+        _pdf_draw_view(c, placements_df, platform, margin, 450, 800, 155, 'side_left', 'Linke Seitenansicht', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
+        _pdf_draw_view(c, placements_df, platform, margin, 220, 800, 155, 'side_right', 'Rechte Seitenansicht', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
+        _pdf_draw_view(c, placements_df, platform, margin + 735, 470, 205, 92, 'back', 'Rückansicht (Blick von hinten)', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
+        _pdf_draw_view(c, placements_df, platform, margin + 735, 340, 205, 92, 'front', 'Vorderansicht (Blick von vorne)', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
+        _pdf_draw_view(c, placements_df, platform, margin + 965, 210, 130, 350, 'top_rotated', 'Draufsicht', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
 
         # Qualitätssicherung kompakt oben rechts, getrennt vom Infofeld.
         c.setStrokeColor(colors.black)
