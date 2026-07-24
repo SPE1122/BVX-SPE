@@ -4690,11 +4690,54 @@ def _position_slots_for_bsd(
     return [f'{fb} links', f'{fb} rechts']
 
 
+
+def _load_dimension_rows_for_platform(placements_df: pd.DataFrame, platform: pd.Series) -> pd.DataFrame:
+    """Echte Ladungszeilen je Pritsche für Kopfwerte/Bemassung, ohne Kantholz/Einlagen."""
+    if placements_df is None or placements_df.empty:
+        return pd.DataFrame()
+    pname = str(platform.get('Pritsche', ''))
+    rows = placements_df[placements_df.get('Pritsche', '').astype(str) == pname].copy()
+    if rows.empty:
+        return rows
+    typ_series = rows.get('Typ', pd.Series(dtype=str)).astype(str)
+    skip = ['Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz', 'Unterbau']
+    rows = rows[~typ_series.isin(skip)].copy()
+    for col in ['X_mm', 'Y_mm', 'Z_mm', 'Länge_mm', 'Breite_mm', 'Höhe_mm', 'Gewicht_kg']:
+        if col in rows.columns:
+            rows[col] = pd.to_numeric(rows[col], errors='coerce').fillna(0.0)
+    return rows
+
+
+def _load_dimension_values_for_platform(placements_df: pd.DataFrame, platform: pd.Series, summary_row: Optional[pd.Series] = None) -> Dict[str, float]:
+    """Ladungswerte: tatsächliche Abmessung und Gewicht der Ladung."""
+    rows = _load_dimension_rows_for_platform(placements_df, platform)
+    if rows is not None and not rows.empty:
+        length = max(safe_number((rows['X_mm'] + rows['Länge_mm']).max()) - safe_number(rows['X_mm'].min()), 0.0)
+        width = max(safe_number((rows['Y_mm'] + rows['Breite_mm']).max()) - safe_number(rows['Y_mm'].min()), 0.0)
+        height = max(safe_number((rows['Z_mm'] + rows['Höhe_mm']).max()), 0.0)
+        weight = safe_number(rows['Gewicht_kg'].sum(), 0.0)
+    else:
+        summary_row = summary_row if summary_row is not None else pd.Series(dtype=object)
+        length = safe_number(summary_row.get('Länge genutzt_mm'))
+        width = safe_number(summary_row.get('Breite genutzt_mm'))
+        height = safe_number(summary_row.get('Höhe genutzt_mm'))
+        weight = safe_number(summary_row.get('Gewicht genutzt_kg'))
+    eigen = safe_number(platform.get('Eigengewicht_Pritsche_kg'), 0.0)
+    return {
+        'Länge_Ladung_mm': length,
+        'Breite_Ladung_mm': width,
+        'Höhe_Ladung_mm': height,
+        'Ladegewicht_kg': weight,
+        'Eigengewicht_kg': eigen,
+        'Gesamtgewicht_kg': weight + eigen,
+    }
+
 def create_bsd_header_for_platform(
     platform: pd.Series,
     summary_df: pd.DataFrame,
     warnings_df: Optional[pd.DataFrame] = None,
     project_meta: Optional[Dict[str, Any]] = None,
+    placements_df: Optional[pd.DataFrame] = None,
 ) -> Dict[str, Any]:
     """Kopfdaten je Pritsche ähnlich Ladeplan BSD."""
     pname = str(platform.get('Pritsche', ''))
@@ -4705,22 +4748,23 @@ def create_bsd_header_for_platform(
         warn_count = int((warnings_df['Pritsche'].astype(str) == pname).sum())
 
     project_meta = project_meta or {}
+    load_vals = _load_dimension_values_for_platform(placements_df, platform, srow)
 
     return {
         'Pritsche': pname,
         'Fuhre_Nr': platform.get('Fuhre_Nr', ''),
         'Fuhrenoption': platform.get('Fuhrenoption', ''),
         'Pritschenname': platform.get('Pritschenname', ''),
-        'Pritschenhöhe_mm': safe_number(platform.get('Max_Höhe_mm')),
+        'Pritschenhöhe_mm': 0.0,
         'Pritschenbreite_mm': safe_number(platform.get('Breite_mm')),
-        'Pritschenlänge_effektiv_mm': safe_number(platform.get('Länge_mm')) + safe_number(platform.get('Überhang_vorne_mm')) + safe_number(platform.get('Überhang_hinten_mm')),
-        'Frachthöhe_mm': safe_number(srow.get('Höhe genutzt_mm')),
-        'Höhe_gesamt_mm': safe_number(srow.get('Höhe genutzt_mm')),
-        'Länge_gesamt_mm': safe_number(srow.get('Länge genutzt_mm')),
-        'Breite_gesamt_mm': safe_number(srow.get('Breite genutzt_mm')),
-        'Ladegewicht_kg': safe_number(srow.get('Gewicht genutzt_kg')),
-        'Eigengewicht_Pritsche_kg': safe_number(srow.get('Eigengewicht Pritsche_kg'), safe_number(platform.get('Eigengewicht_Pritsche_kg'))),
-        'Gesamtgewicht_kg': safe_number(srow.get('Gesamtgewicht inkl. Pritsche_kg'), safe_number(srow.get('Gewicht genutzt_kg')) + safe_number(platform.get('Eigengewicht_Pritsche_kg'))),
+        'Pritschenlänge_effektiv_mm': safe_number(platform.get('Länge_mm')),
+        'Frachthöhe_mm': load_vals['Höhe_Ladung_mm'],
+        'Höhe_gesamt_mm': load_vals['Höhe_Ladung_mm'],
+        'Länge_gesamt_mm': max(safe_number(platform.get('Länge_mm')), load_vals['Länge_Ladung_mm']),
+        'Breite_gesamt_mm': load_vals['Breite_Ladung_mm'],
+        'Ladegewicht_kg': load_vals['Ladegewicht_kg'],
+        'Eigengewicht_Pritsche_kg': load_vals['Eigengewicht_kg'],
+        'Gesamtgewicht_kg': load_vals['Gesamtgewicht_kg'],
         'Max_Gewicht_kg': safe_number(platform.get('Max_Gewicht_kg')),
         'Warnungen': warn_count,
         'Objekt_Name': project_meta.get('Objekt_Name', ''),
@@ -6374,15 +6418,16 @@ def create_loading_pdf(
         c.setFont('Helvetica-Bold', 10)
         c.drawString(info_x, info_y, 'Info Pritsche')
         c.setFont('Helvetica', 8)
+        load_vals = _load_dimension_values_for_platform(placements_df, platform, srow)
         info_lines = [
             f'Transport: {project_meta.get("Transport_Name", platform.get("Fuhrenoption", ""))}',
             f'Fuhrenoption: {platform.get("Fuhrenoption", "")}',
-            f'Länge genutzt: {safe_number(srow.get("Länge genutzt_mm")):.0f} / {safe_number(srow.get("Max Länge effektiv_mm")):.0f} mm',
-            f'Breite genutzt: {safe_number(srow.get("Breite genutzt_mm")):.0f} / {safe_number(srow.get("Max Breite_mm")):.0f} mm',
-            f'Höhe genutzt: {safe_number(srow.get("Höhe genutzt_mm")):.0f} / {safe_number(srow.get("Max Höhe_mm")):.0f} mm',
-            f'Ladegewicht: {safe_number(srow.get("Gewicht genutzt_kg")):.0f} kg',
-            f'Eigengewicht: {safe_number(srow.get("Eigengewicht Pritsche_kg")):.0f} kg',
-            f'Gesamtgewicht: {safe_number(srow.get("Gesamtgewicht inkl. Pritsche_kg")):.0f} / {safe_number(srow.get("Max Gewicht_kg")):.0f} kg',
+            f'Länge Ladung: {load_vals["Länge_Ladung_mm"]:.0f} mm',
+            f'Breite Ladung: {load_vals["Breite_Ladung_mm"]:.0f} mm',
+            f'Höhe Ladung: {load_vals["Höhe_Ladung_mm"]:.0f} mm',
+            f'Ladegewicht: {load_vals["Ladegewicht_kg"]:.0f} kg',
+            f'Eigengewicht: {load_vals["Eigengewicht_kg"]:.0f} kg',
+            f'Gesamtgewicht: {load_vals["Gesamtgewicht_kg"]:.0f} kg',
         ]
         for i, line in enumerate(info_lines):
             c.drawString(info_x, info_y - 16 - i * 13, line)
@@ -6401,7 +6446,26 @@ def create_loading_pdf(
         for i, line in enumerate(hints):
             c.drawString(hint_x, hint_y - 14 - i * 12, line)
 
-        # V95: Legende/Bezugsskizze entfernt. BSD und Verladelogik bleiben unverändert.
+        # V99: Bezugsskizze / Legende wieder eingeblendet.
+        leg_x = margin + 330
+        leg_y = page_h - 105
+        c.setFont('Helvetica-Bold', 9)
+        c.drawString(leg_x, leg_y, 'Bezug Draufsicht / BSD')
+        c.setFont('Helvetica', 7.2)
+        c.drawString(leg_x, leg_y - 14, 'Hinten                 Vorne')
+        c.drawString(leg_x, leg_y - 28, 'Rechts')
+        c.drawString(leg_x, leg_y - 42, 'Links')
+        c.setStrokeColor(colors.black)
+        c.setLineWidth(0.45)
+        c.rect(leg_x + 70, leg_y - 46, 95, 34, stroke=1, fill=0)
+        c.line(leg_x + 117.5, leg_y - 46, leg_x + 117.5, leg_y - 12)
+        c.line(leg_x + 70, leg_y - 29, leg_x + 165, leg_y - 29)
+        c.setFont('Helvetica', 6.8)
+        c.drawString(leg_x + 74, leg_y - 24, 'HR')
+        c.drawRightString(leg_x + 161, leg_y - 24, 'VR')
+        c.drawString(leg_x + 74, leg_y - 41, 'HL')
+        c.drawRightString(leg_x + 161, leg_y - 41, 'VL')
+        c.drawString(leg_x, leg_y - 58, 'kurze Stirnseiten = vorne / hinten')
 
         # Zeichnungsbereiche leicht nach oben verschoben; unten bleibt Platz für Bemassungen.
         _pdf_draw_view(c, placements_df, platform, margin, 405, 710, 215, 'side_left', 'Linke Seitenansicht', front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
@@ -6425,7 +6489,7 @@ def create_loading_pdf(
         # Zweite Seite: Ladeplan BSD Matrix je Pritsche, ähnlich Excel-Beispiel PB 6.
         matrix = create_bsd_matrix_for_platform(placements_df, platform, front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max, bundle_overview_only=bundle_overview_only)
         if not matrix.empty:
-            header = create_bsd_header_for_platform(platform, summary_df, warnings_df, project_meta)
+            header = create_bsd_header_for_platform(platform, summary_df, warnings_df, project_meta, placements_df)
             _pdf_draw_bsd_matrix_page(c, page_w, page_h, margin, platform, matrix, header, project_meta.get('Objekt_Name', project_name) or project_name, logo_bytes=logo_bytes)
             c.showPage()
 
