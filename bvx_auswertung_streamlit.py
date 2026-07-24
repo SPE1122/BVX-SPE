@@ -5250,7 +5250,7 @@ def create_all_bsd_matrices(
         if not has_load:
             # Leere Pritschen nicht als Ladeplan ausgeben.
             continue
-        header_rows.append(create_bsd_header_for_platform(platform, summary_df, warnings_df, project_meta))
+        header_rows.append(create_bsd_header_for_platform(platform, summary_df, warnings_df, project_meta, placements_df))
         matrix = create_bsd_matrix_for_platform(placements_df, platform, front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max, bundle_overview_only=bundle_overview_only)
         if not matrix.empty:
             matrix_frames.append(matrix)
@@ -5272,6 +5272,11 @@ def _pdf_projection_values(row: pd.Series, view: str, eff_length: float, width: 
 
     if view == 'top':
         return x, y, lx, by, z + hz
+    if view == 'top_rotated':
+        # 90° gedrehte Draufsicht: horizontal = Fahrzeugbreite, vertikal = Länge / Fahrtrichtung.
+        px = (width - y - by) if left_at_y_max else y
+        py = x
+        return px, py, by, lx, z + hz
 
     # Linke/rechte Seitenansicht an die gewählte Links-Orientierung koppeln.
     # links = Y klein (Standard) oder links = Y gross.
@@ -5280,7 +5285,8 @@ def _pdf_projection_values(row: pd.Series, view: str, eff_length: float, width: 
     if side_from_y_min:
         return x, z, lx, hz, -y
     if side_from_y_max:
-        return eff_length - x - lx, z, lx, hz, y + by
+        # Rechte Seitenansicht in gleicher Längs-Flucht wie links, nur von der Gegenseite betrachtet.
+        return x, z, lx, hz, y + by
 
     # Vorder-/Rückansicht an die gewählte Vorne-Orientierung koppeln.
     # vorne = X klein (Standard) oder vorne = X gross.
@@ -5522,26 +5528,38 @@ def _pdf_draw_view_orientation_helpers(c, ox: float, oy: float, draw_w: float, d
     c.setLineWidth(0.35)
     c.setDash(2, 2)
     # Mittellinie als Bezug
-    if view in ('top', 'side', 'side_left', 'side_right'):
+    if view in ('top', 'top_rotated', 'side', 'side_left', 'side_right'):
         c.line(ox + draw_w / 2.0, oy, ox + draw_w / 2.0, oy + draw_h)
     elif view in ('front', 'back'):
         c.line(ox + draw_w / 2.0, oy, ox + draw_w / 2.0, oy + draw_h)
     c.setDash()
     c.setFont('Helvetica', 5.8)
 
-    if view in ('top', 'side', 'side_left', 'side_right'):
+    if view in ('side', 'side_left', 'side_right'):
         left_lbl = 'Hinten' if front_at_x_max else 'Vorne'
         right_lbl = 'Vorne' if front_at_x_max else 'Hinten'
         c.drawString(ox, oy + draw_h + 2.5, left_lbl)
         c.drawRightString(ox + draw_w, oy + draw_h + 2.5, right_lbl)
         c.drawCentredString(ox + draw_w / 2.0, oy + draw_h + 2.5, 'Mitte X')
-        if view == 'top':
-            # In der Draufsicht sind die schmalen Stirnseiten vorne/hinten.
-            # Die langen Seiten sind links/rechts.
-            top_side = 'Links' if left_at_y_max else 'Rechts'
-            bottom_side = 'Rechts' if left_at_y_max else 'Links'
-            c.drawCentredString(ox + draw_w / 2.0, oy + draw_h + 10.5, top_side)
-            c.drawCentredString(ox + draw_w / 2.0, oy - 14.5, bottom_side)
+    if view == 'top':
+        left_lbl = 'Hinten' if front_at_x_max else 'Vorne'
+        right_lbl = 'Vorne' if front_at_x_max else 'Hinten'
+        c.drawString(ox, oy + draw_h + 2.5, left_lbl)
+        c.drawRightString(ox + draw_w, oy + draw_h + 2.5, right_lbl)
+        c.drawCentredString(ox + draw_w / 2.0, oy + draw_h + 2.5, 'Mitte X')
+        top_side = 'Links' if left_at_y_max else 'Rechts'
+        bottom_side = 'Rechts' if left_at_y_max else 'Links'
+        c.drawCentredString(ox + draw_w / 2.0, oy + draw_h + 10.5, top_side)
+        c.drawCentredString(ox + draw_w / 2.0, oy - 14.5, bottom_side)
+    if view == 'top_rotated':
+        top_lbl = 'Vorne' if front_at_x_max else 'Hinten'
+        bottom_lbl = 'Hinten' if front_at_x_max else 'Vorne'
+        left_side = 'Links' if left_at_y_max else 'Rechts'
+        right_side = 'Rechts' if left_at_y_max else 'Links'
+        c.drawCentredString(ox + draw_w / 2.0, oy + draw_h + 2.5, top_lbl)
+        c.drawCentredString(ox + draw_w / 2.0, oy - 8.5, bottom_lbl)
+        c.drawString(ox, oy + draw_h + 2.5, left_side)
+        c.drawRightString(ox + draw_w, oy + draw_h + 2.5, right_side)
     if view == 'back':
         # Blick von hinten nach vorne: links/rechts wie am Fahrzeug in Fahrtrichtung.
         left_lbl = 'Links' if left_at_y_max else 'Rechts'
@@ -5634,10 +5652,11 @@ def _pdf_dim_line_v(c, x: float, y0: float, y1: float, label: str, tick: float =
 
 
 def _pdf_project_x_range_for_side(x0: float, x1: float, eff_length: float, view: str, left_at_y_max: bool = False) -> Tuple[float, float]:
-    """Projiziert eine X-Strecke analog zur Seitenansicht."""
-    side_from_y_max = (view == 'side_right' and not left_at_y_max) or (view in ('side', 'side_left') and left_at_y_max)
-    if side_from_y_max:
-        return eff_length - x1, eff_length - x0
+    """Projiziert eine X-Strecke analog zur Seitenansicht.
+
+    V102: Linke und rechte Seitenansicht behalten dieselbe Längsrichtung,
+    damit die Ladung nicht seitlich springt und beide Ansichten in Flucht bleiben.
+    """
     return x0, x1
 
 
@@ -5693,7 +5712,7 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
     # Die gegenüberliegende Seite bleibt als hellgraue Orientierung im Hintergrund sichtbar.
     ghost_rows = pd.DataFrame(columns=rows.columns)
 
-    if view == 'top' and not rows.empty:
+    if view in ('top', 'top_rotated') and not rows.empty:
         # In der Draufsicht sollen Bauteilnummern im Vordergrund bleiben.
         # Unterbau wird später nur gestrichelt gezeichnet; Einlagen/Kantholz bleiben verdeckt.
         typ_series = rows.get('Typ', pd.Series(dtype=str)).astype(str)
@@ -5712,16 +5731,12 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
     c.setFillColor(colors.white)
     # V84: Titel "Draufsicht" etwas tiefer setzen,
     # damit die obere Pritschenkante frei sichtbar bleibt.
-    if view == 'top':
-        c.rect(x - 1, y + h + 4, min(max(w, 90), 180), 10, stroke=0, fill=1)
+    if view in ('top', 'top_rotated'):
+        c.rect(x - 1, y + h + 4, min(max(w, 90), 220), 10, stroke=0, fill=1)
         title_y = y + h + 7
     else:
         c.rect(x - 1, y + h + 10, min(max(w, 90), 220), 11, stroke=0, fill=1)
         title_y = y + h + 13
-        # Rechte Seitenansicht: nur Titel etwas tiefer, Ansicht selbst bleibt in Flucht.
-        if title.startswith('Rechte Seitenansicht'):
-            c.rect(x - 1, y + h + 2, min(max(w, 90), 220), 11, stroke=0, fill=1)
-            title_y = y + h + 5
     c.setFillColor(colors.black)
     c.setFont('Helvetica-Bold', 9.4)
     c.drawString(x, title_y, title)
@@ -5729,6 +5744,9 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
     if view == 'top':
         data_w = max(eff_length, load_x1, 1)
         data_h = max(width, load_y1, 1)
+    elif view == 'top_rotated':
+        data_w = max(width, load_y1, 1)
+        data_h = max(eff_length, load_x1, 1)
     elif view in ('side', 'side_left', 'side_right'):
         data_w = max(eff_length, load_x1, 1)
         # Fester Höhenrahmen = zulässige Ladehöhe ab Oberkante Pritsche.
@@ -5757,6 +5775,13 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
         c.setStrokeColor(colors.HexColor('#8c8c8c'))
         c.setLineWidth(0.45)
         c.rect(px0, oy, max(px1 - px0, 0.1), draw_h, stroke=1, fill=1)
+    elif view == 'top_rotated':
+        py0 = oy + platform_x0 * scale
+        py1 = oy + platform_x1 * scale
+        c.setFillColor(colors.HexColor('#f0f0f0'))
+        c.setStrokeColor(colors.HexColor('#8c8c8c'))
+        c.setLineWidth(0.45)
+        c.rect(ox, py0, draw_w, max(py1 - py0, 0.1), stroke=1, fill=1)
     elif view in ('side', 'side_left', 'side_right'):
         # Pritschenhöhe wird nicht bemasst; der Balken ist nur Symbol.
         sx0, sx1 = _pdf_project_x_range_for_side(platform_x0, platform_x1, eff_length, view, left_at_y_max=left_at_y_max)
@@ -5791,23 +5816,23 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
         _pdf_dim_line_h(c, ox + sx0 * scale, ox + sx1 * scale, oy - 12, f'Pritschenlänge {base_length:.0f} mm')
         _pdf_dim_line_h(c, ox + lx0 * scale, ox + lx1 * scale, oy - 24, f'Ladungslänge {used_len:.0f} mm')
         dim_y = oy - 36
-        # Interne X-Richtung und gewünschte PDF-Leselogik können voneinander abweichen.
-        # Für die PDF gilt: links = hinten, rechts = vorne.
-        left_over_label = 'Überhang hinten'
-        right_over_label = 'Überhang vorne'
-        left_over_value = over_back_actual if not front_at_x_max else over_front_actual
-        right_over_value = over_front_actual if not front_at_x_max else over_back_actual
         left_seg_start, left_seg_end = _pdf_project_x_range_for_side(load_x0, platform_x0, eff_length, view, left_at_y_max=left_at_y_max)
         right_seg_start, right_seg_end = _pdf_project_x_range_for_side(platform_x1, load_x1, eff_length, view, left_at_y_max=left_at_y_max)
-        if left_over_value > 0:
-            _pdf_dim_line_h(c, ox + left_seg_start * scale, ox + left_seg_end * scale, dim_y, f'{left_over_label} {left_over_value:.0f} mm')
-        if right_over_value > 0:
-            _pdf_dim_line_h(c, ox + right_seg_start * scale, ox + right_seg_end * scale, dim_y, f'{right_over_label} {right_over_value:.0f} mm')
+        if over_back_actual > 0:
+            _pdf_dim_line_h(c, ox + left_seg_start * scale, ox + left_seg_end * scale, dim_y, f'Überhang hinten {over_back_actual:.0f} mm')
+        if over_front_actual > 0:
+            _pdf_dim_line_h(c, ox + right_seg_start * scale, ox + right_seg_end * scale, dim_y, f'Überhang vorne {over_front_actual:.0f} mm')
         _pdf_dim_line_v(c, ox + draw_w + 10, oy, oy + min(used_hei, data_h) * scale, f'Ladehöhe {used_hei:.0f} mm')
+        _pdf_dim_line_v(c, ox + draw_w + 28, oy, oy + min(used_hei, data_h) * scale, f'Ladungshöhe {used_hei:.0f} mm')
 
     if show_dimensions and used_wid > 0 and view == 'top':
         _pdf_dim_line_v(c, ox + draw_w + 10, oy, oy + width * scale, f'Pritschenbreite {width:.0f} mm')
         _pdf_dim_line_v(c, ox + draw_w + 27, oy + load_y0 * scale, oy + load_y1 * scale, f'Ladungsbreite {used_wid:.0f} mm')
+    if show_dimensions and used_wid > 0 and view == 'top_rotated':
+        _pdf_dim_line_h(c, ox, ox + draw_w, oy - 12, f'Pritschenbreite {width:.0f} mm')
+        left_px = ox + ((width - load_y1) if left_at_y_max else load_y0) * scale
+        right_px = ox + ((width - load_y0) if left_at_y_max else load_y1) * scale
+        _pdf_dim_line_h(c, left_px, right_px, oy - 24, f'Ladungsbreite {used_wid:.0f} mm')
 
     # V84: Gegenseite in Seitenansichten zuerst hellgrau im Hintergrund zeichnen.
     if view in ('side', 'side_left', 'side_right') and ghost_rows is not None and not ghost_rows.empty:
@@ -6486,18 +6511,15 @@ def create_loading_pdf(
         for i, line in enumerate(hints):
             c.drawString(hint_x, hint_y - 14 - i * 12, line)
 
-        # V100: Bezugsskizze in der optisch saubereren Variante.
-        _pdf_draw_bsd_reference_sketch(c, margin + 470, page_h - 176, 220, 88, front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max)
+        # V102: Bezugsskizze und neu angeordnete Ansichten.
+        _pdf_draw_bsd_reference_sketch(c, margin + 585, page_h - 176, 230, 88, front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max)
 
-        # Zeichnungsbereiche leicht nach oben verschoben; unten bleibt Platz für Bemassungen.
-        # Zeichnungsbereiche leicht nach oben verschoben; unten bleibt Platz für Bemassungen.
-        _pdf_draw_view(c, placements_df, platform, margin, 405, 710, 215, 'side_left', 'Linke Seitenansicht', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
-        # V98: Rechte Seitenansicht stärker getrennt von Überhang-Bemassung und Draufsicht.
-        # Der Titel liegt klar unter der Überhang-Zeile; die Ansicht bleibt oberhalb der Draufsicht.
-        _pdf_draw_view(c, placements_df, platform, margin, 165, 710, 215, 'side_right', 'Rechte Seitenansicht', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
-        _pdf_draw_view(c, placements_df, platform, margin + 745, 405, 330, 190, 'back', 'Rückansicht (Blick von hinten)', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
-        _pdf_draw_view(c, placements_df, platform, margin + 745, 165, 330, 190, 'front', 'Vorderansicht (Blick von vorne)', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
-        _pdf_draw_view(c, placements_df, platform, margin, 25, 1080, 105, 'top', 'Draufsicht', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
+        # Seitenansichten mit mehr Platz links, Draufsicht 90° gedreht rechts.
+        _pdf_draw_view(c, placements_df, platform, margin, 450, 770, 155, 'side_left', 'Linke Seitenansicht', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
+        _pdf_draw_view(c, placements_df, platform, margin, 220, 770, 155, 'side_right', 'Rechte Seitenansicht', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
+        _pdf_draw_view(c, placements_df, platform, margin + 830, 470, 250, 90, 'back', 'Rückansicht (Blick von hinten)', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
+        _pdf_draw_view(c, placements_df, platform, margin + 830, 340, 250, 90, 'front', 'Vorderansicht (Blick von vorne)', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
+        _pdf_draw_view(c, placements_df, platform, margin + 830, 45, 230, 255, 'top_rotated', 'Draufsicht 90°', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
 
         # Qualitätssicherung kompakt oben rechts, getrennt vom Infofeld.
         c.setStrokeColor(colors.black)
