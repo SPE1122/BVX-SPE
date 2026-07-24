@@ -26,6 +26,11 @@ from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Tuple
 from collections import Counter
 from datetime import datetime
+try:
+    from zoneinfo import ZoneInfo
+except Exception:
+    ZoneInfo = None
+
 
 DEFAULT_LOGO_B64 = '''/9j/4AAQSkZJRgABAQEBLAEsAAD/4QBWRXhpZgAATU0AKgAAAAgABAEaAAUAAAABAAAAPgEbAAUAAAABAAAARgEoAAMAAAABAAIAAAITAAMAAAABAAEAAAAAAAAAAAEsAAAAAQAAASwAAAAB/+0ALFBob3Rvc2hvcCAzLjAAOEJJTQQEAAAAAAAPHAFaAAMbJUccAQAAAgAEAP/hDIFodHRwOi8vbnMuYWRvYmUuY29tL3hhcC8xLjAvADw/eHBhY2tldCBiZWdpbj0n77u/JyBpZD0nVzVNME1wQ2VoaUh6cmVTek5UY3prYzlkJz8+Cjx4OnhtcG1ldGEgeG1sbnM6eD0nYWRvYmU6bnM6bWV0YS8nIHg6eG1wdGs9J0ltYWdlOjpFeGlmVG9vbCAxMC4xMCc+CjxyZGY6UkRGIHhtbG5zOnJkZj0naHR0cDovL3d3dy53My5vcmcvMTk5OS8wMi8yMi1yZGYtc3ludGF4LW5zIyc+CgogPHJkZjpEZXNjcmlwdGlvbiByZGY6YWJvdXQ9JycKICB4bWxuczp0aWZmPSdodHRwOi8vbnMuYWRvYmUuY29tL3RpZmYvMS4wLyc+CiAgPHRpZmY6UmVzb2x1dGlvblVuaXQ+MjwvdGlmZjpSZXNvbHV0aW9uVW5pdD4KICA8dGlmZjpYUmVzb2x1dGlvbj4zMDAvMTwvdGlmZjpYUmVzb2x1dGlvbj4KICA8dGlmZjpZUmVzb2x1dGlvbj4zMDAvMTwvdGlmZjpZUmVzb2x1dGlvbj4KIDwvcmRmOkRlc2NyaXB0aW9uPgoKIDxyZGY6RGVzY3JpcHRpb24gcmRmOmFib3V0PScnCiAgeG1sbnM6eG1wTU09J2h0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC9tbS8nPgogIDx4bXBNTTpEb2N1bWVudElEPmFkb2JlOmRvY2lkOnN0b2NrOjc5MDJhZWNhLWMyZWYtNDY1My1hNTBhLWMxM2NmYzRiYmE4MjwveG1wTU06RG9jdW1lbnRJRD4KICA8eG1wTU06SW5zdGFuY2VJRD54bXAuaWlkOjY5ZGNlMzk1LTZhYWYtNGI0Zi1iNTg2LWE2NTVhMDgzOTI0MDwveG1wTU06SW5zdGFuY2VJRD4KIDwvcmRmOkRlc2NyaXB0aW9uPgo8L3JkZjpSREY+CjwveDp4bXBtZXRhPgogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAo8P3hwYWNrZXQgZW5kPSd3Jz8+/9sAQwAFAwQEBAMFBAQEBQUFBgcMCAcHBwcPCwsJDBEPEhIRDxERExYcFxMUGhURERghGBodHR8fHxMXIiQiHiQcHh8e/9sAQwEFBQUHBgcOCAgOHhQRFB4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4e/8AAEQgBaAFxAwERAAIRAQMRAf/EAB0AAQACAgMBAQAAAAAAAAAAAAAHCAUGAwQJAgH/xABEEAABAwMCAwUFBQcCBAYDAAABAAIDBAURBgcSIUEIEzFRYSIycYGRFEJSYqEVIzNygpKiFrEkQ1PBFyU0c5OywuHw/8QAGAEBAQEBAQAAAAAAAAAAAAAAAAMCAQT/xAAgEQEBAQEAAwEBAQEBAQAAAAAAAQIREiExQVEiAzJx/9oADAMBAAIRAxEAPwC5aAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg4qiop6dvFPNHE3ze4NH6oPymq6Wpyaephmx/03h3+yDmQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQaNuxujpjbm3Nlu87p6+ZpNNb4CDNL6+TW5+8eXlk8l2Trl1Iqfr/ALQO4Op5pI6Gv/09QE+zBbziTH5pT7RP8vCPRUmZEru1FldWVdfM6auq6irlccl88rpHH5uJXWXHTTTU0gkppZIHjmHRPLCPmEEj6G3x3F0pLG2O+S3ajbjNJciZmkeQefbb8j8ly5lamrFq9m96NM7isFEzNrvjWcT7fO8EvA8XRO++Po4dR1WLnik1Kk5ZaEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQR7vtuXRbbaSNZwsqLtV8UVupXHk9+Ob3fkbkE+eQOq7J1nV4obqC8XPUF5qbxea2Wtr6p/HNNIebj0A8gPAAcgOQVUbeuggICAg5aOpqKOrhq6SeWnqIHiSKWJxa+Nw5hzSOYIQXd7NW7bdwLI+1Xl7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yvNXREcLoZK1xa4eTuftD45XeRztbn2fdPa0vtwltlvsDLnpSvc1l2jrw6Ojc0eD2vHMTN+66PLh4HkuasdzK2PdLs16mslRLXaNc6/W3Jc2nc5rauIeWDhsnxGD6Lk07cX8RnbRubpeSS222PV9nc8kPp6eOpiDj/K0Yz6hd9Vn3G/7U7B6v1jeWXTWEFbZ7S5/eVElWSKuq9Gtd7Qz+N3h0BXLqRqZt+rl2i3UVptlNbLbTR0tHSxNighjGGsY0YACmq7SAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICD8e1r2lr2hzXDBBGQQgwJ0To01X2o6TsPf5z3n7Oi4s+eeFd7XORnYo44o2xxsaxjRhrWjAA9AuOvpAx8fqgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICD/2Q=='''
 
@@ -805,6 +810,16 @@ def yes_no_to_bool(value: Any) -> bool:
     text = str(value).strip().lower()
     return text in {'ja', 'j', 'yes', 'y', 'true', 'wahr', '1', 'x'}
 
+
+
+def _now_europe_zurich() -> datetime:
+    """Lokale Zeit für Schweiz / Mitteleuropa."""
+    if ZoneInfo is not None:
+        try:
+            return datetime.now(ZoneInfo('Europe/Zurich'))
+        except Exception:
+            pass
+    return datetime.now()
 
 def safe_number(value: Any, default: float = 0.0) -> float:
     if value is None or (isinstance(value, float) and pd.isna(value)):
@@ -3534,7 +3549,7 @@ def create_loading_excel(
             write_label(ws, 'A9', 'Sachbearbeiter:')
             ws['C9'] = str(val(header, 'Sachbearbeiter', ''))
             write_label(ws, 'A10', 'Datum:')
-            ws['C10'] = str(val(header, 'Datum', datetime.now().strftime('%d.%m.%Y')))
+            ws['C10'] = str(val(header, 'Datum', _now_europe_zurich().strftime('%d.%m.%Y')))
             set_box(ws, 'A9:D10')
 
             # Kopf Mitte.
@@ -3814,7 +3829,7 @@ def create_loading_excel(
                 info = [
                     ('A2', 'Objekt / Datei:', 'C2', str(val(header, 'Objekt_Name', ''))),
                     ('A3', 'Transport:', 'C3', str(val(header, 'Transport_Name', ''))),
-                    ('A4', 'Datum:', 'C4', str(val(header, 'Datum', datetime.now().strftime('%d.%m.%Y')))),
+                    ('A4', 'Datum:', 'C4', str(val(header, 'Datum', _now_europe_zurich().strftime('%d.%m.%Y')))),
                     ('A5', 'Bund-Attribute:', 'C5', _format_label_value(brow.get('Bund_Attribute', ''))),
                     ('F2', 'Fuhre:', 'H2', str(val(header, 'Fuhre_Nr', ''))),
                     ('F3', 'Pritsche:', 'H3', pname),
@@ -3918,7 +3933,7 @@ def create_loading_excel(
             ws['C8'] = str(val(header, 'Sachbearbeiter', ''))
             write_label(ws, 'A9', 'Datum:')
             ws.merge_cells('C9:F9')
-            ws['C9'] = str(val(header, 'Datum', datetime.now().strftime('%d.%m.%Y')))
+            ws['C9'] = str(val(header, 'Datum', _now_europe_zurich().strftime('%d.%m.%Y')))
 
             # Rechter Infoblock ähnlich PDF-Vorlage.
             set_box(ws, 'H3:R10')
@@ -4770,7 +4785,7 @@ def create_bsd_header_for_platform(
         'Objekt_Name': project_meta.get('Objekt_Name', ''),
         'Transport_Name': project_meta.get('Transport_Name', ''),
         'Sachbearbeiter': project_meta.get('Sachbearbeiter', ''),
-        'Datum': project_meta.get('Datum', datetime.now().strftime('%d.%m.%Y')),
+        'Datum': project_meta.get('Datum', _now_europe_zurich().strftime('%d.%m.%Y')),
         'Decke': project_meta.get('Decke', ''),
         'Bauabschnitt': project_meta.get('Bauabschnitt', ''),
         'Decke_Attribut': project_meta.get('Decke_Attribut', ''),
@@ -5527,7 +5542,15 @@ def _pdf_draw_view_orientation_helpers(c, ox: float, oy: float, draw_w: float, d
             bottom_side = 'Rechts' if left_at_y_max else 'Links'
             c.drawCentredString(ox + draw_w / 2.0, oy + draw_h + 10.5, top_side)
             c.drawCentredString(ox + draw_w / 2.0, oy - 14.5, bottom_side)
-    if view in ('front', 'back'):
+    if view == 'back':
+        # Blick von hinten nach vorne: links/rechts wie am Fahrzeug in Fahrtrichtung.
+        left_lbl = 'Links' if left_at_y_max else 'Rechts'
+        right_lbl = 'Rechts' if left_at_y_max else 'Links'
+        c.drawString(ox, oy + draw_h + 2.5, left_lbl)
+        c.drawRightString(ox + draw_w, oy + draw_h + 2.5, right_lbl)
+        c.drawCentredString(ox + draw_w / 2.0, oy + draw_h + 2.5, 'Mitte Y')
+    if view == 'front':
+        # Blick von vorne nach hinten: links/rechts erscheint gespiegelt.
         left_lbl = 'Rechts' if left_at_y_max else 'Links'
         right_lbl = 'Links' if left_at_y_max else 'Rechts'
         c.drawString(ox, oy + draw_h + 2.5, left_lbl)
@@ -5693,8 +5716,12 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
         c.rect(x - 1, y + h + 4, min(max(w, 90), 180), 10, stroke=0, fill=1)
         title_y = y + h + 7
     else:
-        c.rect(x - 1, y + h + 10, min(max(w, 90), 180), 11, stroke=0, fill=1)
+        c.rect(x - 1, y + h + 10, min(max(w, 90), 220), 11, stroke=0, fill=1)
         title_y = y + h + 13
+        # Rechte Seitenansicht: nur Titel etwas tiefer, Ansicht selbst bleibt in Flucht.
+        if title.startswith('Rechte Seitenansicht'):
+            c.rect(x - 1, y + h + 2, min(max(w, 90), 220), 11, stroke=0, fill=1)
+            title_y = y + h + 5
     c.setFillColor(colors.black)
     c.setFont('Helvetica-Bold', 9.4)
     c.drawString(x, title_y, title)
@@ -5764,12 +5791,18 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
         _pdf_dim_line_h(c, ox + sx0 * scale, ox + sx1 * scale, oy - 12, f'Pritschenlänge {base_length:.0f} mm')
         _pdf_dim_line_h(c, ox + lx0 * scale, ox + lx1 * scale, oy - 24, f'Ladungslänge {used_len:.0f} mm')
         dim_y = oy - 36
-        if over_back_actual > 0:
-            bx0, bx1 = _pdf_project_x_range_for_side(load_x0, platform_x0, eff_length, view, left_at_y_max=left_at_y_max)
-            _pdf_dim_line_h(c, ox + bx0 * scale, ox + bx1 * scale, dim_y, f'Überhang hinten {over_back_actual:.0f} mm')
-        if over_front_actual > 0:
-            fx0, fx1 = _pdf_project_x_range_for_side(platform_x1, load_x1, eff_length, view, left_at_y_max=left_at_y_max)
-            _pdf_dim_line_h(c, ox + fx0 * scale, ox + fx1 * scale, dim_y, f'Überhang vorne {over_front_actual:.0f} mm')
+        # Interne X-Richtung und gewünschte PDF-Leselogik können voneinander abweichen.
+        # Für die PDF gilt: links = hinten, rechts = vorne.
+        left_over_label = 'Überhang hinten'
+        right_over_label = 'Überhang vorne'
+        left_over_value = over_back_actual if not front_at_x_max else over_front_actual
+        right_over_value = over_front_actual if not front_at_x_max else over_back_actual
+        left_seg_start, left_seg_end = _pdf_project_x_range_for_side(load_x0, platform_x0, eff_length, view, left_at_y_max=left_at_y_max)
+        right_seg_start, right_seg_end = _pdf_project_x_range_for_side(platform_x1, load_x1, eff_length, view, left_at_y_max=left_at_y_max)
+        if left_over_value > 0:
+            _pdf_dim_line_h(c, ox + left_seg_start * scale, ox + left_seg_end * scale, dim_y, f'{left_over_label} {left_over_value:.0f} mm')
+        if right_over_value > 0:
+            _pdf_dim_line_h(c, ox + right_seg_start * scale, ox + right_seg_end * scale, dim_y, f'{right_over_label} {right_over_value:.0f} mm')
         _pdf_dim_line_v(c, ox + draw_w + 10, oy, oy + min(used_hei, data_h) * scale, f'Ladehöhe {used_hei:.0f} mm')
 
     if show_dimensions and used_wid > 0 and view == 'top':
@@ -6197,7 +6230,7 @@ def _pdf_draw_bsd_matrix_page(c, page_w: float, page_h: float, margin: float, pl
     c.drawString(margin, page_h - 36, f'Ladeplan BSD - {pname}')
     c.setFont('Helvetica', 9)
     c.drawString(margin, page_h - 54, f'Objekt / Datei: {header.get("Objekt_Name", project_name) or project_name}')
-    c.drawString(margin, page_h - 70, f'Erstellt: {datetime.now().strftime("%d.%m.%Y %H:%M")}')
+    c.drawString(margin, page_h - 70, f'Erstellt: {_now_europe_zurich().strftime("%d.%m.%Y %H:%M")}')
 
     # Kopfbereich links/rechts.
     left_x = margin
@@ -6215,7 +6248,7 @@ def _pdf_draw_bsd_matrix_page(c, page_w: float, page_h: float, margin: float, pl
         f'Fuhre: {header.get("Fuhre_Nr", "")}',
         f'Fuhrenoption: {header.get("Fuhrenoption", "")}',
         f'Pritschenname: {header.get("Pritschenname", "")}',
-        f'Datum: {datetime.now().strftime("%d.%m.%Y")}',
+        f'Datum: {_now_europe_zurich().strftime("%d.%m.%Y")}',
     ]
     right_lines = [
         f'Pritschenhöhe: {safe_number(header.get("Pritschenhöhe_mm")):.0f} mm',
@@ -6319,7 +6352,7 @@ def _pdf_draw_logo(c, logo_bytes: Optional[bytes], x: float, y: float, max_w: fl
     except Exception:
         return
 
-def _pdf_draw_bsd_reference_sketch(c, x: float, y: float, w: float = 170, h: float = 72, front_at_x_max: bool = True, left_at_y_max: bool = False) -> None:
+def _pdf_draw_bsd_reference_sketch(c, x: float, y: float, w: float = 180, h: float = 88, front_at_x_max: bool = True, left_at_y_max: bool = False) -> None:
     """Kleine Bezugs-Skizze: Welche Seite der Draufsicht gehört zu BSD VL/VR/HL/HR."""
     from reportlab.lib import colors
     c.saveState()
@@ -6333,11 +6366,11 @@ def _pdf_draw_bsd_reference_sketch(c, x: float, y: float, w: float = 170, h: flo
     c.drawString(x + 5, y + h - 10, 'Bezug Draufsicht / BSD')
 
     pad_x = 34
-    pad_y = 17
+    pad_y = 14
     bx = x + pad_x
     by = y + pad_y
     bw = w - pad_x * 2
-    bh = h - pad_y - 16
+    bh = h - pad_y - 25
     mid_x = bx + bw / 2
     mid_y = by + bh / 2
 
@@ -6360,8 +6393,8 @@ def _pdf_draw_bsd_reference_sketch(c, x: float, y: float, w: float = 170, h: flo
     c.drawCentredString(mid_x, by + bh + 3, top_side)
     c.drawCentredString(mid_x, by - 8, bottom_side)
 
-    c.setFont('Helvetica', 5.2)
-    c.drawString(x + 5, y + h - 18, 'Blick: von hinten nach vorne')
+    c.setFont('Helvetica', 4.9)
+    c.drawString(x + 5, y + h - 17, 'Blick: von hinten nach vorne')
 
     c.setFont('Helvetica-Bold', 6.0)
     c.drawCentredString((bx + mid_x) / 2, (mid_y + by + bh) / 2 - 2, 'HL' if left_end == 'Hinten' and top_side == 'Links' else 'HR')
@@ -6369,9 +6402,9 @@ def _pdf_draw_bsd_reference_sketch(c, x: float, y: float, w: float = 170, h: flo
     c.drawCentredString((bx + mid_x) / 2, (by + mid_y) / 2 - 2, 'HL' if left_end == 'Hinten' and bottom_side == 'Links' else 'HR')
     c.drawCentredString((mid_x + bx + bw) / 2, (by + mid_y) / 2 - 2, 'VL' if right_end == 'Vorne' and bottom_side == 'Links' else 'VR')
 
-    c.setFont('Helvetica', 5.2)
-    c.drawString(x + 5, y + 10, 'Vorne = Fahrtrichtung / Zugfahrzeug')
-    c.drawString(x + 5, y + 4, 'Links / Rechts = von hinten nach vorne geschaut')
+    c.setFont('Helvetica', 4.8)
+    c.drawString(x + 5, y + 11, 'Vorne = Fahrtrichtung / Zugfahrzeug')
+    c.drawString(x + 5, y + 5, 'Links / Rechts = von hinten nach vorne geschaut')
     c.restoreState()
 
 
@@ -6418,7 +6451,7 @@ def create_loading_pdf(
         c.drawString(margin, page_h - 36, f'Pritschenplan - {pname}')
         c.setFont('Helvetica', 9)
         c.drawString(margin, page_h - 54, f'Objekt / Datei: {project_meta.get("Objekt_Name", project_name) or project_name}')
-        c.drawString(margin, page_h - 70, f'Erstellt: {datetime.now().strftime("%d.%m.%Y %H:%M")}')
+        c.drawString(margin, page_h - 70, f'Erstellt: {_now_europe_zurich().strftime("%d.%m.%Y %H:%M")}')
 
         info_x = page_w - 245
         info_y = page_h - 40
@@ -6454,14 +6487,14 @@ def create_loading_pdf(
             c.drawString(hint_x, hint_y - 14 - i * 12, line)
 
         # V100: Bezugsskizze in der optisch saubereren Variante.
-        _pdf_draw_bsd_reference_sketch(c, margin + 480, page_h - 170, 205, 82, front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max)
+        _pdf_draw_bsd_reference_sketch(c, margin + 470, page_h - 176, 220, 88, front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max)
 
         # Zeichnungsbereiche leicht nach oben verschoben; unten bleibt Platz für Bemassungen.
         # Zeichnungsbereiche leicht nach oben verschoben; unten bleibt Platz für Bemassungen.
         _pdf_draw_view(c, placements_df, platform, margin, 405, 710, 215, 'side_left', 'Linke Seitenansicht', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
         # V98: Rechte Seitenansicht stärker getrennt von Überhang-Bemassung und Draufsicht.
         # Der Titel liegt klar unter der Überhang-Zeile; die Ansicht bleibt oberhalb der Draufsicht.
-        _pdf_draw_view(c, placements_df, platform, margin, 150, 710, 170, 'side_right', 'Rechte Seitenansicht', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
+        _pdf_draw_view(c, placements_df, platform, margin, 165, 710, 215, 'side_right', 'Rechte Seitenansicht', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
         _pdf_draw_view(c, placements_df, platform, margin + 745, 405, 330, 190, 'back', 'Rückansicht (Blick von hinten)', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
         _pdf_draw_view(c, placements_df, platform, margin + 745, 165, 330, 190, 'front', 'Vorderansicht (Blick von vorne)', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
         _pdf_draw_view(c, placements_df, platform, margin, 25, 1080, 105, 'top', 'Draufsicht', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
@@ -7841,7 +7874,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
     objekt_name = mcol1.text_input('Objekt Name', value='')
     transport_name = mcol2.text_input('Transport Name / Unternehmer', value='')
     sachbearbeiter = mcol3.text_input('Sachbearbeiter', value='')
-    ladeplan_datum = mcol4.text_input('Datum', value=datetime.now().strftime('%d.%m.%Y'))
+    ladeplan_datum = mcol4.text_input('Datum', value=_now_europe_zurich().strftime('%d.%m.%Y'))
 
     mcol5, mcol6, mcol7, mcol8 = st.columns(4)
     decke_attr = mcol5.selectbox('Decke aus BVX-Attribut', meta_fields, index=_default_attr_index(meta_fields, ['User_Attribut_2', 'BVX_User_Attribut_2', 'Name']))
