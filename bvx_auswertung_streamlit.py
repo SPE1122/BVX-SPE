@@ -1,5 +1,5 @@
 """
-BVX Auswertung + Verladeplanung - Streamlit Version
+BVX Auswertung + Verladeplanung - Streamlit Version v104
 
 Installation:
     pip install streamlit pandas plotly openpyxl reportlab pillow
@@ -3361,7 +3361,10 @@ def create_loading_excel(
     Ladeplan_BSD_Kopf und Projektkopf.
     """
     project_meta = project_meta or {}
-    front_at_x_max, left_at_y_max = _orientation_flags_from_meta(project_meta)
+    # V104: Excel/BSD und PDF sprechen dieselbe Sprache:
+    # vorne = Fahrtrichtung/Zugfahrzeug, links/rechts = Blick von hinten nach vorne.
+    front_at_x_max = True
+    left_at_y_max = True
     bundle_overview_only = bool(bundle_overview_only) or _project_meta_bool(project_meta, 'Bundnummern_nur_in_Verladung', False)
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -5672,10 +5675,11 @@ def _pdf_real_load_rows_for_dimensions(rows: pd.DataFrame) -> pd.DataFrame:
 def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y: float, w: float, h: float, view: str, title: str, front_at_x_max: bool = False, left_at_y_max: bool = False, bundle_overview_only: bool = False, show_dimensions: bool = True) -> None:
     """Zeichnet eine PDF-Ansicht mit Pritschen- und Ladungsabmessungen.
 
-    Beschriftung wurde bewusst reduziert:
-    - Bunde werden nummernweise untereinander dargestellt.
-    - Verdeckte Bauteile werden zuerst gezeichnet, sichtbare Seiten zuletzt.
-    - In der Draufsicht wird je Bund nur die oberste Nummer beschriftet.
+    V104:
+    - Linke/rechte Seitenansicht bleiben in gleicher Längs-Flucht.
+    - Die Zeichnung nutzt den tatsächlich belegten Laderaum statt den ganzen möglichen Maximalraum.
+    - Draufsicht kann 90° gedreht als eigene rechte Spalte gezeichnet werden.
+    - Keine Änderung an Verladelogik oder Bauteilpositionen.
     """
     from reportlab.lib import colors
 
@@ -5704,22 +5708,25 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
     else:
         load_x0 = load_x1 = load_y0 = load_y1 = used_len = used_wid = used_hei = 0.0
 
+    # Sichtbarer X-Ausschnitt = tatsächliche Ladung + physische Pritsche.
+    # Damit schrumpft die Darstellung nicht wegen ungenutzter Maximal-Überhangreserve.
+    if used_len > 0:
+        visible_x0 = min(load_x0, platform_x0)
+        visible_x1 = max(load_x1, platform_x1)
+    else:
+        visible_x0 = min(platform_x0, platform_x1)
+        visible_x1 = max(platform_x0, platform_x1)
+    visible_len = max(visible_x1 - visible_x0, 1.0)
+
     over_back_actual = max(platform_x0 - load_x0, 0.0) if used_len > 0 else 0.0
     over_front_actual = max(load_x1 - platform_x1, 0.0) if used_len > 0 else 0.0
 
-    # V84:
-    # In Seitenansichten wird die sichtbare Seite normal gezeichnet.
-    # Die gegenüberliegende Seite bleibt als hellgraue Orientierung im Hintergrund sichtbar.
     ghost_rows = pd.DataFrame(columns=rows.columns)
 
     if view in ('top', 'top_rotated') and not rows.empty:
-        # In der Draufsicht sollen Bauteilnummern im Vordergrund bleiben.
-        # Unterbau wird später nur gestrichelt gezeichnet; Einlagen/Kantholz bleiben verdeckt.
         typ_series = rows.get('Typ', pd.Series(dtype=str)).astype(str)
         rows = rows[~typ_series.isin(['Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz'])].copy()
     elif view in ('side', 'side_left', 'side_right') and not rows.empty:
-        # Seitenansicht = jeweilige sichtbare Breiten-Seite normal.
-        # Gegenseite wird nicht gelöscht, sondern hellgrau im Hintergrund angezeigt.
         rows_all_for_side = rows.copy()
         rows_visible = _pdf_filter_rows_for_side_view(rows_all_for_side, platform, view, left_at_y_max=left_at_y_max)
         ghost_rows = rows_all_for_side.loc[~rows_all_for_side.index.isin(rows_visible.index)].copy()
@@ -5729,8 +5736,6 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
 
     c.setStrokeColor(colors.black)
     c.setFillColor(colors.white)
-    # V84: Titel "Draufsicht" etwas tiefer setzen,
-    # damit die obere Pritschenkante frei sichtbar bleibt.
     if view in ('top', 'top_rotated'):
         c.rect(x - 1, y + h + 4, min(max(w, 90), 220), 10, stroke=0, fill=1)
         title_y = y + h + 7
@@ -5741,53 +5746,59 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
     c.setFont('Helvetica-Bold', 9.4)
     c.drawString(x, title_y, title)
 
+    view_x_offset = 0.0
+    view_y_offset = 0.0
     if view == 'top':
-        data_w = max(eff_length, load_x1, 1)
-        data_h = max(width, load_y1, 1)
+        data_w = visible_len
+        data_h = max(width, load_y1, 1.0)
+        view_x_offset = visible_x0
     elif view == 'top_rotated':
-        data_w = max(width, load_y1, 1)
-        data_h = max(eff_length, load_x1, 1)
+        data_w = max(width, load_y1, 1.0)
+        data_h = visible_len
+        view_y_offset = visible_x0
     elif view in ('side', 'side_left', 'side_right'):
-        data_w = max(eff_length, load_x1, 1)
-        # V103: Für die Darstellung die tatsächliche Ladungshöhe verwenden,
-        # damit z. B. F05 LKW nicht unnötig klein wirkt.
-        data_h = max(used_hei, 1)
+        data_w = visible_len
+        data_h = max(used_hei, 1.0)
+        view_x_offset = visible_x0
     else:
-        data_w = max(width, load_y1, 1)
-        data_h = max(used_hei, 1)
+        data_w = max(width, load_y1, 1.0)
+        data_h = max(used_hei, 1.0)
 
-    scale = min(w / data_w, h / data_h)
+    scale = min(w / max(data_w, 1.0), h / max(data_h, 1.0))
     draw_w = data_w * scale
     draw_h = data_h * scale
     ox = x
     oy = y
 
-    # Maximaler Ladebereich und einfache Pritsche als grauer Balken.
+    def tx(px: float) -> float:
+        return ox + (px - view_x_offset) * scale
+
+    def ty(py: float) -> float:
+        return oy + (py - view_y_offset) * scale
+
     c.setStrokeColor(colors.black)
     c.setFillColor(colors.white)
     c.setLineWidth(0.85)
     c.rect(ox, oy, draw_w, draw_h, stroke=1, fill=0)
 
     if view == 'top':
-        # Ladefläche als hellgrauer Bereich in der Draufsicht.
-        px0 = ox + platform_x0 * scale
-        px1 = ox + platform_x1 * scale
+        px0 = tx(platform_x0)
+        px1 = tx(platform_x1)
         c.setFillColor(colors.HexColor('#f0f0f0'))
         c.setStrokeColor(colors.HexColor('#8c8c8c'))
         c.setLineWidth(0.45)
         c.rect(px0, oy, max(px1 - px0, 0.1), draw_h, stroke=1, fill=1)
     elif view == 'top_rotated':
-        py0 = oy + platform_x0 * scale
-        py1 = oy + platform_x1 * scale
+        py0 = ty(platform_x0)
+        py1 = ty(platform_x1)
         c.setFillColor(colors.HexColor('#f0f0f0'))
         c.setStrokeColor(colors.HexColor('#8c8c8c'))
         c.setLineWidth(0.45)
         c.rect(ox, py0, draw_w, max(py1 - py0, 0.1), stroke=1, fill=1)
     elif view in ('side', 'side_left', 'side_right'):
-        # Pritschenhöhe wird nicht bemasst; der Balken ist nur Symbol.
         sx0, sx1 = _pdf_project_x_range_for_side(platform_x0, platform_x1, eff_length, view, left_at_y_max=left_at_y_max)
-        px0 = ox + sx0 * scale
-        px1 = ox + sx1 * scale
+        px0 = tx(sx0)
+        px1 = tx(sx1)
         bar_h = 5.0
         c.setFillColor(colors.HexColor('#9b9b9b'))
         c.setStrokeColor(colors.black)
@@ -5802,27 +5813,18 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
 
     _pdf_draw_view_orientation_helpers(c, ox, oy, draw_w, draw_h, view, front_at_x_max, left_at_y_max)
 
-    # V84:
-    # Die kleinen Achsen-, Mass- und Grenzwerttexte wurden entfernt.
-    # Grund: Im alten Pritschenplan liefen diese Angaben in die Ansichten hinein
-    # bzw. lagen am Rand und waren teilweise nicht sichtbar. Die Werte stehen
-    # bereits im Infofeld; hier bleibt nur die saubere Zeichnung mit Orientierung.
-
-    # V95: Massstäbliche Bemassung der PDF-Ansichten.
-    # Seitenansicht: Pritschenlänge, Ladungslänge, Überhang vorne/hinten und Ladehöhe.
-    # Draufsicht: Pritschenbreite und Ladungsbreite. Keine seitlichen Überstände.
     if show_dimensions and used_len > 0 and view in ('side', 'side_left', 'side_right'):
         sx0, sx1 = _pdf_project_x_range_for_side(platform_x0, platform_x1, eff_length, view, left_at_y_max=left_at_y_max)
         lx0, lx1 = _pdf_project_x_range_for_side(load_x0, load_x1, eff_length, view, left_at_y_max=left_at_y_max)
-        _pdf_dim_line_h(c, ox + sx0 * scale, ox + sx1 * scale, oy - 12, f'Pritschenlänge {base_length:.0f} mm')
-        _pdf_dim_line_h(c, ox + lx0 * scale, ox + lx1 * scale, oy - 24, f'Ladungslänge {used_len:.0f} mm')
+        _pdf_dim_line_h(c, tx(sx0), tx(sx1), oy - 12, f'Pritschenlänge {base_length:.0f} mm')
+        _pdf_dim_line_h(c, tx(lx0), tx(lx1), oy - 24, f'Ladungslänge {used_len:.0f} mm')
         dim_y = oy - 36
-        left_seg_start, left_seg_end = _pdf_project_x_range_for_side(load_x0, platform_x0, eff_length, view, left_at_y_max=left_at_y_max)
-        right_seg_start, right_seg_end = _pdf_project_x_range_for_side(platform_x1, load_x1, eff_length, view, left_at_y_max=left_at_y_max)
         if over_back_actual > 0:
-            _pdf_dim_line_h(c, ox + left_seg_start * scale, ox + left_seg_end * scale, dim_y, f'Überhang hinten {over_back_actual:.0f} mm')
+            bx0, bx1 = _pdf_project_x_range_for_side(load_x0, platform_x0, eff_length, view, left_at_y_max=left_at_y_max)
+            _pdf_dim_line_h(c, tx(bx0), tx(bx1), dim_y, f'Überhang hinten {over_back_actual:.0f} mm')
         if over_front_actual > 0:
-            _pdf_dim_line_h(c, ox + right_seg_start * scale, ox + right_seg_end * scale, dim_y, f'Überhang vorne {over_front_actual:.0f} mm')
+            fx0, fx1 = _pdf_project_x_range_for_side(platform_x1, load_x1, eff_length, view, left_at_y_max=left_at_y_max)
+            _pdf_dim_line_h(c, tx(fx0), tx(fx1), dim_y, f'Überhang vorne {over_front_actual:.0f} mm')
         _pdf_dim_line_v(c, ox + draw_w + 10, oy, oy + min(used_hei, data_h) * scale, f'Ladehöhe {used_hei:.0f} mm')
 
     if show_dimensions and used_wid > 0 and view == 'top':
@@ -5834,40 +5836,25 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
         right_px = ox + ((width - load_y0) if left_at_y_max else load_y1) * scale
         _pdf_dim_line_h(c, left_px, right_px, oy - 24, f'Ladungsbreite {used_wid:.0f} mm')
 
-    # V84: Gegenseite in Seitenansichten zuerst hellgrau im Hintergrund zeichnen.
-    if view in ('side', 'side_left', 'side_right') and ghost_rows is not None and not ghost_rows.empty:
-        ghost_rows['_pdf_sort'] = ghost_rows.apply(lambda r: _pdf_visible_sort_value(r, view, eff_length, width, front_at_x_max, left_at_y_max), axis=1)
-        ghost_rows = ghost_rows.sort_values(['_pdf_sort', 'Z_mm', 'X_mm', 'Y_mm'], kind='stable')
-        for _, row in ghost_rows.iterrows():
-            row_typ = str(row.get('Typ', '') or '').strip()
-            if row_typ in ['Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz', 'Unterbau']:
-                continue
-            px, py, pw, ph, _depth = _pdf_projection_values(row, view, eff_length, width, front_at_x_max, left_at_y_max)
-            rx = ox + px * scale
+    def draw_projected_row(row: pd.Series, ghost: bool = False) -> None:
+        px, py, pw, ph, _depth = _pdf_projection_values(row, view, eff_length, width, front_at_x_max, left_at_y_max)
+        rx = tx(px) if view in ('side', 'side_left', 'side_right', 'top') else ox + px * scale
+        ry = ty(py) if view == 'top_rotated' else oy + py * scale
+        if view == 'top':
             ry = oy + py * scale
-            rw = pw * scale
-            rh = ph * scale
-            if rw <= 0 or rh <= 0:
-                continue
+        if view in ('side', 'side_left', 'side_right'):
+            ry = oy + py * scale
+        rw = pw * scale
+        rh = ph * scale
+        if rw <= 0 or rh <= 0:
+            return
+        row_typ = str(row.get('Typ', '') or '').strip()
+        if ghost:
             c.setFillColor(colors.HexColor('#eeeeee'))
             c.setStrokeColor(colors.HexColor('#cfcfcf'))
             c.setLineWidth(0.22)
             c.rect(rx, ry, rw, rh, stroke=1, fill=1)
-
-    # Verdeckte Bauteile zuerst, sichtbare zuletzt.
-    if not rows.empty:
-        rows['_pdf_sort'] = rows.apply(lambda r: _pdf_visible_sort_value(r, view, eff_length, width, front_at_x_max, left_at_y_max), axis=1)
-        rows = rows.sort_values(['_pdf_sort', 'Z_mm', 'X_mm', 'Y_mm'], kind='stable')
-
-    for _, row in rows.iterrows():
-        px, py, pw, ph, _depth = _pdf_projection_values(row, view, eff_length, width, front_at_x_max, left_at_y_max)
-        rx = ox + px * scale
-        ry = oy + py * scale
-        rw = pw * scale
-        rh = ph * scale
-        if rw <= 0 or rh <= 0:
-            continue
-        row_typ = str(row.get('Typ', '') or '').strip()
+            return
         if row_typ == 'Kantholz':
             c.setFillColor(colors.HexColor('#b8b8b8'))
             c.setStrokeColor(colors.black)
@@ -5876,21 +5863,35 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
             c.setStrokeColor(colors.grey)
         elif row_typ == 'Unterbau':
             _pdf_draw_underbau_blocks(c, rx, ry, rw, rh, view, str(row.get('Ansicht_Label', row.get('Bauteile', 'Unterbau'))))
-            continue
+            return
         else:
             c.setFillColor(colors.lightgrey)
             c.setStrokeColor(colors.darkgrey)
         c.setLineWidth(0.38)
         c.rect(rx, ry, rw, rh, stroke=1, fill=1)
         label_lines = _pdf_label_lines(row, view, bundle_overview_only=bundle_overview_only)
-        if view == 'top':
-            # Draufsicht nur beschriften, wenn genug Platz vorhanden ist.
-            # Sonst laufen die Nummern ineinander und der Plan wird unbrauchbar.
-            if rw < 42 or rh < 18:
+        if view in ('top', 'top_rotated'):
+            if rw < 28 or rh < 18:
                 label_lines = []
             else:
                 label_lines = label_lines[:1]
         _pdf_draw_label_lines(c, rx, ry, rw, rh, label_lines, view)
+
+    if view in ('side', 'side_left', 'side_right') and ghost_rows is not None and not ghost_rows.empty:
+        ghost_rows['_pdf_sort'] = ghost_rows.apply(lambda r: _pdf_visible_sort_value(r, view, eff_length, width, front_at_x_max, left_at_y_max), axis=1)
+        ghost_rows = ghost_rows.sort_values(['_pdf_sort', 'Z_mm', 'X_mm', 'Y_mm'], kind='stable')
+        for _, row in ghost_rows.iterrows():
+            row_typ = str(row.get('Typ', '') or '').strip()
+            if row_typ in ['Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz', 'Unterbau']:
+                continue
+            draw_projected_row(row, ghost=True)
+
+    if not rows.empty:
+        rows['_pdf_sort'] = rows.apply(lambda r: _pdf_visible_sort_value(r, view, eff_length, width, front_at_x_max, left_at_y_max), axis=1)
+        rows = rows.sort_values(['_pdf_sort', 'Z_mm', 'X_mm', 'Y_mm'], kind='stable')
+
+    for _, row in rows.iterrows():
+        draw_projected_row(row, ghost=False)
 
 def _bsd_cell_text_for_matrix(value: Any) -> str:
     """Text für eine BSD-Matrixzelle.
@@ -6293,7 +6294,7 @@ def _pdf_draw_bsd_matrix_page(c, page_w: float, page_h: float, margin: float, pl
         c.drawString(right_x + 8, top_y - 34 - i * 10.5, line)
 
     c.setFont('Helvetica', 6.4)
-    c.drawString(left_x + 8, top_y - 110, 'Bezug: X = vorne/hinten, Y = links/rechts; X-mittig / Einzelbund / Restbund = vorne im BSD')
+    c.drawString(left_x + 8, top_y - 110, 'Bezug: vorne = Fahrtrichtung; links/rechts = Blick von hinten nach vorne')
     c.drawString(left_x + 8, top_y - 120, 'Darstellung: echte 6-Spalten-BSD-Matrix. Einlage trennt keinen Bundblock.')
 
     position_cols = ['Hinten links', 'Mitte links', 'Vorne links', 'Hinten rechts', 'Mitte rechts', 'Vorne rechts']
@@ -6511,15 +6512,15 @@ def create_loading_pdf(
         for i, line in enumerate(hints):
             c.drawString(hint_x, hint_y - 14 - i * 12, line)
 
-        # V103: Bezugsskizze und angepasste Ansichten.
+        # V104: klare Bereiche ohne Überlappung.
         _pdf_draw_bsd_reference_sketch(c, margin + 565, page_h - 176, 210, 88, front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max)
 
-        # Seitenansichten mit mehr Platz; Draufsicht ganz rechts, nicht unter Vorder-/Rückansicht.
-        _pdf_draw_view(c, placements_df, platform, margin, 450, 800, 155, 'side_left', 'Linke Seitenansicht', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
-        _pdf_draw_view(c, placements_df, platform, margin, 220, 800, 155, 'side_right', 'Rechte Seitenansicht', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
-        _pdf_draw_view(c, placements_df, platform, margin + 735, 470, 205, 92, 'back', 'Rückansicht (Blick von hinten)', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
-        _pdf_draw_view(c, placements_df, platform, margin + 735, 340, 205, 92, 'front', 'Vorderansicht (Blick von vorne)', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
-        _pdf_draw_view(c, placements_df, platform, margin + 965, 210, 130, 350, 'top_rotated', 'Draufsicht', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
+        # Seitenansichten links; Vorder-/Rückansicht separat; Draufsicht ganz rechts.
+        _pdf_draw_view(c, placements_df, platform, margin, 452, 710, 150, 'side_left', 'Linke Seitenansicht', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
+        _pdf_draw_view(c, placements_df, platform, margin, 214, 710, 150, 'side_right', 'Rechte Seitenansicht', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
+        _pdf_draw_view(c, placements_df, platform, margin + 770, 462, 200, 112, 'back', 'Rückansicht (Blick von hinten)', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
+        _pdf_draw_view(c, placements_df, platform, margin + 770, 310, 200, 112, 'front', 'Vorderansicht (Blick von vorne)', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
+        _pdf_draw_view(c, placements_df, platform, margin + 1005, 212, 150, 372, 'top_rotated', 'Draufsicht', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
 
         # Qualitätssicherung kompakt oben rechts, getrennt vom Infofeld.
         c.setStrokeColor(colors.black)
@@ -6531,8 +6532,8 @@ def create_loading_pdf(
 
         c.showPage()
 
-        # Zweite Seite: Ladeplan BSD Matrix je Pritsche, ähnlich Excel-Beispiel PB 6.
-        matrix = create_bsd_matrix_for_platform(placements_df, platform, front_at_x_max=front_at_x_max, left_at_y_max=left_at_y_max, bundle_overview_only=bundle_overview_only)
+        # Zweite Seite: Ladeplan BSD Matrix je Pritsche, exakt gleicher Bezug wie PDF-Ansichten.
+        matrix = create_bsd_matrix_for_platform(placements_df, platform, front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only)
         if not matrix.empty:
             header = create_bsd_header_for_platform(platform, summary_df, warnings_df, project_meta, placements_df)
             _pdf_draw_bsd_matrix_page(c, page_w, page_h, margin, platform, matrix, header, project_meta.get('Objekt_Name', project_name) or project_name, logo_bytes=logo_bytes)
