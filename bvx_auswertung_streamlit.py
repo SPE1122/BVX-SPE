@@ -3605,17 +3605,16 @@ def create_loading_excel(
             ws.cell(13, 1).font = font_head
             ws.cell(13, 1).alignment = Alignment(horizontal='center')
 
-            headers = [
-                'Hinten links', 'Mitte links', 'Vorne links', 'Hinten rechts', 'Mitte rechts', 'Vorne rechts'
-            ]
+            headers = _bsd_position_cols()
+            matrix_col_count = len(headers)
             for idx, h in enumerate(headers, start=1):
                 c = ws.cell(start_row, idx)
                 c.value = h
-                c.font = font_small if idx <= 8 else font_head
+                c.font = font_small
                 c.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
                 c.border = border_thin
-                c.fill = fill_yellow if idx in [1, 2, 3, 4, 9] else fill_white
-            ws.row_dimensions[start_row].height = 28
+                c.fill = fill_yellow if 'mittig' in h.lower() or 'ganze' in h.lower() else fill_white
+            ws.row_dimensions[start_row].height = 34
 
             # Etwas leere Rasterfläche oberhalb der tatsächlichen Lagen wie in Vorlage.
             # Nur Excel-BSD: Einlage 40 wird in die vorherige Bundzelle derselben Spalte geschrieben.
@@ -3623,7 +3622,7 @@ def create_loading_excel(
             _tmp_bsd_cols, _tmp_bsd_rows = _bsd_display_matrix_rows(matrix)
             max_rows = max(18, len(_tmp_bsd_rows) + 8)
             for r in range(data_row, data_row + max_rows):
-                for c in range(1, 7):
+                for c in range(1, matrix_col_count + 1):
                     ws.cell(r, c).border = border_dotted
                     ws.cell(r, c).font = font_small
                     ws.cell(r, c).alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
@@ -4842,6 +4841,20 @@ def _fmt_bsd_mm_label(prefix: str, value: float) -> str:
     return f'{prefix} {text}'.strip()
 
 
+
+def _bsd_position_cols() -> List[str]:
+    """BSD-Spalten: Länge = hinten/mitte/vorne, Breite = links/mittig-ganze Breite/rechts.
+
+    Die zusätzliche Mitte-/Ganze-Breite-Spalte verhindert, dass mittige oder
+    fast pritschenbreite Elemente doppelt als links und rechts erscheinen.
+    """
+    return [
+        'Hinten links', 'Hinten mittig/ganze Breite', 'Hinten rechts',
+        'Mitte links', 'Mitte mittig/ganze Breite', 'Mitte rechts',
+        'Vorne links', 'Vorne mittig/ganze Breite', 'Vorne rechts',
+    ]
+
+
 def create_bsd_matrix_for_platform(
     placements_df: pd.DataFrame,
     platform: pd.Series,
@@ -4861,12 +4874,11 @@ def create_bsd_matrix_for_platform(
     - Rechte Zeilen-Kennzahlen werden nicht mehr als Lagewerte verwendet, weil eine Zeile
       nicht mehr dieselbe Höhe über alle Spalten bedeutet.
     """
-    position_cols = ['Hinten links', 'Mitte links', 'Vorne links', 'Hinten rechts', 'Mitte rechts', 'Vorne rechts']
+    position_cols = _bsd_position_cols()
     columns = [
         'Pritsche', 'Fuhre_Nr', 'Lage', 'Z_mm',
         *position_cols,
-        'Bemerkung hinten links', 'Bemerkung mitte links', 'Bemerkung vorne links',
-        'Bemerkung hinten rechts', 'Bemerkung mitte rechts', 'Bemerkung vorne rechts',
+        *[f'Bemerkung {col.lower()}' for col in position_cols],
         'Höhe_mm', 'Breite_mm', 'Gesamtlänge_mm', 'Gewicht_kg', 'Anzahl_Einheiten', 'Zeilentyp'
     ]
     if placements_df is None or placements_df.empty:
@@ -4919,11 +4931,18 @@ def create_bsd_matrix_for_platform(
         y1 = y0 + width
         y_mid = _row_y_mid(row)
         y_center = platform_width / 2.0 if platform_width else 0.0
-        spans_full_width = platform_width > 0 and width >= platform_width * 0.75 and y0 < y_center < y1
-        if spans_full_width:
-            return ['links', 'rechts']
         if y_mid is None:
             return ['links']
+
+        # V106 BSD-Darstellung:
+        # Mittige oder fast pritschenbreite Elemente nicht mehr doppelt links/rechts führen.
+        # Stattdessen eine mittig/ganze-Breite-Spalte verwenden.
+        spans_center = y0 < y_center < y1
+        nearly_full_width = platform_width > 0 and width >= platform_width * 0.70 and spans_center
+        centered_partial = platform_width > 0 and spans_center and width >= platform_width * 0.45 and abs(y_mid - y_center) <= max(60.0, platform_width * 0.04)
+        if nearly_full_width or centered_partial:
+            return ['mittig/ganze Breite']
+
         if left_at_y_max:
             return ['links'] if y_mid >= y_center else ['rechts']
         return ['links'] if y_mid <= y_center else ['rechts']
@@ -5358,14 +5377,20 @@ def _pdf_truncate_to_width(c, text: str, max_width: float, font_name: str, font_
 def _pdf_draw_label_lines(c, rx: float, ry: float, rw: float, rh: float, lines: List[str], view: str) -> None:
     """Zeichnet Beschriftungen ohne Überlappung innerhalb eines Rechtecks."""
     lines = [str(line).strip() for line in lines if str(line).strip()]
-    if not lines or rw < 12 or rh < 7:
+    if not lines:
+        return
+    # V106: in Stirn-/Seitenansichten Beschriftung früher zulassen, damit die Elemente nicht unbeschriftet wirken.
+    if view in ('front', 'back', 'side', 'side_left', 'side_right'):
+        if rw < 7 or rh < 4:
+            return
+    elif rw < 12 or rh < 7:
         return
 
     from reportlab.lib import colors
     font_name = 'Helvetica'
     n = len(lines)
     if n == 1:
-        font_size = max(3.8, min(5.2, rw / max(8, len(lines[0]) * 2.0), rh * 0.42))
+        font_size = max(3.1, min(5.4, rw / max(8, len(lines[0]) * 1.85), rh * 0.48))
         c.setFont(font_name, font_size)
         c.setFillColor(colors.black)
         txt = _pdf_truncate_to_width(c, lines[0], max(4, rw - 4), font_name, font_size)
@@ -5374,7 +5399,7 @@ def _pdf_draw_label_lines(c, rx: float, ry: float, rw: float, rh: float, lines: 
         return
 
     # Mehrere Nummern im Bund: vertikal von unten nach oben, Reihenfolge = Verladereihenfolge.
-    font_size = min(5.0, max(2.7, (rh - 3) / max(1, n) * 0.72))
+    font_size = min(5.2, max(2.4, (rh - 3) / max(1, n) * 0.82))
     line_step = max(font_size * 1.05, (rh - 4) / max(1, n))
     total_h = line_step * (n - 1)
     start_y = ry + rh / 2 - total_h / 2
@@ -5563,20 +5588,9 @@ def _pdf_draw_view_orientation_helpers(c, ox: float, oy: float, draw_w: float, d
         c.drawCentredString(ox + draw_w / 2.0, oy - 8.5, bottom_lbl)
         c.drawString(ox, oy + draw_h + 2.5, left_side)
         c.drawRightString(ox + draw_w, oy + draw_h + 2.5, right_side)
-    if view == 'back':
-        # Blick von hinten nach vorne: links/rechts wie am Fahrzeug in Fahrtrichtung.
-        left_lbl = 'Links' if left_at_y_max else 'Rechts'
-        right_lbl = 'Rechts' if left_at_y_max else 'Links'
-        c.drawString(ox, oy + draw_h + 2.5, left_lbl)
-        c.drawRightString(ox + draw_w, oy + draw_h + 2.5, right_lbl)
-        c.drawCentredString(ox + draw_w / 2.0, oy + draw_h + 2.5, 'Mitte Y')
-    if view == 'front':
-        # Blick von vorne nach hinten: links/rechts erscheint gespiegelt.
-        left_lbl = 'Rechts' if left_at_y_max else 'Links'
-        right_lbl = 'Links' if left_at_y_max else 'Rechts'
-        c.drawString(ox, oy + draw_h + 2.5, left_lbl)
-        c.drawRightString(ox + draw_w, oy + draw_h + 2.5, right_lbl)
-        c.drawCentredString(ox + draw_w / 2.0, oy + draw_h + 2.5, 'Mitte Y')
+    if view in ('front', 'back'):
+        # Stirnansichten zeigen Geometrie/Querschnitt; Links/Rechts-Bezug bleibt in Legende, Draufsicht und BSD.
+        c.drawCentredString(ox + draw_w / 2.0, oy + draw_h + 2.5, 'Mittelachse')
     c.restoreState()
 
 
@@ -5922,7 +5936,7 @@ def _bsd_text_matrix_rows(matrix_df: pd.DataFrame) -> Tuple[List[str], List[List
     Einlage-Zeilen werden nur behalten, wenn sie NICHT zwischen zwei Teilen
     desselben Bundes liegen.
     """
-    position_cols = ['Hinten links', 'Mitte links', 'Vorne links', 'Hinten rechts', 'Mitte rechts', 'Vorne rechts']
+    position_cols = _bsd_position_cols()
     raw_rows: List[List[str]] = []
     if matrix_df is None or matrix_df.empty:
         return position_cols, raw_rows
@@ -6235,7 +6249,7 @@ def format_bsd_simple_text_matrix(matrix_df: pd.DataFrame) -> str:
 
     lines.append('')
     lines.append('Hinweis: Einlage 40 / Lagenholz gemäss Einstellung zwischen den Bunden einlegen.')
-    lines.append('BSD ist eine einfache 6-Spalten-Matrix. Die echte Geometrie/Höhe steht im Lageplan.')
+    lines.append('BSD ist eine Darstellungs-Matrix. Mittige / breite Elemente werden zusammengefasst.')
     return '\n'.join(lines)
 
 
@@ -6256,7 +6270,7 @@ def _pdf_draw_bsd_matrix_page(c, page_w: float, page_h: float, margin: float, pl
     c.drawString(margin, page_h - 36, f'Ladeplan BSD - {pname}')
     c.setFont('Helvetica', 9)
     c.drawString(margin, page_h - 54, f'Objekt / Datei: {header.get("Objekt_Name", project_name) or project_name}')
-    c.drawString(margin, page_h - 70, f'Erstellt: {_now_europe_zurich().strftime("%d.%m.%Y %H:%M")}')
+    c.drawString(margin, page_h - 70, f'Erstellt: {_now_europe_zurich().strftime("%d.%m.%Y")}')
 
     # Kopfbereich links/rechts.
     left_x = margin
@@ -6274,6 +6288,7 @@ def _pdf_draw_bsd_matrix_page(c, page_w: float, page_h: float, margin: float, pl
         f'Fuhre: {header.get("Fuhre_Nr", "")}',
         f'Fuhrenoption: {header.get("Fuhrenoption", "")}',
         f'Pritschenname: {header.get("Pritschenname", "")}',
+        f'Sachbearbeiter: {header.get("Sachbearbeiter", "")}',
         f'Datum: {_now_europe_zurich().strftime("%d.%m.%Y")}',
     ]
     right_lines = [
@@ -6295,9 +6310,9 @@ def _pdf_draw_bsd_matrix_page(c, page_w: float, page_h: float, margin: float, pl
 
     c.setFont('Helvetica', 6.4)
     c.drawString(left_x + 8, top_y - 110, 'Bezug: vorne = Fahrtrichtung; links/rechts = Blick von hinten nach vorne')
-    c.drawString(left_x + 8, top_y - 120, 'Darstellung: echte 6-Spalten-BSD-Matrix. Einlage trennt keinen Bundblock.')
+    c.drawString(left_x + 8, top_y - 120, 'Darstellung: BSD-Matrix. Mittige / breite Elemente werden zusammengefasst.')
 
-    position_cols = ['Hinten links', 'Mitte links', 'Vorne links', 'Hinten rechts', 'Mitte rechts', 'Vorne rechts']
+    position_cols = _bsd_position_cols()
     rows = matrix_df.copy() if matrix_df is not None and not matrix_df.empty else pd.DataFrame()
     if rows.empty:
         c.setFont('Helvetica', 8)
@@ -6359,7 +6374,7 @@ def _pdf_draw_bsd_matrix_page(c, page_w: float, page_h: float, margin: float, pl
     c.setFillColor(colors.black)
     c.setFont('Helvetica', 6.4)
     c.drawString(margin, 24, 'Hinweis: Einlage 40 / Lagenholz gemäss Einstellung zwischen den Bunden einlegen.')
-    c.drawString(margin, 14, 'BSD ist eine einfache 6-Spalten-Matrix. Die echte Geometrie, Auflage und Höhe ist im Lageplan massgebend.')
+    c.drawString(margin, 14, 'BSD ist eine Darstellungs-Matrix. Mittige / breite Elemente werden nicht doppelt links/rechts geführt.')
 
 def _pdf_draw_logo(c, logo_bytes: Optional[bytes], x: float, y: float, max_w: float = 90, max_h: float = 55) -> None:
     """Zeichnet optional ein Logo in die PDF-Seite."""
@@ -6477,7 +6492,10 @@ def create_loading_pdf(
         c.drawString(margin, page_h - 36, f'Pritschenplan - {pname}')
         c.setFont('Helvetica', 9)
         c.drawString(margin, page_h - 54, f'Objekt / Datei: {project_meta.get("Objekt_Name", project_name) or project_name}')
-        c.drawString(margin, page_h - 70, f'Erstellt: {_now_europe_zurich().strftime("%d.%m.%Y %H:%M")}')
+        c.drawString(margin, page_h - 70, f'Erstellt: {_now_europe_zurich().strftime("%d.%m.%Y")}')
+        sachbearbeiter = str(project_meta.get('Sachbearbeiter', '') or '').strip()
+        if sachbearbeiter:
+            c.drawString(margin, page_h - 86, f'Sachbearbeiter: {sachbearbeiter}')
 
         info_x = page_w - 245
         info_y = page_h - 40
@@ -6512,18 +6530,16 @@ def create_loading_pdf(
         for i, line in enumerate(hints):
             c.drawString(hint_x, hint_y - 14 - i * 12, line)
 
-        # V104: klare Bereiche ohne Überlappung.
-        _pdf_draw_bsd_reference_sketch(c, margin + 565, page_h - 176, 210, 88, front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max)
+        # V106: finale Ausgabe-/Darstellungs-Korrektur ohne Verladelogik.
+        _pdf_draw_bsd_reference_sketch(c, margin + 545, page_h - 176, 230, 88, front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max)
 
-        # Seitenansichten links; Vorder-/Rückansicht separat; Draufsicht ganz rechts.
-        # V105: reine Layout-Feinjustierung der PDF-Ansichten.
-        # Ziele: Draufsicht weiter nach rechts, rechte Seitenansicht und Vorderansicht tiefer,
-        # sowie alle Ansichten etwas grösser darstellen.
-        _pdf_draw_view(c, placements_df, platform, margin, 454, 735, 160, 'side_left', 'Linke Seitenansicht', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
-        _pdf_draw_view(c, placements_df, platform, margin, 182, 735, 160, 'side_right', 'Rechte Seitenansicht', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
-        _pdf_draw_view(c, placements_df, platform, margin + 765, 476, 215, 118, 'back', 'Rückansicht (Blick von hinten)', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
-        _pdf_draw_view(c, placements_df, platform, margin + 765, 286, 215, 118, 'front', 'Vorderansicht (Blick von vorne)', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
-        _pdf_draw_view(c, placements_df, platform, margin + 1040, 198, 135, 396, 'top_rotated', 'Draufsicht', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
+        # Grössere Ansichten und klare Trennung: Seitenansichten links,
+        # Stirnansichten mittig, Draufsicht als eigene rechte Spalte.
+        _pdf_draw_view(c, placements_df, platform, margin, 452, 745, 170, 'side_left', 'Linke Seitenansicht', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
+        _pdf_draw_view(c, placements_df, platform, margin, 165, 745, 170, 'side_right', 'Rechte Seitenansicht', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
+        _pdf_draw_view(c, placements_df, platform, margin + 770, 462, 238, 135, 'back', 'Stirnansicht hinten', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
+        _pdf_draw_view(c, placements_df, platform, margin + 770, 250, 238, 135, 'front', 'Stirnansicht vorne', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
+        _pdf_draw_view(c, placements_df, platform, margin + 1025, 165, 140, 435, 'top_rotated', 'Draufsicht', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
 
         # Qualitätssicherung kompakt oben rechts, getrennt vom Infofeld.
         c.setStrokeColor(colors.black)
@@ -8740,10 +8756,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
 
             selected_matrix = bsd_matrix_df[bsd_matrix_df['Pritsche'].astype(str) == selected_bsd_platform].copy()
             st.code(format_bsd_simple_text_matrix(selected_matrix), language='text')
-            display_cols = [
-                'Lage', 'Hinten links', 'Mitte links', 'Vorne links',
-                'Hinten rechts', 'Mitte rechts', 'Vorne rechts'
-            ]
+            display_cols = ['Lage'] + [col for col in _bsd_position_cols() if col in selected_matrix.columns]
             with st.expander('Technische BSD-Matrix anzeigen', expanded=False):
                 st.dataframe(selected_matrix[display_cols], use_container_width=True, hide_index=True)
 
