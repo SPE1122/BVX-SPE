@@ -4843,15 +4843,17 @@ def _fmt_bsd_mm_label(prefix: str, value: float) -> str:
 
 
 def _bsd_position_cols() -> List[str]:
-    """BSD-Spalten: Länge = hinten/mitte/vorne, Breite = links/mittig-ganze Breite/rechts.
+    """BSD-Spalten: Länge = hinten/mitte/vorne, Breite = links/rechts.
 
-    Die zusätzliche Mitte-/Ganze-Breite-Spalte verhindert, dass mittige oder
-    fast pritschenbreite Elemente doppelt als links und rechts erscheinen.
+    V107:
+    - zurück zur kompakten 6-Spalten-BSD
+    - mittige / breite Elemente werden NICHT doppelt links und rechts geführt
+    - sie erscheinen einmalig in der linken Spalte der passenden Zone
+    - optional mit ↔ markiert
     """
     return [
-        'Hinten links', 'Hinten mittig/ganze Breite', 'Hinten rechts',
-        'Mitte links', 'Mitte mittig/ganze Breite', 'Mitte rechts',
-        'Vorne links', 'Vorne mittig/ganze Breite', 'Vorne rechts',
+        'Hinten links', 'Mitte links', 'Vorne links',
+        'Hinten rechts', 'Mitte rechts', 'Vorne rechts',
     ]
 
 
@@ -4925,23 +4927,34 @@ def create_bsd_matrix_for_platform(
             return 'Vorne' if x_mid >= eff_length / 2.0 else 'Hinten'
         return 'Vorne' if x_mid <= eff_length / 2.0 else 'Hinten'
 
-    def _side_names(row: pd.Series) -> List[str]:
+    def _row_is_centered_or_wide(row: pd.Series) -> bool:
+        """Erkennt mittige / breite Elemente für einmalige BSD-Ausgabe.
+
+        Diese Elemente würden in der 6-Spalten-BSD doppelt wirken, wenn man
+        sie gleichzeitig links und rechts zeigt. Deshalb werden sie nur einmal
+        in der linken Spalte der passenden Zone geführt und optional mit ↔ markiert.
+        """
         width = safe_number(row.get('Breite_mm'))
         y0 = safe_number(row.get('Y_mm'))
         y1 = y0 + width
         y_mid = _row_y_mid(row)
         y_center = platform_width / 2.0 if platform_width else 0.0
+        if y_mid is None or platform_width <= 0:
+            return False
+        spans_center = y0 < y_center < y1
+        nearly_full_width = width >= platform_width * 0.70 and spans_center
+        centered_partial = spans_center and width >= platform_width * 0.45 and abs(y_mid - y_center) <= max(60.0, platform_width * 0.04)
+        return bool(nearly_full_width or centered_partial)
+
+    def _side_names(row: pd.Series) -> List[str]:
+        y_mid = _row_y_mid(row)
+        y_center = platform_width / 2.0 if platform_width else 0.0
         if y_mid is None:
             return ['links']
 
-        # V106 BSD-Darstellung:
-        # Mittige oder fast pritschenbreite Elemente nicht mehr doppelt links/rechts führen.
-        # Stattdessen eine mittig/ganze-Breite-Spalte verwenden.
-        spans_center = y0 < y_center < y1
-        nearly_full_width = platform_width > 0 and width >= platform_width * 0.70 and spans_center
-        centered_partial = platform_width > 0 and spans_center and width >= platform_width * 0.45 and abs(y_mid - y_center) <= max(60.0, platform_width * 0.04)
-        if nearly_full_width or centered_partial:
-            return ['mittig/ganze Breite']
+        # V107: Mittige/breite Elemente nur einmal links ausgeben, nicht doppelt.
+        if _row_is_centered_or_wide(row):
+            return ['links']
 
         if left_at_y_max:
             return ['links'] if y_mid >= y_center else ['rechts']
@@ -5113,14 +5126,20 @@ def create_bsd_matrix_for_platform(
         if not labels:
             labels = [_format_bsd_cell(row)]
 
+        centered_single_display = _row_is_centered_or_wide(row)
+
         if typ == 'Unterbau':
             label = labels[0] if labels else _format_bsd_cell(row)
+            if centered_single_display and '↔' not in str(label):
+                label = f"{label} ↔"
             for slot in slots_for_row:
                 add_entry(row['Z_mm'], slot, label, 'Unterbau', row['Höhe_mm'], row['Länge_mm'], row['Breite_mm'], 0.0, 'Ausgleich / Aufdopplung')
             continue
 
         if typ != 'Bund' or count <= 1:
             label = labels[0] if labels else _format_bsd_cell(row)
+            if centered_single_display and '↔' not in str(label):
+                label = f"{label} ↔"
             for slot in slots_for_row:
                 add_entry(row['Z_mm'], slot, label, 'Bauteil', row['Höhe_mm'], row['Länge_mm'], row['Breite_mm'], row['Gewicht_kg'], '')
             continue
@@ -5129,6 +5148,8 @@ def create_bsd_matrix_for_platform(
             # Option v85: bei kleinen Stabbauteilen nur den Bund im BSD/Verladeplan zeigen.
             # Die einzelnen Bauteile stehen im Bund-Begleitzettel. Geometrie/Verladung bleibt unverändert.
             label = _bundle_display_tag(row)
+            if centered_single_display and '↔' not in str(label):
+                label = f"{label} ↔"
             for slot in slots_for_row:
                 add_entry(row['Z_mm'], slot, label, 'Bund', row['Höhe_mm'], row['Länge_mm'], row['Breite_mm'], row['Gewicht_kg'], '')
             continue
@@ -5156,6 +5177,8 @@ def create_bsd_matrix_for_platform(
             pl = safe_number(part_lengths_bottom_to_top[i] if i < len(part_lengths_bottom_to_top) else row['Länge_mm'])
             pw = safe_number(part_widths_bottom_to_top[i] if i < len(part_widths_bottom_to_top) else row['Breite_mm'])
             visible_label = f"{bund_tag}:{label}" if bund_tag else str(label)
+            if centered_single_display and '↔' not in visible_label:
+                visible_label = f"{visible_label} ↔"
             for slot in slots_for_row:
                 add_entry(z_cursor, slot, visible_label, 'Bund-Bauteil', ph, pl, pw, part_weight, bund_tag)
             z_cursor += ph
@@ -5228,7 +5251,7 @@ def create_bsd_matrix_for_platform(
             'Gesamtlänge_mm': '',
             'Gewicht_kg': '',
             'Anzahl_Einheiten': '',
-            'Zeilentyp': 'BSD-6-Stapelkaesten-Z-Abgleich',
+            'Zeilentyp': 'BSD-6-Spalten-Z-Abgleich',
         }
         for col in position_cols:
             out[col] = ''
@@ -6533,12 +6556,12 @@ def create_loading_pdf(
         # V106: finale Ausgabe-/Darstellungs-Korrektur ohne Verladelogik.
         _pdf_draw_bsd_reference_sketch(c, margin + 545, page_h - 176, 230, 88, front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max)
 
-        # Grössere Ansichten und klare Trennung: Seitenansichten links,
-        # Stirnansichten mittig, Draufsicht als eigene rechte Spalte.
+        # V107: Stirnansichten grösser und in derselben Flucht wie die Seitenansichten.
+        # Draufsicht bleibt in der rechten Spalte.
         _pdf_draw_view(c, placements_df, platform, margin, 452, 745, 170, 'side_left', 'Linke Seitenansicht', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
         _pdf_draw_view(c, placements_df, platform, margin, 165, 745, 170, 'side_right', 'Rechte Seitenansicht', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
-        _pdf_draw_view(c, placements_df, platform, margin + 770, 462, 238, 135, 'back', 'Stirnansicht hinten', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
-        _pdf_draw_view(c, placements_df, platform, margin + 770, 250, 238, 135, 'front', 'Stirnansicht vorne', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
+        _pdf_draw_view(c, placements_df, platform, margin + 780, 452, 220, 170, 'back', 'Stirnansicht hinten', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
+        _pdf_draw_view(c, placements_df, platform, margin + 780, 165, 220, 170, 'front', 'Stirnansicht vorne', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
         _pdf_draw_view(c, placements_df, platform, margin + 1025, 165, 140, 435, 'top_rotated', 'Draufsicht', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
 
         # Qualitätssicherung kompakt oben rechts, getrennt vom Infofeld.
@@ -8755,6 +8778,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                 c5.metric('Warnungen', int(safe_number(hrow.get('Warnungen'))))
 
             selected_matrix = bsd_matrix_df[bsd_matrix_df['Pritsche'].astype(str) == selected_bsd_platform].copy()
+            st.caption('Hinweis: ↔ = mittiges / breites Element, nur einmal dargestellt.')
             st.code(format_bsd_simple_text_matrix(selected_matrix), language='text')
             display_cols = ['Lage'] + [col for col in _bsd_position_cols() if col in selected_matrix.columns]
             with st.expander('Technische BSD-Matrix anzeigen', expanded=False):
