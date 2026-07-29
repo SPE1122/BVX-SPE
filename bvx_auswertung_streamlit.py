@@ -5751,7 +5751,8 @@ def _pdf_draw_hatched_overlay(c, rx: float, ry: float, rw: float, rh: float, spa
     c.saveState()
     c.setStrokeColor(colors.HexColor('#8f8f8f'))
     c.setLineWidth(0.3)
-    # diagonale Linien / Richtung     start = -rh
+    # diagonale Linien fuer die Schraffur.
+    start = -rh
     while start < rw:
         x0 = rx + max(start, 0)
         y0 = ry + max(-start, 0)
