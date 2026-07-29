@@ -5611,8 +5611,19 @@ def _pdf_draw_view_orientation_helpers(c, ox: float, oy: float, draw_w: float, d
         c.drawCentredString(ox + draw_w / 2.0, oy - 8.5, bottom_lbl)
         c.drawString(ox, oy + draw_h + 2.5, left_side)
         c.drawRightString(ox + draw_w, oy + draw_h + 2.5, right_side)
-    if view in ('front', 'back'):
-        # Stirnansichten zeigen Geometrie/Querschnitt; Links/Rechts-Bezug bleibt in Legende, Draufsicht und BSD.
+    if view == 'back':
+        # Blick von hinten nach vorne: links/rechts wie am Fahrzeug in Fahrtrichtung.
+        left_lbl = 'Links' if left_at_y_max else 'Rechts'
+        right_lbl = 'Rechts' if left_at_y_max else 'Links'
+        c.drawString(ox, oy + draw_h + 2.5, left_lbl)
+        c.drawRightString(ox + draw_w, oy + draw_h + 2.5, right_lbl)
+        c.drawCentredString(ox + draw_w / 2.0, oy + draw_h + 2.5, 'Mittelachse')
+    if view == 'front':
+        # Blick von vorne nach hinten: links/rechts erscheint gespiegelt.
+        left_lbl = 'Rechts' if left_at_y_max else 'Links'
+        right_lbl = 'Links' if left_at_y_max else 'Rechts'
+        c.drawString(ox, oy + draw_h + 2.5, left_lbl)
+        c.drawRightString(ox + draw_w, oy + draw_h + 2.5, right_lbl)
         c.drawCentredString(ox + draw_w / 2.0, oy + draw_h + 2.5, 'Mittelachse')
     c.restoreState()
 
@@ -5709,6 +5720,48 @@ def _pdf_real_load_rows_for_dimensions(rows: pd.DataFrame) -> pd.DataFrame:
     return rows[~typ_series.isin(skip)].copy()
 
 
+def _pdf_front_back_end_groups(rows: pd.DataFrame, load_x0: float, load_x1: float, front_at_x_max: bool = False) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Trennt für Stirnansichten sichtbares Endbild und gegenüberliegende Schraffur.
+
+    - back: hintere Elemente normal, vordere Elemente schraffiert
+    - front: vordere Elemente normal, hintere Elemente schraffiert
+    Die echte Verladung bleibt unberührt; es geht nur um die Darstellung.
+    """
+    if rows is None or rows.empty:
+        return rows, pd.DataFrame(columns=rows.columns if rows is not None else [])
+    if load_x1 <= load_x0:
+        return rows.copy(), pd.DataFrame(columns=rows.columns)
+    split_x = (load_x0 + load_x1) / 2.0
+    visible_mask = []
+    for _, row in rows.iterrows():
+        x0 = safe_number(row.get('X_mm'))
+        lx = safe_number(row.get('Länge_mm'))
+        x_mid = x0 + lx / 2.0
+        is_front_half = x_mid >= split_x if front_at_x_max else x_mid <= split_x
+        visible_mask.append(is_front_half)
+    visible_mask = pd.Series(visible_mask, index=rows.index)
+    visible = rows.loc[visible_mask].copy()
+    ghost = rows.loc[~visible_mask].copy()
+    return visible, ghost
+
+
+def _pdf_draw_hatched_overlay(c, rx: float, ry: float, rw: float, rh: float, spacing: float = 6.0) -> None:
+    """Einfache Schraffur für überlagerte Gegenansichts-Elemente."""
+    from reportlab.lib import colors
+    c.saveState()
+    c.setStrokeColor(colors.HexColor('#8f8f8f'))
+    c.setLineWidth(0.3)
+    # diagonale Linien / Richtung     start = -rh
+    while start < rw:
+        x0 = rx + max(start, 0)
+        y0 = ry + max(-start, 0)
+        x1 = rx + min(start + rh, rw)
+        y1 = ry + min(rh, rw - start)
+        c.line(x0, y0, x1, y1)
+        start += spacing
+    c.restoreState()
+
+
 def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y: float, w: float, h: float, view: str, title: str, front_at_x_max: bool = False, left_at_y_max: bool = False, bundle_overview_only: bool = False, show_dimensions: bool = True) -> None:
     """Zeichnet eine PDF-Ansicht mit Pritschen- und Ladungsabmessungen.
 
@@ -5767,6 +5820,13 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
         rows_all_for_side = rows.copy()
         rows_visible = _pdf_filter_rows_for_side_view(rows_all_for_side, platform, view, left_at_y_max=left_at_y_max)
         ghost_rows = rows_all_for_side.loc[~rows_all_for_side.index.isin(rows_visible.index)].copy()
+        rows = rows_visible.copy()
+    elif view in ('front', 'back') and not rows.empty:
+        rows_all_fb = rows.copy()
+        if view == 'back':
+            rows_visible, ghost_rows = _pdf_front_back_end_groups(rows_all_fb, load_x0, load_x1, front_at_x_max=False)
+        else:
+            rows_visible, ghost_rows = _pdf_front_back_end_groups(rows_all_fb, load_x0, load_x1, front_at_x_max=True)
         rows = rows_visible.copy()
 
     rows = _pdf_add_visible_spacer_rows(rows, platform, view)
@@ -5887,10 +5947,19 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
             return
         row_typ = str(row.get('Typ', '') or '').strip()
         if ghost:
-            c.setFillColor(colors.HexColor('#eeeeee'))
-            c.setStrokeColor(colors.HexColor('#cfcfcf'))
+            c.setFillColor(colors.HexColor('#f2f2f2'))
+            c.setStrokeColor(colors.HexColor('#b9b9b9'))
             c.setLineWidth(0.22)
             c.rect(rx, ry, rw, rh, stroke=1, fill=1)
+            if view in ('front', 'back'):
+                _pdf_draw_hatched_overlay(c, rx, ry, rw, rh, spacing=6.0)
+                label_lines = _pdf_label_lines(row, view, bundle_overview_only=bundle_overview_only)
+                label_lines = label_lines[:1] if label_lines else []
+                if label_lines:
+                    c.saveState()
+                    c.setFillColor(colors.HexColor('#6f6f6f'))
+                    _pdf_draw_label_lines(c, rx, ry, rw, rh, label_lines, view)
+                    c.restoreState()
             return
         if row_typ == 'Kantholz':
             c.setFillColor(colors.HexColor('#b8b8b8'))
@@ -5914,7 +5983,7 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
                 label_lines = label_lines[:1]
         _pdf_draw_label_lines(c, rx, ry, rw, rh, label_lines, view)
 
-    if view in ('side', 'side_left', 'side_right') and ghost_rows is not None and not ghost_rows.empty:
+    if view in ('side', 'side_left', 'side_right', 'front', 'back') and ghost_rows is not None and not ghost_rows.empty:
         ghost_rows['_pdf_sort'] = ghost_rows.apply(lambda r: _pdf_visible_sort_value(r, view, eff_length, width, front_at_x_max, left_at_y_max), axis=1)
         ghost_rows = ghost_rows.sort_values(['_pdf_sort', 'Z_mm', 'X_mm', 'Y_mm'], kind='stable')
         for _, row in ghost_rows.iterrows():
