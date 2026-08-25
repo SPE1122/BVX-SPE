@@ -5943,16 +5943,25 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
         data_h = max(used_hei, 1.0)
 
     scale = min(w / max(data_w, 1.0), h / max(data_h, 1.0))
-    draw_w = data_w * scale
-    draw_h = data_h * scale
+    # V113: Seitenansichten dürfen in der Höhe optisch stärker dargestellt werden.
+    # Länge bleibt massstäblich zur Pritsche; nur die vertikale PDF-Darstellung wird
+    # moderat gedehnt, damit die Lagen besser lesbar sind. Daten/Berechnung bleiben unverändert.
+    if view in ('side', 'side_left', 'side_right'):
+        scale_x = w / max(data_w, 1.0)
+        scale_y = min(h / max(data_h, 1.0), scale_x * 2.0)
+    else:
+        scale_x = scale
+        scale_y = scale
+    draw_w = data_w * scale_x
+    draw_h = data_h * scale_y
     ox = x
     oy = y
 
     def tx(px: float) -> float:
-        return ox + (px - view_x_offset) * scale
+        return ox + (px - view_x_offset) * scale_x
 
     def ty(py: float) -> float:
-        return oy + (py - view_y_offset) * scale
+        return oy + (py - view_y_offset) * scale_y
 
     c.setStrokeColor(colors.black)
     c.setFillColor(colors.white)
@@ -6003,15 +6012,15 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
         if over_front_actual > 0:
             fx0, fx1 = _pdf_project_x_range_for_side(platform_x1, load_x1, eff_length, view, left_at_y_max=left_at_y_max)
             _pdf_dim_line_h(c, tx(fx0), tx(fx1), dim_y, f'Überhang vorne {over_front_actual:.0f} mm')
-        _pdf_dim_line_v(c, ox + draw_w + 10, oy, oy + min(used_hei, data_h) * scale, f'Ladehöhe {used_hei:.0f} mm')
+        _pdf_dim_line_v(c, ox + draw_w + 10, oy, oy + min(used_hei, data_h) * scale_y, f'Ladehöhe {used_hei:.0f} mm')
 
     if show_dimensions and used_wid > 0 and view == 'top':
         _pdf_dim_line_v(c, ox + draw_w + 10, oy, oy + width * scale, f'Pritschenbreite {width:.0f} mm')
         _pdf_dim_line_v(c, ox + draw_w + 27, oy + load_y0 * scale, oy + load_y1 * scale, f'Ladungsbreite {used_wid:.0f} mm')
     if show_dimensions and used_wid > 0 and view == 'top_rotated':
         _pdf_dim_line_h(c, ox, ox + draw_w, oy - 12, f'Pritschenbreite {width:.0f} mm')
-        left_px = ox + ((width - load_y1) if left_at_y_max else load_y0) * scale
-        right_px = ox + ((width - load_y0) if left_at_y_max else load_y1) * scale
+        left_px = ox + ((width - load_y1) if left_at_y_max else load_y0) * scale_x
+        right_px = ox + ((width - load_y0) if left_at_y_max else load_y1) * scale_x
         _pdf_dim_line_h(c, left_px, right_px, oy - 24, f'Ladungsbreite {used_wid:.0f} mm')
 
     def draw_projected_row(row: pd.Series, ghost: bool = False) -> None:
@@ -6022,8 +6031,8 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
             ry = oy + py * scale
         if view in ('side', 'side_left', 'side_right'):
             ry = oy + py * scale
-        rw = pw * scale
-        rh = ph * scale
+        rw = pw * scale_x
+        rh = ph * scale_y
         if rw <= 0 or rh <= 0:
             return
         row_typ = str(row.get('Typ', '') or '').strip()
@@ -6785,17 +6794,13 @@ def create_loading_pdf(
         # V106: finale Ausgabe-/Darstellungs-Korrektur ohne Verladelogik.
         _pdf_draw_bsd_reference_sketch(c, margin + 545, page_h - 176, 230, 88, front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max)
 
-        # V107: Stirnansichten grösser und in derselben Flucht wie die Seitenansichten.
-        # Draufsicht bleibt in der rechten Spalte.
-        _pdf_draw_view(c, placements_df, platform, margin, 452, 745, 170, 'side_left', 'Linke Seitenansicht', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
-        _pdf_draw_view(c, placements_df, platform, margin, 165, 745, 170, 'side_right', 'Rechte Seitenansicht', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
+        # V113: Seitenansichten höher/lesbarer, leere Lagentabellen-Box unter der
+        # Stirnansicht vorne entfernt. PDF-Layout geändert, Verladelogik unverändert.
+        _pdf_draw_view(c, placements_df, platform, margin, 430, 745, 205, 'side_left', 'Linke Seitenansicht', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
+        _pdf_draw_view(c, placements_df, platform, margin, 125, 745, 205, 'side_right', 'Rechte Seitenansicht', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
         _pdf_draw_view(c, placements_df, platform, margin + 780, 452, 220, 170, 'back', 'Stirnansicht hinten', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
         _pdf_draw_view(c, placements_df, platform, margin + 780, 165, 220, 170, 'front', 'Stirnansicht vorne', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
         _pdf_draw_view(c, placements_df, platform, margin + 1025, 165, 140, 435, 'top_rotated', 'Draufsicht', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
-
-        # V110: kompakte Lagentabelle als Zusatzlegende neben den Ansichten.
-        layer_rows = _pdf_layer_table_data_for_platform(placements_df, platform, bundle_overview_only=bundle_overview_only)
-        _pdf_draw_layer_table(c, margin + 780, 24, 220, 122, layer_rows, title='Lagentabelle (unten → oben)')
 
         # Qualitätssicherung kompakt oben rechts, getrennt vom Infofeld.
         c.setStrokeColor(colors.black)
@@ -8511,17 +8516,17 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
             help='0 = streng nach Sortierung. Höher = die App darf ganze Bunde innerhalb eines kleinen Suchfensters vorziehen, um breitere/stabilere Bunde eher unten zu laden.'
         )
         prevent_wide_on_narrow = scol2.checkbox(
-            'Obere Bauteile/Bunde auf schmaler Auflage verhindern',
-            value=True,
-            help='V112: Gilt auch ohne Bund. Obere Einzelteile und Bunde werden nur gesetzt, wenn darunter genügend Auflagefläche vorhanden ist.'
+            'Obere Bauteile/Bunde mit ungenügender Auflage verhindern',
+            value=False,
+            help='V113: Gilt auch ohne Bund. Die Prozentgrenze wirkt nur, wenn dieser Haken aktiv ist. Obere Einzelteile und Bunde werden nur gesetzt, wenn darunter genügend Auflagefläche vorhanden ist.'
         )
         min_support_width_percent = scol3.number_input(
             'Mindestauflagefläche beim Verladen %',
-            min_value=50,
+            min_value=0,
             max_value=100,
-            value=80,
+            value=60,
             step=5,
-            help='Grenze für die echte Verladeprüfung. Beispiel 80 % = obere Einheit braucht mindestens ca. 80 % Auflagefläche.'
+            help='Grenze für die echte Verladeprüfung. Beispiel 60 % = obere Einheit braucht mindestens ca. 60 % Auflagefläche. 100 % ist sehr streng und erzeugt meist mehr Fuhren.'
         )
 
     project_meta['Bund_Reihenfolge_lockern_%'] = int(bundle_order_flex_percent)
@@ -8535,7 +8540,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
         pritschen_edit['Mindest_Stützbreite_%'] = float(min_support_width_percent)
 
     st.subheader('7. Auflage / Unterbau')
-    st.caption('V112: Prüfung und Einzeichnen sind getrennt. Die App kann Auflage/Unterbau prüfen und warnen, ohne dass Auflager automatisch im PDF/BSD gezeichnet werden.')
+    st.caption('V113: Prüfung und Einzeichnen sind getrennt. Die App kann Auflage/Unterbau prüfen und warnen, ohne dass Auflager automatisch im PDF/BSD gezeichnet werden.')
     ucol1, ucol2, ucol3, ucol4 = st.columns(4)
     underbau_enabled = ucol1.checkbox('Unterbau / Auflage prüfen', value=False)
     draw_underbau_rows = ucol2.checkbox(
@@ -8649,7 +8654,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
     edited_placements_df = clean_placements_dataframe(st.session_state['manual_placements_df'])
     loaded_count = int((edited_placements_df['Pritsche'] != 'NICHT VERLADEN').sum()) if not edited_placements_df.empty and 'Pritsche' in edited_placements_df.columns else 0
     not_loaded_count = int((edited_placements_df['Pritsche'] == 'NICHT VERLADEN').sum()) if not edited_placements_df.empty and 'Pritsche' in edited_placements_df.columns else 0
-    fuhren_count = int(fuhren_log_df['Fuhre_Nr'].nunique()) if not fuhren_log_df.empty else 0
+    fuhren_count = int(platforms_used_df['Fuhre_Nr'].nunique()) if platforms_used_df is not None and not platforms_used_df.empty and 'Fuhre_Nr' in platforms_used_df.columns else (int(fuhren_log_df['Fuhre_Nr'].nunique()) if not fuhren_log_df.empty else 0)
 
     col1, col2, col3, col4, col5 = st.columns(5)
     col1.metric('Verladeeinheiten', len(edited_placements_df) if not edited_placements_df.empty else len(units_df))
@@ -8736,6 +8741,148 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
             st.warning('Es wurde keine Fuhre erzeugt.')
         st.markdown('**Pritschen-Zusammenfassung**')
         st.dataframe(edited_summary_df, use_container_width=True, hide_index=True)
+
+
+        with st.expander('V113: einzelne Fuhre / Pritsche neu berechnen', expanded=False):
+            st.caption('Damit kannst du z. B. nur F05/F07 mit eigenen Werten neu testen. Bestehende Fuhren werden nicht automatisch verändert. Eine zusätzliche Fuhre wird nur nach ausdrücklicher Freigabe vorbereitet.')
+            if verladeart != 'Automatisch':
+                st.info('Diese selektive Neuberechnung ist für die automatische Verladung gedacht. Im manuellen Modus bitte über „Manuelle Verladung“ arbeiten.')
+            elif platforms_used_df is None or platforms_used_df.empty or edited_placements_df is None or edited_placements_df.empty:
+                st.info('Keine berechnete Pritsche vorhanden.')
+            else:
+                selectable_platforms = platforms_used_df['Pritsche'].astype(str).tolist()
+                recalc_platform = st.selectbox('Welche Fuhre / Pritsche neu rechnen?', selectable_platforms, key='v113_recalc_platform')
+                p_match = platforms_used_df[platforms_used_df['Pritsche'].astype(str).eq(str(recalc_platform))]
+                if p_match.empty:
+                    st.warning('Pritsche nicht gefunden.')
+                else:
+                    p_row = p_match.iloc[0].copy()
+                    helper_types_v113 = {'Unterbau', 'Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz'}
+                    p_units = edited_placements_df[
+                        edited_placements_df.get('Pritsche', pd.Series(dtype=str)).astype(str).eq(str(recalc_platform))
+                        & ~edited_placements_df.get('Typ', pd.Series(dtype=str)).astype(str).isin(helper_types_v113)
+                    ].copy()
+                    target_ids = p_units.get('Einheit_ID', pd.Series(dtype=str)).dropna().astype(str).drop_duplicates().tolist()
+                    target_units = units_df[units_df.get('Einheit_ID', pd.Series(dtype=str)).astype(str).isin(target_ids)].copy() if target_ids else pd.DataFrame()
+                    if target_units.empty:
+                        st.warning('Für diese Pritsche wurden keine Verladeeinheiten gefunden.')
+                    else:
+                        st.write(f'Neu berechnet werden {len(target_units)} Verladeeinheiten aus {recalc_platform}.')
+                        rc1, rc2, rc3, rc4 = st.columns(4)
+                        recalc_max_height = rc1.number_input(
+                            'Max. Ladehöhe nur diese Fuhre mm',
+                            min_value=100.0,
+                            max_value=5000.0,
+                            value=float(safe_number(p_row.get('Max_Höhe_mm'), safe_number(standards.get('Max_Höhe_mm'), 2800.0))),
+                            step=20.0,
+                            key='v113_recalc_max_height',
+                        )
+                        recalc_prevent_support = rc2.checkbox(
+                            'ungenügende Auflage verhindern',
+                            value=bool(prevent_wide_on_narrow),
+                            key='v113_recalc_prevent_support',
+                        )
+                        recalc_min_support = rc3.number_input(
+                            'Mindestauflage diese Fuhre %',
+                            min_value=0,
+                            max_value=100,
+                            value=int(min_support_width_percent),
+                            step=5,
+                            key='v113_recalc_min_support',
+                        )
+                        recalc_allow_beside = rc4.checkbox('nebeneinander erlauben', value=bool(allow_beside), key='v113_recalc_beside')
+                        recalc_allow_stack = st.checkbox('stapeln erlauben', value=bool(allow_stack), key='v113_recalc_stack')
+
+                        def _v113_preview_for_units(local_units: pd.DataFrame, local_platform: pd.Series, suffix: str = '') -> Tuple[pd.DataFrame, pd.DataFrame]:
+                            local_platform = local_platform.copy()
+                            local_platform['Max_Höhe_mm'] = float(recalc_max_height)
+                            local_platform['Breite_Bund_auf_schmal_verhindern'] = bool(recalc_prevent_support)
+                            local_platform['Mindest_Stützbreite_%'] = float(recalc_min_support)
+                            local_platform_df = pd.DataFrame([local_platform])
+                            return create_loading_plan(
+                                local_units.reset_index(drop=True),
+                                local_platform_df.reset_index(drop=True),
+                                base_wood_height=float(base_wood_height),
+                                layer_spacer_height=float(bundle_spacer_height),
+                                gap_length=float(gap_length),
+                                allow_beside=bool(recalc_allow_beside),
+                                allow_stack=bool(recalc_allow_stack),
+                                allow_rotation=bool(allow_rotation),
+                                bundle_order_flex_percent=float(bundle_order_flex_percent),
+                                prevent_wide_on_narrow=bool(recalc_prevent_support),
+                                min_support_width_ratio=float(recalc_min_support) / 100.0,
+                            )
+
+                        if st.button('Vorschau neu berechnen', key='v113_recalc_preview_button'):
+                            preview_p = p_row.copy()
+                            preview_p['Max_Höhe_mm'] = float(recalc_max_height)
+                            preview_p['Breite_Bund_auf_schmal_verhindern'] = bool(recalc_prevent_support)
+                            preview_p['Mindest_Stützbreite_%'] = float(recalc_min_support)
+                            preview_placements, preview_summary = _v113_preview_for_units(target_units, preview_p)
+                            st.session_state['v113_recalc_preview'] = {
+                                'platform': str(recalc_platform),
+                                'target_ids': target_ids,
+                                'placements': preview_placements,
+                                'summary': preview_summary,
+                                'platform_row': preview_p,
+                            }
+
+                        preview = st.session_state.get('v113_recalc_preview')
+                        if isinstance(preview, dict) and preview.get('platform') == str(recalc_platform):
+                            preview_placements = clean_placements_dataframe(preview.get('placements', pd.DataFrame()))
+                            preview_summary = preview.get('summary', pd.DataFrame())
+                            preview_platform_row = preview.get('platform_row', p_row).copy()
+                            loaded_preview = preview_placements[preview_placements.get('Pritsche', pd.Series(dtype=str)).astype(str).ne('NICHT VERLADEN')].copy() if not preview_placements.empty else pd.DataFrame()
+                            rest_preview = preview_placements[preview_placements.get('Pritsche', pd.Series(dtype=str)).astype(str).eq('NICHT VERLADEN')].copy() if not preview_placements.empty else pd.DataFrame()
+                            st.markdown('**Vorschau Ergebnis**')
+                            if preview_summary is not None and not preview_summary.empty:
+                                st.dataframe(preview_summary, use_container_width=True, hide_index=True)
+                            if not rest_preview.empty:
+                                st.warning(f'{len(rest_preview)} Verladeeinheiten passen mit diesen Werten nicht auf {recalc_platform}. Es wird keine zusätzliche Fuhre automatisch erzeugt.')
+                                st.dataframe(rest_preview[['Einheit_ID', 'Bauteile', 'Länge_mm', 'Breite_mm', 'Höhe_mm', 'Gewicht_kg']], use_container_width=True, hide_index=True)
+                                allow_extra_trip = st.checkbox('Ja, zusätzliche Fuhre/Pritsche für Rest erlauben', value=False, key='v113_allow_extra_trip')
+                                if allow_extra_trip and st.button('Rest als zusätzliche Fuhre vorbereiten und übernehmen', key='v113_apply_with_extra'):
+                                    next_nums = platforms_used_df.get('Pritsche', pd.Series(dtype=str)).astype(str).str.extract(r'^F(\d+)')[0].dropna().astype(int)
+                                    next_f = int(next_nums.max() + 1) if not next_nums.empty else 1
+                                    base_name = str(preview_platform_row.get('Pritschenname') or re.sub(r'^F\d+\s+', '', str(recalc_platform))).strip() or 'Pritsche'
+                                    extra_p = preview_platform_row.copy()
+                                    extra_p['Fuhre_Nr'] = next_f
+                                    extra_p['Pritsche'] = f'F{next_f:02d} {base_name}'
+                                    extra_p['Pritschenname'] = base_name
+                                    rest_ids = rest_preview.get('Einheit_ID', pd.Series(dtype=str)).dropna().astype(str).tolist()
+                                    rest_units = target_units[target_units.get('Einheit_ID', pd.Series(dtype=str)).astype(str).isin(rest_ids)].copy()
+                                    extra_placements, extra_summary = _v113_preview_for_units(rest_units, extra_p)
+                                    extra_rest = extra_placements[extra_placements.get('Pritsche', pd.Series(dtype=str)).astype(str).eq('NICHT VERLADEN')].copy() if not extra_placements.empty else pd.DataFrame()
+                                    if not extra_rest.empty:
+                                        st.error('Auch mit zusätzlicher Fuhre passen nicht alle Restteile. Es wurde nichts übernommen.')
+                                        st.dataframe(extra_rest[['Einheit_ID', 'Bauteile', 'Länge_mm', 'Breite_mm', 'Höhe_mm', 'Gewicht_kg']], use_container_width=True, hide_index=True)
+                                    else:
+                                        keep_df = edited_placements_df[~edited_placements_df.get('Pritsche', pd.Series(dtype=str)).astype(str).eq(str(recalc_platform))].copy()
+                                        new_plan = pd.concat([keep_df, loaded_preview, extra_placements], ignore_index=True, sort=False)
+                                        st.session_state['manual_placements_df'] = clean_placements_dataframe(new_plan)
+                                        new_platforms = platforms_used_df.copy()
+                                        for col in preview_platform_row.index:
+                                            if col in new_platforms.columns:
+                                                new_platforms.loc[new_platforms['Pritsche'].astype(str).eq(str(recalc_platform)), col] = preview_platform_row[col]
+                                        new_platforms = pd.concat([new_platforms, pd.DataFrame([extra_p])], ignore_index=True, sort=False)
+                                        st.session_state['manual_platforms_df'] = _clean_manual_platforms_dataframe(new_platforms)
+                                        st.session_state.pop('v113_recalc_preview', None)
+                                        st.success('Selektive Neuberechnung übernommen, zusätzliche Fuhre wurde erst nach Freigabe erzeugt.')
+                                        st.rerun()
+                            else:
+                                st.success('Alle Einheiten passen in der Vorschau auf die gewählte Pritsche.')
+                                if st.button('Vorschau für diese Pritsche übernehmen', key='v113_apply_same_platform'):
+                                    keep_df = edited_placements_df[~edited_placements_df.get('Pritsche', pd.Series(dtype=str)).astype(str).eq(str(recalc_platform))].copy()
+                                    new_plan = pd.concat([keep_df, loaded_preview], ignore_index=True, sort=False)
+                                    st.session_state['manual_placements_df'] = clean_placements_dataframe(new_plan)
+                                    new_platforms = platforms_used_df.copy()
+                                    for col in preview_platform_row.index:
+                                        if col in new_platforms.columns:
+                                            new_platforms.loc[new_platforms['Pritsche'].astype(str).eq(str(recalc_platform)), col] = preview_platform_row[col]
+                                    st.session_state['manual_platforms_df'] = _clean_manual_platforms_dataframe(new_platforms)
+                                    st.session_state.pop('v113_recalc_preview', None)
+                                    st.success('Selektive Neuberechnung übernommen.')
+                                    st.rerun()
 
     with tab3:
         if verladeart == 'Automatisch':
