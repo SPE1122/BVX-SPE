@@ -1394,9 +1394,8 @@ def _interval_union_length(intervals: List[Tuple[float, float]]) -> float:
 def _support_width_ratio_for_candidate(state: Dict[str, Any], x: float, y: float, z: float, length: float, width: float) -> float:
     """Ermittelt die gestützte Breite direkt unter einer geplanten Einheit.
 
-    Ziel V89: breite Bunde sollen nicht auf einer deutlich schmaleren
-    Auflage stehen. Es wird nur die oberste reale Auflageebene unter der
-    Einheit bewertet.
+    Historische Hilfsfunktion aus V89. Für V112 bleibt sie als Rückfall erhalten;
+    die aktive Verladeprüfung nutzt zusätzlich die echte Auflagefläche.
     """
     base_z = float(state.get('base_wood_height', 0.0))
     if float(z) <= base_z + 0.1:
@@ -1443,20 +1442,95 @@ def _support_width_ratio_for_candidate(state: Dict[str, Any], x: float, y: float
     return max(0.0, min(1.0, supported_width / max(1.0, float(width))))
 
 
+def _rect_union_area(rects: List[Tuple[float, float, float, float]]) -> float:
+    """Berechnet die Vereinigungsfläche von Rechtecken (x0, x1, y0, y1)."""
+    clean: List[Tuple[float, float, float, float]] = []
+    for x0, x1, y0, y1 in rects:
+        x0, x1, y0, y1 = float(x0), float(x1), float(y0), float(y1)
+        if x1 > x0 and y1 > y0:
+            clean.append((x0, x1, y0, y1))
+    if not clean:
+        return 0.0
+
+    xs = sorted(set([r[0] for r in clean] + [r[1] for r in clean]))
+    area = 0.0
+    for a, b in zip(xs, xs[1:]):
+        if b <= a:
+            continue
+        y_intervals: List[Tuple[float, float]] = []
+        for x0, x1, y0, y1 in clean:
+            if x0 < b and x1 > a:
+                y_intervals.append((y0, y1))
+        area += (b - a) * _interval_union_length(y_intervals)
+    return area
+
+
+def _support_area_ratio_for_candidate(state: Dict[str, Any], x: float, y: float, z: float, length: float, width: float) -> float:
+    """Ermittelt die gestützte Auflagefläche direkt unter einer geplanten Einheit.
+
+    V112: Diese Prüfung gilt für obere Bauteile UND Bunde. Bewertet wird die
+    oberste reale Auflageebene unter der Einheit. Einlagenhöhen dürfen dazwischen
+    liegen; entscheidend ist, welche Fläche direkt darunter trägt.
+    """
+    length = float(length)
+    width = float(width)
+    footprint = max(1.0, length * width)
+    base_z = float(state.get('base_wood_height', 0.0))
+    if float(z) <= base_z + 0.1:
+        return 1.0
+
+    rows = _real_load_placement_rows(state)
+    if not rows or length <= 0 or width <= 0:
+        return 0.0
+
+    # Oberste reale Traglage unterhalb der neuen Einheit suchen.
+    tops: List[float] = []
+    for r in rows:
+        rz = safe_number(r.get('Z_mm'), 0.0)
+        rh = safe_number(r.get('Höhe_mm'), 0.0)
+        top = rz + rh
+        if top <= float(z) + 1.0:
+            tops.append(top)
+    if not tops:
+        return 0.0
+    top_z = max(tops)
+
+    x0, x1 = float(x), float(x) + length
+    y0, y1 = float(y), float(y) + width
+    overlaps: List[Tuple[float, float, float, float]] = []
+    for r in rows:
+        rz = safe_number(r.get('Z_mm'), 0.0)
+        rh = safe_number(r.get('Höhe_mm'), 0.0)
+        if abs((rz + rh) - top_z) > 2.0:
+            continue
+        rx0 = safe_number(r.get('X_mm'), 0.0)
+        rx1 = rx0 + safe_number(r.get('Länge_mm'), 0.0)
+        ry0 = safe_number(r.get('Y_mm'), 0.0)
+        ry1 = ry0 + safe_number(r.get('Breite_mm'), 0.0)
+        ox0, ox1 = max(x0, rx0), min(x1, rx1)
+        oy0, oy1 = max(y0, ry0), min(y1, ry1)
+        if ox1 > ox0 and oy1 > oy0:
+            overlaps.append((ox0, ox1, oy0, oy1))
+
+    supported_area = _rect_union_area(overlaps)
+    return max(0.0, min(1.0, supported_area / footprint))
+
+
 def can_place_stable(state: Dict[str, Any], unit: pd.Series, x: float, y: float, z: float, length: float, width: float, height: float, weight: float) -> bool:
     if not can_place(state, x, y, z, length, width, height, weight):
         return False
     if not bool(state.get('prevent_wide_on_narrow', True)):
         return True
-    # Nur echte obere Bunde streng prüfen. Einzelteile bleiben wie bisher.
-    if str(unit.get('Typ', '')).strip() != 'Bund':
-        return True
     base_z = float(state.get('base_wood_height', 0.0))
     if float(z) <= base_z + 0.1:
         return True
+
+    # V112: nicht mehr nur Bunde prüfen. Auch Einzel-Bauteile müssen als obere
+    # Lage genügend echte Auflagefläche haben. Dadurch werden schwebende Elemente
+    # bereits beim Verladen verhindert und nicht nur nachträglich markiert.
     min_ratio = max(0.0, min(1.0, float(state.get('min_support_width_ratio', 0.80))))
-    ratio = _support_width_ratio_for_candidate(state, x, y, z, length, width)
-    return ratio + 1e-6 >= min_ratio
+    area_ratio = _support_area_ratio_for_candidate(state, x, y, z, length, width)
+    return area_ratio + 1e-6 >= min_ratio
 
 
 def commit_place(
@@ -4467,8 +4541,13 @@ def add_underbau_rows_to_placements(
     min_support_ratio: float = 0.65,
     min_underbau_height: float = 20.0,
     enabled: bool = True,
+    draw_underbau_rows: bool = True,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Fügt Unterbau-Hilfszeilen für Darstellung/Ladeplan hinzu und liefert Warnungen."""
+    """Prüft Auflage/Unterbau und fügt Hilfszeilen nur bei Wunsch ein.
+
+    V112: Die Prüfung/Warnung kann aktiv sein, ohne dass Unterbau/Auflager in
+    PDF, BSD oder Ansichten eingezeichnet werden.
+    """
     if not enabled or placements_df is None or placements_df.empty or platforms_df is None or platforms_df.empty:
         return placements_df.copy() if placements_df is not None else pd.DataFrame(), pd.DataFrame(columns=['Typ', 'Pritsche', 'Einheit_ID', 'Warnung', 'Details'])
     helpers: List[pd.DataFrame] = []
@@ -4480,7 +4559,7 @@ def add_underbau_rows_to_placements(
         if w is not None and not w.empty:
             warnings.append(w)
     result = placements_df.copy()
-    if helpers:
+    if helpers and bool(draw_underbau_rows):
         result = pd.concat([result] + helpers, ignore_index=True, sort=False)
     warn_df = pd.concat(warnings, ignore_index=True, sort=False) if warnings else pd.DataFrame(columns=['Typ', 'Pritsche', 'Einheit_ID', 'Warnung', 'Details'])
     return result, warn_df
@@ -8432,20 +8511,23 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
             help='0 = streng nach Sortierung. Höher = die App darf ganze Bunde innerhalb eines kleinen Suchfensters vorziehen, um breitere/stabilere Bunde eher unten zu laden.'
         )
         prevent_wide_on_narrow = scol2.checkbox(
-            'Breiten Bund auf schmaler Auflage verhindern',
+            'Obere Bauteile/Bunde auf schmaler Auflage verhindern',
             value=True,
-            help='Obere Bunde werden nur gesetzt, wenn darunter genügend Breite trägt.'
+            help='V112: Gilt auch ohne Bund. Obere Einzelteile und Bunde werden nur gesetzt, wenn darunter genügend Auflagefläche vorhanden ist.'
         )
         min_support_width_percent = scol3.number_input(
-            'Mindest-Stützbreite obere Bunde %',
+            'Mindestauflagefläche beim Verladen %',
             min_value=50,
             max_value=100,
             value=80,
             step=5,
+            help='Grenze für die echte Verladeprüfung. Beispiel 80 % = obere Einheit braucht mindestens ca. 80 % Auflagefläche.'
         )
 
     project_meta['Bund_Reihenfolge_lockern_%'] = int(bundle_order_flex_percent)
+    project_meta['Obere_Bauteile_Bunde_auf_schmaler_Auflage_verhindern'] = bool(prevent_wide_on_narrow)
     project_meta['Breiten_Bund_auf_schmaler_Auflage_verhindern'] = bool(prevent_wide_on_narrow)
+    project_meta['Mindestauflagefläche_beim_Verladen_%'] = int(min_support_width_percent)
     project_meta['Mindest_Stützbreite_obere_Bunde_%'] = int(min_support_width_percent)
     if not pritschen_edit.empty:
         pritschen_edit = pritschen_edit.copy()
@@ -8453,11 +8535,23 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
         pritschen_edit['Mindest_Stützbreite_%'] = float(min_support_width_percent)
 
     st.subheader('7. Auflage / Unterbau')
-    st.caption('Ruhige Logik: Unterbau ist nur Kontrolle/Notlösung. Zuerst werden weniger Fuhren und saubere Lagen angestrebt; Unterbau sollte möglichst selten verwendet werden.')
-    ucol1, ucol2, ucol3 = st.columns(3)
-    underbau_enabled = ucol1.checkbox('Unterbau / Auflage prüfen und anzeigen', value=False)
-    min_support_ratio = ucol2.number_input('Mindestauflagefläche %', min_value=0, max_value=100, value=65, step=5) / 100.0
-    min_underbau_height = ucol3.number_input('Unterbau anzeigen ab mm', min_value=0.0, max_value=500.0, value=20.0, step=5.0)
+    st.caption('V112: Prüfung und Einzeichnen sind getrennt. Die App kann Auflage/Unterbau prüfen und warnen, ohne dass Auflager automatisch im PDF/BSD gezeichnet werden.')
+    ucol1, ucol2, ucol3, ucol4 = st.columns(4)
+    underbau_enabled = ucol1.checkbox('Unterbau / Auflage prüfen', value=False)
+    draw_underbau_rows = ucol2.checkbox(
+        'Auflager im PDF/BSD einzeichnen',
+        value=False,
+        help='Nur aktivieren, wenn die automatisch ermittelten Unterbau-/Auflagerklötze wirklich in Ansichten, PDF und BSD erscheinen sollen.'
+    )
+    min_support_ratio = ucol3.number_input('Mindestauflagefläche Kontrolle %', min_value=0, max_value=100, value=65, step=5) / 100.0
+    min_underbau_height = ucol4.number_input('Unterbau melden ab mm', min_value=0.0, max_value=500.0, value=20.0, step=5.0)
+    if not bool(underbau_enabled) and bool(draw_underbau_rows):
+        st.info('„Auflager im PDF/BSD einzeichnen“ wirkt nur, wenn „Unterbau / Auflage prüfen“ aktiv ist.')
+        draw_underbau_rows = False
+
+    project_meta['Unterbau_Auflage_pruefen'] = bool(underbau_enabled)
+    project_meta['Auflager_im_PDF_BSD_einzeichnen'] = bool(draw_underbau_rows)
+    project_meta['Mindestauflagefläche_Kontrolle_%'] = int(round(float(min_support_ratio) * 100.0))
 
     st.subheader('8. Verladung starten')
     st.caption('Die Verladung wird erst berechnet, wenn dieser Startknopf gedrückt wird.')
@@ -8579,6 +8673,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
             min_support_ratio=float(min_support_ratio),
             min_underbau_height=float(min_underbau_height),
             enabled=bool(underbau_enabled),
+            draw_underbau_rows=bool(draw_underbau_rows),
         )
         if underbau_warnings_df is not None and not underbau_warnings_df.empty:
             warnings_plan_df = pd.concat([warnings_plan_df, underbau_warnings_df], ignore_index=True, sort=False) if not warnings_plan_df.empty else underbau_warnings_df
@@ -8962,6 +9057,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                             min_support_ratio=float(min_support_ratio),
                             min_underbau_height=float(min_underbau_height),
                             enabled=True,
+                            draw_underbau_rows=bool(draw_underbau_rows),
                         )
                         if underbau_warnings_df is not None and not underbau_warnings_df.empty:
                             warnings_plan_df = pd.concat([warnings_plan_df, underbau_warnings_df], ignore_index=True, sort=False) if not warnings_plan_df.empty else underbau_warnings_df
