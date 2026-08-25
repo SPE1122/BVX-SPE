@@ -1530,7 +1530,7 @@ def _edge_free_span_mm(total0: float, total1: float, intervals: List[Tuple[float
 
 
 def _support_metrics_for_candidate(state: Dict[str, Any], x: float, y: float, z: float, length: float, width: float) -> Dict[str, float]:
-    """V114: Auflagefläche plus freier Überhang in Länge und Breite.
+    """V115: Auflagefläche plus freier Überhang in Länge und Breite (nur selektiv genutzt).
 
     - area_ratio: gestützte Fläche / Grundfläche
     - free_length_mm: grösster freier Randüberhang vorne/hinten
@@ -1596,7 +1596,7 @@ def can_place_stable(state: Dict[str, Any], unit: pd.Series, x: float, y: float,
     if float(z) <= base_z + 0.1:
         return True
 
-    # V114: Auflage wird nicht mehr nur als Prozentfläche bewertet. Optional
+    # V115: Auflage kann selektiv nicht nur als Prozentfläche bewertet werden. Optional
     # werden zusätzlich freie Überhänge in Länge und Breite begrenzt.
     min_ratio = max(0.0, min(1.0, float(state.get('min_support_width_ratio', 0.80))))
     max_free_length = max(0.0, float(state.get('max_unsupported_length_mm', 0.0) or 0.0))
@@ -1802,7 +1802,7 @@ def create_loading_plan(
     min_support_width_ratio: float = 0.80,
     max_unsupported_length_mm: float = 0.0,
     max_unsupported_side_mm: float = 0.0,
-    prefer_length_before_stack: bool = True,
+    prefer_length_before_stack: bool = False,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Greedy-Verladevorschlag für eine einzelne Fuhre."""
     if units.empty or platforms.empty:
@@ -2025,7 +2025,7 @@ def _clean_try_place_on_current_layer(
                     nx, nz = new_common
                     if can_place_stable(state, unit, nx, y, nz, use_length, use_width, use_height, weight):
                         candidates.append((nx, nz, True))
-            if bool(state.get('prefer_length_before_stack', True)) and any(not item[2] for item in candidates):
+            if bool(state.get('prefer_length_before_stack', False)) and any(not item[2] for item in candidates):
                 candidates = [item for item in candidates if not item[2]]
             for x, z, new_layer in candidates:
                 score = z * 1000000.0 + x * 1000.0 - use_width
@@ -2064,7 +2064,7 @@ def _clean_try_place_on_current_layer(
                     nx, nz = new_side
                     if can_place_stable(state, unit, nx, y, nz, use_length, use_width, use_height, weight):
                         candidates.append((nx, nz, True))
-            if bool(state.get('prefer_length_before_stack', True)) and any(not item[2] for item in candidates):
+            if bool(state.get('prefer_length_before_stack', False)) and any(not item[2] for item in candidates):
                 candidates = [item for item in candidates if not item[2]]
             for x, z, new_layer in candidates:
                 other = 'right' if side == 'left' else 'left'
@@ -2145,7 +2145,7 @@ def create_loading_plan(
     min_support_width_ratio: float = 0.80,
     max_unsupported_length_mm: float = 0.0,
     max_unsupported_side_mm: float = 0.0,
-    prefer_length_before_stack: bool = True,
+    prefer_length_before_stack: bool = False,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Greedy-Verladevorschlag für eine einzelne Fuhre."""
     if units.empty or platforms.empty:
@@ -2494,7 +2494,7 @@ def create_loading_plan(
     min_support_width_ratio: float = 0.80,
     max_unsupported_length_mm: float = 0.0,
     max_unsupported_side_mm: float = 0.0,
-    prefer_length_before_stack: bool = True,
+    prefer_length_before_stack: bool = False,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """V17: ruhiger Lagen-Verladevorschlag für eine einzelne Fuhre.
 
@@ -3122,7 +3122,7 @@ def create_variant_a_loading_plan(
     min_support_width_ratio: float = 0.80,
     max_unsupported_length_mm: float = 0.0,
     max_unsupported_side_mm: float = 0.0,
-    prefer_length_before_stack: bool = True,
+    prefer_length_before_stack: bool = False,
     fuhre_split_attr: str = '',
     fill_remainder_next_group: bool = False,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -5943,6 +5943,53 @@ def _pdf_draw_hatched_overlay(c, rx: float, ry: float, rw: float, rh: float, spa
     c.restoreState()
 
 
+def _pdf_rects_overlap_data(a: Tuple[float, float, float, float], b: Tuple[float, float, float, float]) -> bool:
+    """Prüft Überlappung zweier Rechtecke in Projektionskoordinaten."""
+    ax0, ay0, ax1, ay1 = a
+    bx0, by0, bx1, by1 = b
+    return ax1 > bx0 and bx1 > ax0 and ay1 > by0 and by1 > ay0
+
+
+def _pdf_subtract_rect_by_rects(rect: Tuple[float, float, float, float], blockers: List[Tuple[float, float, float, float]]) -> List[Tuple[float, float, float, float]]:
+    """Sichtbare Restflächen eines Rechtecks nach Abzug näherer Rechtecke.
+
+    Die Ausgabe bleibt in einfachen achsparallelen Rechteckstücken. Das reicht für
+    die Stirnansicht: verdeckte Teile fallen weg, nur noch sichtbare Randstücke
+    hinterer Elemente können schraffiert gezeichnet werden.
+    """
+    x0, y0, x1, y1 = rect
+    if x1 <= x0 or y1 <= y0:
+        return []
+    relevant = []
+    xs = [x0, x1]
+    ys = [y0, y1]
+    for bx0, by0, bx1, by1 in blockers:
+        cx0, cy0 = max(x0, bx0), max(y0, by0)
+        cx1, cy1 = min(x1, bx1), min(y1, by1)
+        if cx1 <= cx0 or cy1 <= cy0:
+            continue
+        relevant.append((cx0, cy0, cx1, cy1))
+        xs.extend([cx0, cx1])
+        ys.extend([cy0, cy1])
+    if not relevant:
+        return [rect]
+
+    xs = sorted(set(round(v, 4) for v in xs))
+    ys = sorted(set(round(v, 4) for v in ys))
+    pieces: List[Tuple[float, float, float, float]] = []
+    for i in range(len(xs) - 1):
+        for j in range(len(ys) - 1):
+            sx0, sx1 = xs[i], xs[i + 1]
+            sy0, sy1 = ys[j], ys[j + 1]
+            if sx1 <= sx0 or sy1 <= sy0:
+                continue
+            mx, my = (sx0 + sx1) / 2.0, (sy0 + sy1) / 2.0
+            covered = any(bx0 <= mx <= bx1 and by0 <= my <= by1 for bx0, by0, bx1, by1 in relevant)
+            if not covered:
+                pieces.append((sx0, sy0, sx1, sy1))
+    return pieces
+
+
 def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y: float, w: float, h: float, view: str, title: str, front_at_x_max: bool = False, left_at_y_max: bool = False, bundle_overview_only: bool = False, show_dimensions: bool = True) -> None:
     """Zeichnet eine PDF-Ansicht mit Pritschen- und Ladungsabmessungen.
 
@@ -6003,12 +6050,11 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
         ghost_rows = rows_all_for_side.loc[~rows_all_for_side.index.isin(rows_visible.index)].copy()
         rows = rows_visible.copy()
     elif view in ('front', 'back') and not rows.empty:
-        rows_all_fb = rows.copy()
-        if view == 'back':
-            rows_visible, ghost_rows = _pdf_front_back_end_groups(rows_all_fb, load_x0, load_x1, front_at_x_max=False)
-        else:
-            rows_visible, ghost_rows = _pdf_front_back_end_groups(rows_all_fb, load_x0, load_x1, front_at_x_max=True)
-        rows = rows_visible.copy()
+        # V115: keine pauschale Halbteilung mehr. Die Stirnansicht wird später
+        # mit echter Sichtlogik gezeichnet: vordere Flächen normal, nur sichtbar
+        # hervorschauende hintere Teilflächen schraffiert, komplett verdeckte
+        # Elemente gar nicht.
+        rows = rows.copy()
 
     rows = _pdf_add_visible_spacer_rows(rows, platform, view)
 
@@ -6043,12 +6089,13 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
         data_h = max(used_hei, 1.0)
 
     scale = min(w / max(data_w, 1.0), h / max(data_h, 1.0))
-    # V113: Seitenansichten dürfen in der Höhe optisch stärker dargestellt werden.
-    # Länge bleibt massstäblich zur Pritsche; nur die vertikale PDF-Darstellung wird
-    # moderat gedehnt, damit die Lagen besser lesbar sind. Daten/Berechnung bleiben unverändert.
-    if view in ('side', 'side_left', 'side_right'):
+    # V115: Seitenansicht und Stirnansicht werden in der Höhe gekoppelt.
+    # X bleibt je Ansicht passend skaliert (Länge bzw. Breite), Y nutzt die
+    # tatsächliche Ladehöhe. Dadurch liegen die Lagen in Seiten- und
+    # Stirnansicht optisch auf gleicher Höhe, ohne die Verladedaten zu ändern.
+    if view in ('side', 'side_left', 'side_right', 'front', 'back'):
         scale_x = w / max(data_w, 1.0)
-        scale_y = min(h / max(data_h, 1.0), scale_x * 2.0)
+        scale_y = h / max(data_h, 1.0)
     else:
         scale_x = scale
         scale_y = scale
@@ -6123,33 +6170,21 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
         right_px = ox + ((width - load_y0) if left_at_y_max else load_y1) * scale_x
         _pdf_dim_line_h(c, left_px, right_px, oy - 24, f'Ladungsbreite {used_wid:.0f} mm')
 
-    def draw_projected_row(row: pd.Series, ghost: bool = False) -> None:
-        px, py, pw, ph, _depth = _pdf_projection_values(row, view, eff_length, width, front_at_x_max, left_at_y_max)
-        rx = tx(px) if view in ('side', 'side_left', 'side_right', 'top') else ox + px * scale
-        ry = ty(py) if view == 'top_rotated' else oy + py * scale
-        if view == 'top':
-            ry = oy + py * scale
-        if view in ('side', 'side_left', 'side_right'):
-            ry = oy + py * scale
+    def draw_projected_fragment(row: pd.Series, px: float, py: float, pw: float, ph: float, ghost: bool = False, draw_label: bool = True) -> None:
+        rx = ox + (px - view_x_offset) * scale_x
+        ry = oy + (py - view_y_offset) * scale_y
         rw = pw * scale_x
         rh = ph * scale_y
         if rw <= 0 or rh <= 0:
             return
         row_typ = str(row.get('Typ', '') or '').strip()
         if ghost:
-            c.setFillColor(colors.HexColor('#f2f2f2'))
+            c.setFillColor(colors.HexColor('#f4f4f4'))
             c.setStrokeColor(colors.HexColor('#b9b9b9'))
             c.setLineWidth(0.22)
             c.rect(rx, ry, rw, rh, stroke=1, fill=1)
             if view in ('front', 'back'):
                 _pdf_draw_hatched_overlay(c, rx, ry, rw, rh, spacing=6.0)
-                label_lines = _pdf_label_lines(row, view, bundle_overview_only=bundle_overview_only)
-                label_lines = label_lines[:1] if label_lines else []
-                if label_lines:
-                    c.saveState()
-                    c.setFillColor(colors.HexColor('#6f6f6f'))
-                    _pdf_draw_label_lines(c, rx, ry, rw, rh, label_lines, view)
-                    c.restoreState()
             return
         if row_typ == 'Kantholz':
             c.setFillColor(colors.HexColor('#b8b8b8'))
@@ -6165,15 +6200,44 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
             c.setStrokeColor(colors.darkgrey)
         c.setLineWidth(0.38)
         c.rect(rx, ry, rw, rh, stroke=1, fill=1)
-        label_lines = _pdf_label_lines(row, view, bundle_overview_only=bundle_overview_only)
-        if view in ('top', 'top_rotated'):
-            if rw < 28 or rh < 18:
-                label_lines = []
-            else:
-                label_lines = label_lines[:1]
-        _pdf_draw_label_lines(c, rx, ry, rw, rh, label_lines, view)
+        if draw_label:
+            label_lines = _pdf_label_lines(row, view, bundle_overview_only=bundle_overview_only)
+            if view in ('top', 'top_rotated'):
+                if rw < 28 or rh < 18:
+                    label_lines = []
+                else:
+                    label_lines = label_lines[:1]
+            _pdf_draw_label_lines(c, rx, ry, rw, rh, label_lines, view)
 
-    if view in ('side', 'side_left', 'side_right', 'front', 'back') and ghost_rows is not None and not ghost_rows.empty:
+    def draw_projected_row(row: pd.Series, ghost: bool = False) -> None:
+        px, py, pw, ph, _depth = _pdf_projection_values(row, view, eff_length, width, front_at_x_max, left_at_y_max)
+        draw_projected_fragment(row, px, py, pw, ph, ghost=ghost, draw_label=not ghost)
+
+    # V115: Stirnansicht mit echter Sichtlogik.
+    # Nahe Rechtecke decken entfernte Rechtecke ab; komplett verdeckte Elemente
+    # werden nicht gezeichnet. Nur sichtbare Reststücke hinterer Elemente werden
+    # schraffiert dargestellt.
+    if view in ('front', 'back') and rows is not None and not rows.empty:
+        rows['_pdf_sort'] = rows.apply(lambda r: _pdf_visible_sort_value(r, view, eff_length, width, front_at_x_max, left_at_y_max), axis=1)
+        rows_front = rows.sort_values(['_pdf_sort', 'Z_mm', 'X_mm', 'Y_mm'], ascending=[False, True, True, True], kind='stable')
+        blockers: List[Tuple[float, float, float, float]] = []
+        for _, row in rows_front.iterrows():
+            px, py, pw, ph, _depth = _pdf_projection_values(row, view, eff_length, width, front_at_x_max, left_at_y_max)
+            rect = (px, py, px + pw, py + ph)
+            if pw <= 0 or ph <= 0:
+                continue
+            row_typ = str(row.get('Typ', '') or '').strip()
+            has_front_overlap = any(_pdf_rects_overlap_data(rect, b) for b in blockers)
+            pieces = _pdf_subtract_rect_by_rects(rect, blockers)
+            if not pieces:
+                continue
+            is_hatched = bool(has_front_overlap and row_typ not in ['Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz', 'Unterbau'])
+            for qx0, qy0, qx1, qy1 in pieces:
+                draw_projected_fragment(row, qx0, qy0, qx1 - qx0, qy1 - qy0, ghost=is_hatched, draw_label=not is_hatched)
+            blockers.append(rect)
+        return
+
+    if view in ('side', 'side_left', 'side_right') and ghost_rows is not None and not ghost_rows.empty:
         ghost_rows['_pdf_sort'] = ghost_rows.apply(lambda r: _pdf_visible_sort_value(r, view, eff_length, width, front_at_x_max, left_at_y_max), axis=1)
         ghost_rows = ghost_rows.sort_values(['_pdf_sort', 'Z_mm', 'X_mm', 'Y_mm'], kind='stable')
         for _, row in ghost_rows.iterrows():
@@ -6894,12 +6958,13 @@ def create_loading_pdf(
         # V106: finale Ausgabe-/Darstellungs-Korrektur ohne Verladelogik.
         _pdf_draw_bsd_reference_sketch(c, margin + 545, page_h - 176, 230, 88, front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max)
 
-        # V113: Seitenansichten höher/lesbarer, leere Lagentabellen-Box unter der
-        # Stirnansicht vorne entfernt. PDF-Layout geändert, Verladelogik unverändert.
+        # V115: Seitenansicht und Stirnansicht sind in der Höhe gekoppelt.
+        # Ober-/Unterkante der oberen und unteren Ansichten laufen jeweils in einer Linie.
+        # Die Stirnansicht nutzt echte Sichtlogik: nur sichtbare hintere Restflächen werden schraffiert.
         _pdf_draw_view(c, placements_df, platform, margin, 430, 745, 205, 'side_left', 'Linke Seitenansicht', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
         _pdf_draw_view(c, placements_df, platform, margin, 125, 745, 205, 'side_right', 'Rechte Seitenansicht', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
-        _pdf_draw_view(c, placements_df, platform, margin + 780, 452, 220, 170, 'back', 'Stirnansicht hinten', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
-        _pdf_draw_view(c, placements_df, platform, margin + 780, 165, 220, 170, 'front', 'Stirnansicht vorne', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
+        _pdf_draw_view(c, placements_df, platform, margin + 780, 430, 220, 205, 'back', 'Stirnansicht hinten', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
+        _pdf_draw_view(c, placements_df, platform, margin + 780, 125, 220, 205, 'front', 'Stirnansicht vorne', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
         _pdf_draw_view(c, placements_df, platform, margin + 1025, 165, 140, 435, 'top_rotated', 'Draufsicht', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
 
         # Qualitätssicherung kompakt oben rechts, getrennt vom Infofeld.
@@ -8605,7 +8670,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
         pritschen_edit['Rungenhoehe_mm'] = float(runge_height_mm)
 
     with st.expander('6d. Bund-Reihenfolge / Ladesicherheit', expanded=False):
-        st.caption('V114: Auflage nicht nur nach Prozent prüfen. Zusätzlich können freie Überhänge in Länge/Breite begrenzt werden.')
+        st.caption('Die Bundfolge kann leicht gelockert werden. Es werden nur ganze Bunde verschoben; ein Bund wird nicht aufgelöst.')
         scol1, scol2, scol3 = st.columns(3)
         bundle_order_flex_percent = scol1.number_input(
             'Bund-Reihenfolge lockern %',
@@ -8618,7 +8683,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
         prevent_wide_on_narrow = scol2.checkbox(
             'Obere Bauteile/Bunde mit ungenügender Auflage verhindern',
             value=False,
-            help='Gilt auch ohne Bund. Die folgenden Grenzen wirken nur, wenn dieser Haken aktiv ist.'
+            help='V113: Gilt auch ohne Bund. Die Prozentgrenze wirkt nur, wenn dieser Haken aktiv ist. Obere Einzelteile und Bunde werden nur gesetzt, wenn darunter genügend Auflagefläche vorhanden ist.'
         )
         min_support_width_percent = scol3.number_input(
             'Mindestauflagefläche beim Verladen %',
@@ -8626,29 +8691,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
             max_value=100,
             value=60,
             step=5,
-            help='Grenze für die echte Verladeprüfung. Beispiel 30–60 % als Praxisbereich; 100 % ist sehr streng.'
-        )
-        ocol1, ocol2, ocol3 = st.columns(3)
-        max_free_length_mm = ocol1.number_input(
-            'Max. freier Überhang Länge mm',
-            min_value=0,
-            max_value=5000,
-            value=0,
-            step=50,
-            help='0 = keine zusätzliche Begrenzung. Wirkt auf obere Bauteile: grösster freier Randüberhang vorne/hinten.'
-        )
-        max_free_side_mm = ocol2.number_input(
-            'Max. freier Überhang seitlich mm',
-            min_value=0,
-            max_value=2500,
-            value=0,
-            step=25,
-            help='0 = keine zusätzliche Begrenzung. Wirkt auf obere Bauteile: grösster freier Randüberhang links/rechts.'
-        )
-        prefer_length_before_stack = ocol3.checkbox(
-            'Zuerst hintereinander versuchen',
-            value=True,
-            help='Wenn auf gleicher Lage eine gültige Position gefunden wird, wird nicht sofort eine neue Lage oben begonnen.'
+            help='Grenze für die echte Verladeprüfung. Beispiel 60 % = obere Einheit braucht mindestens ca. 60 % Auflagefläche. 100 % ist sehr streng und erzeugt meist mehr Fuhren.'
         )
 
     project_meta['Bund_Reihenfolge_lockern_%'] = int(bundle_order_flex_percent)
@@ -8656,16 +8699,10 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
     project_meta['Breiten_Bund_auf_schmaler_Auflage_verhindern'] = bool(prevent_wide_on_narrow)
     project_meta['Mindestauflagefläche_beim_Verladen_%'] = int(min_support_width_percent)
     project_meta['Mindest_Stützbreite_obere_Bunde_%'] = int(min_support_width_percent)
-    project_meta['Max_freier_Überhang_Länge_mm'] = int(max_free_length_mm)
-    project_meta['Max_freier_Überhang_seitlich_mm'] = int(max_free_side_mm)
-    project_meta['Zuerst_hintereinander_versuchen'] = bool(prefer_length_before_stack)
     if not pritschen_edit.empty:
         pritschen_edit = pritschen_edit.copy()
         pritschen_edit['Breite_Bund_auf_schmal_verhindern'] = bool(prevent_wide_on_narrow)
         pritschen_edit['Mindest_Stützbreite_%'] = float(min_support_width_percent)
-        pritschen_edit['Max_freier_Überhang_Länge_mm'] = float(max_free_length_mm)
-        pritschen_edit['Max_freier_Überhang_seitlich_mm'] = float(max_free_side_mm)
-        pritschen_edit['Zuerst_hintereinander_versuchen'] = bool(prefer_length_before_stack)
 
     st.subheader('7. Auflage / Unterbau')
     st.caption('V113: Prüfung und Einzeichnen sind getrennt. Die App kann Auflage/Unterbau prüfen und warnen, ohne dass Auflager automatisch im PDF/BSD gezeichnet werden.')
@@ -8728,9 +8765,6 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
             bundle_order_flex_percent=float(bundle_order_flex_percent),
             prevent_wide_on_narrow=bool(prevent_wide_on_narrow),
             min_support_width_ratio=float(min_support_width_percent) / 100.0,
-            max_unsupported_length_mm=float(max_free_length_mm),
-            max_unsupported_side_mm=float(max_free_side_mm),
-            prefer_length_before_stack=bool(prefer_length_before_stack),
             fuhre_split_attr=effective_fuhre_split_attr,
             fill_remainder_next_group=bool(fill_remainder_next_group),
         )
@@ -8874,7 +8908,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
         st.dataframe(edited_summary_df, use_container_width=True, hide_index=True)
 
 
-        with st.expander('V114: einzelne Fuhre / Pritsche neu berechnen', expanded=False):
+        with st.expander('V115: einzelne Fuhre / Pritsche neu berechnen', expanded=False):
             st.caption('Damit kannst du z. B. nur F05/F07 mit eigenen Auflage-/Überhangwerten neu testen. Bestehende Fuhren werden nicht automatisch verändert. Eine zusätzliche Fuhre wird nur nach ausdrücklicher Freigabe vorbereitet.')
             if verladeart != 'Automatisch':
                 st.info('Diese selektive Neuberechnung ist für die automatische Verladung gedacht. Im manuellen Modus bitte über „Manuelle Verladung“ arbeiten.')
@@ -8927,7 +8961,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                             'Max. freier Überhang Länge mm',
                             min_value=0,
                             max_value=5000,
-                            value=int(max_free_length_mm),
+                            value=0,
                             step=50,
                             key='v114_recalc_free_length',
                         )
@@ -8935,13 +8969,13 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                             'Max. freier Überhang seitlich mm',
                             min_value=0,
                             max_value=2500,
-                            value=int(max_free_side_mm),
+                            value=0,
                             step=25,
                             key='v114_recalc_free_side',
                         )
                         recalc_prefer_length = oc3.checkbox(
                             'zuerst hintereinander versuchen',
-                            value=bool(prefer_length_before_stack),
+                            value=True,
                             key='v114_recalc_prefer_length',
                         )
                         sc1, sc2 = st.columns(2)
