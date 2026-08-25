@@ -5413,7 +5413,8 @@ def _pdf_draw_label_lines(c, rx: float, ry: float, rw: float, rh: float, lines: 
     font_name = 'Helvetica'
     n = len(lines)
     if n == 1:
-        font_size = max(3.1, min(5.4, rw / max(8, len(lines[0]) * 1.85), rh * 0.48))
+        # V110: Beschriftung etwas grösser, aber weiterhin innerhalb der Elemente.
+        font_size = max(3.5, min(6.2, rw / max(8, len(lines[0]) * 1.72), rh * 0.54))
         c.setFont(font_name, font_size)
         c.setFillColor(colors.black)
         txt = _pdf_truncate_to_width(c, lines[0], max(4, rw - 4), font_name, font_size)
@@ -5422,7 +5423,7 @@ def _pdf_draw_label_lines(c, rx: float, ry: float, rw: float, rh: float, lines: 
         return
 
     # Mehrere Nummern im Bund: vertikal von unten nach oben, Reihenfolge = Verladereihenfolge.
-    font_size = min(5.2, max(2.4, (rh - 3) / max(1, n) * 0.82))
+    font_size = min(5.8, max(2.7, (rh - 3) / max(1, n) * 0.88))
     line_step = max(font_size * 1.05, (rh - 4) / max(1, n))
     total_h = line_step * (n - 1)
     start_y = ry + rh / 2 - total_h / 2
@@ -6542,6 +6543,85 @@ def _pdf_draw_bsd_reference_sketch(c, x: float, y: float, w: float = 180, h: flo
     c.restoreState()
 
 
+def _pdf_layer_table_data_for_platform(placements_df: pd.DataFrame, platform: pd.Series, bundle_overview_only: bool = False) -> List[Tuple[str, str]]:
+    """Erzeugt kompakte Lagentabelle von unten nach oben.
+
+    - Kantholz / Einlage / Bundeinlage / Lagenholz / Unterbau zählen nicht als Lage.
+    - Gruppierung nach Z-Unterkante.
+    - Eine Lage kann mehrere Bauteile enthalten; diese werden in einer Zeile zusammengefasst.
+    """
+    if placements_df is None or placements_df.empty:
+        return []
+    pname = str(platform.get('Pritsche', ''))
+    rows = placements_df[placements_df['Pritsche'].astype(str) == pname].copy()
+    if rows.empty:
+        return []
+    typ = rows.get('Typ', pd.Series(dtype=str)).astype(str).str.strip()
+    skip = ['Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz', 'Unterbau']
+    rows = rows[~typ.isin(skip)].copy()
+    if rows.empty:
+        return []
+    rows['Z_mm'] = pd.to_numeric(rows.get('Z_mm'), errors='coerce').fillna(0.0)
+    rows = rows.sort_values(['Z_mm', 'X_mm', 'Y_mm'], kind='stable')
+
+    layer_map: Dict[float, List[str]] = {}
+    for _, row in rows.iterrows():
+        z = round(safe_number(row.get('Z_mm')), 3)
+        labels = _pdf_label_lines(row, 'side_left', bundle_overview_only=bundle_overview_only)
+        labels = [str(v).replace('<br>', ' ').strip() for v in labels if str(v).strip()]
+        if not labels:
+            labels = [_format_bsd_cell(row)]
+        layer_map.setdefault(z, [])
+        for label in labels:
+            if label not in layer_map[z]:
+                layer_map[z].append(label)
+
+    data: List[Tuple[str, str]] = []
+    for idx, z in enumerate(sorted(layer_map.keys()), start=1):
+        joined = ' / '.join(layer_map[z])
+        data.append((f'L{idx}', joined))
+    return data
+
+
+def _pdf_draw_layer_table(c, x: float, y: float, w: float, h: float, layer_rows: List[Tuple[str, str]], title: str = 'Lagentabelle (unten nach oben)') -> None:
+    """Zeichnet kleine Lagentabelle als Legende neben den Ansichten."""
+    from reportlab.lib import colors
+    c.saveState()
+    c.setStrokeColor(colors.black)
+    c.setFillColor(colors.white)
+    c.rect(x, y, w, h, stroke=1, fill=1)
+    c.setFont('Helvetica-Bold', 8.5)
+    c.drawString(x + 5, y + h - 12, title)
+    c.setFont('Helvetica-Bold', 7.5)
+    c.drawString(x + 6, y + h - 26, 'Lage')
+    c.drawString(x + 34, y + h - 26, 'Bauteile')
+    c.line(x + 4, y + h - 30, x + w - 4, y + h - 30)
+
+    if not layer_rows:
+        c.setFont('Helvetica', 7)
+        c.drawString(x + 6, y + h - 44, 'Keine Lagen vorhanden')
+        c.restoreState()
+        return
+
+    available_h = max(20, h - 38)
+    max_rows = max(1, int(available_h // 11))
+    display_rows = layer_rows[:max_rows]
+    row_h = min(11.0, available_h / max(1, len(display_rows)))
+    yy = y + h - 41
+    for i, (layer, text_value) in enumerate(display_rows):
+        if i > 0:
+            c.setStrokeColor(colors.HexColor('#d0d0d0'))
+            c.line(x + 4, yy + 2, x + w - 4, yy + 2)
+            c.setStrokeColor(colors.black)
+        c.setFont('Helvetica-Bold', 7.4)
+        c.drawString(x + 6, yy - 4, layer)
+        c.setFont('Helvetica', 7.0)
+        txt = _pdf_truncate_to_width(c, text_value, w - 40, 'Helvetica', 7.0)
+        c.drawString(x + 34, yy - 4, txt)
+        yy -= row_h
+    c.restoreState()
+
+
 def create_loading_pdf(
     placements_df: pd.DataFrame,
     platforms_df: pd.DataFrame,
@@ -6633,6 +6713,10 @@ def create_loading_pdf(
         _pdf_draw_view(c, placements_df, platform, margin + 780, 452, 220, 170, 'back', 'Stirnansicht hinten', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
         _pdf_draw_view(c, placements_df, platform, margin + 780, 165, 220, 170, 'front', 'Stirnansicht vorne', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False)
         _pdf_draw_view(c, placements_df, platform, margin + 1025, 165, 140, 435, 'top_rotated', 'Draufsicht', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True)
+
+        # V110: kompakte Lagentabelle als Zusatzlegende neben den Ansichten.
+        layer_rows = _pdf_layer_table_data_for_platform(placements_df, platform, bundle_overview_only=bundle_overview_only)
+        _pdf_draw_layer_table(c, margin + 780, 24, 220, 122, layer_rows, title='Lagentabelle (unten → oben)')
 
         # Qualitätssicherung kompakt oben rechts, getrennt vom Infofeld.
         c.setStrokeColor(colors.black)
@@ -8236,15 +8320,21 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
     center_geometric = True
     max_fuhren = col4.number_input('Max. Fuhren Sicherheitslimit', min_value=1, max_value=200, value=50, step=1)
 
+    # V111: Arbeitskopie für die eigentliche Verladung.
+    # Sie darf zusätzliche Kontroll-/Gruppierungsspalten bekommen; die Original-BVX bleibt unverändert.
+    sorted_parts_for_loading = sorted_parts.copy()
+    effective_fuhre_split_attr = ''
+    loading_group_rows: List[Dict[str, Any]] = []
+
     with st.expander('6b. Pritschen-Grenzen / Gruppen', expanded=False):
-        st.caption('Damit kann z. B. Etappe 1 auf eigene Pritsche(n) und Etappe 2 auf eigene Pritsche(n). Gilt für Bundbildung und Einzelteile.')
+        st.caption('Damit können beliebige Attribut-Werte gemeinsam auf eine Pritsche geladen oder sauber getrennt werden. Beispiel: User_Attribut_2 → Etappe 3 + Etappe 6 gemeinsam.')
         gcol1, gcol2 = st.columns(2)
         fuhre_split_attr = gcol1.selectbox(
             'Fuhren/Pritschen nach Attribut trennen',
             ['Aus'] + sort_options,
             index=0,
-            key='fuhre_split_attr_v94',
-            help='Beispiel: Unit / Etappe. Ohne Restplatz-Auffüllung wird keine nächste Gruppe auf dieselbe Fuhre geladen.'
+            key='fuhre_split_attr_v111',
+            help='Beliebiges Attribut wählen, z. B. User_Attribut_2, Paket, Geschoss, Qualität. Ohne Restplatz-Auffüllung wird keine nächste Gruppe auf dieselbe Fuhre geladen.'
         )
         fill_remainder_next_group = gcol2.checkbox(
             'Restplatz mit nächster Gruppe auffüllen',
@@ -8253,7 +8343,65 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
             help='Aus = harte Pritschengrenze je Gruppe. Ein = nächste Gruppe darf freien Restplatz nutzen.'
         )
 
+        effective_fuhre_split_attr = fuhre_split_attr
+        if fuhre_split_attr not in ['Aus', 'Keine'] and fuhre_split_attr in sorted_parts_for_loading.columns:
+            attr_values = _unique_options([
+                _format_label_value(v)
+                for v in sorted_parts_for_loading[fuhre_split_attr].tolist()
+                if _format_label_value(v)
+            ])
+            st.caption(f'Vorhandene Werte in {fuhre_split_attr}: ' + (', '.join(attr_values[:30]) if attr_values else 'keine'))
+
+            use_custom_loading_groups = st.checkbox(
+                'Attributwerte individuell zu Verladegruppen zusammenfassen',
+                value=False,
+                key='custom_loading_groups_v111',
+                help='Damit können z. B. Etappe 3 und Etappe 6 als gemeinsame Verladegruppe behandelt werden.'
+            )
+
+            if use_custom_loading_groups and attr_values:
+                st.caption('Werte, die in keiner Gruppe gewählt werden, bleiben automatisch als eigene Gruppe getrennt.')
+                assigned_values: Dict[str, str] = {}
+                for group_idx in range(1, 4):
+                    selected_values = st.multiselect(
+                        f'Verladegruppe {group_idx} - Werte gemeinsam laden',
+                        attr_values,
+                        default=[],
+                        key=f'custom_loading_group_{group_idx}_v111',
+                    )
+                    selected_values = _unique_options([_format_label_value(v) for v in selected_values if _format_label_value(v)])
+                    if not selected_values:
+                        continue
+                    group_label = f'G{group_idx}: ' + ' + '.join(selected_values)
+                    loading_group_rows.append({
+                        'Gruppe': f'G{group_idx}',
+                        'Attribut': fuhre_split_attr,
+                        'Werte gemeinsam': ' + '.join(selected_values),
+                        'Gruppenname': group_label,
+                    })
+                    for value in selected_values:
+                        # Falls ein Wert aus Versehen in zwei Gruppen gewählt wird, gewinnt die erste Gruppe.
+                        assigned_values.setdefault(value, group_label)
+
+                if assigned_values:
+                    sorted_parts_for_loading['Verladegruppen_Attribut'] = fuhre_split_attr
+                    sorted_parts_for_loading['Verladegruppen_Wert'] = sorted_parts_for_loading[fuhre_split_attr].apply(_format_label_value)
+                    sorted_parts_for_loading['Verladegruppe_App'] = sorted_parts_for_loading['Verladegruppen_Wert'].apply(
+                        lambda v: assigned_values.get(_format_label_value(v), _format_label_value(v))
+                    )
+                    effective_fuhre_split_attr = 'Verladegruppe_App'
+                    st.dataframe(pd.DataFrame(loading_group_rows), use_container_width=True, hide_index=True)
+
+                    with st.expander('Kontrolle Bauteile mit Verladegruppe', expanded=False):
+                        st.dataframe(sorted_parts_for_loading, use_container_width=True, hide_index=True)
+                else:
+                    st.info('Noch keine Werte in eine Verladegruppe gewählt. Es wird wie bisher nach dem Attribut getrennt.')
+        elif fuhre_split_attr not in ['Aus', 'Keine']:
+            st.warning(f'Das Attribut {fuhre_split_attr} wurde in den Bauteilen nicht gefunden.')
+
     project_meta['Pritschen_Trennattribut'] = fuhre_split_attr
+    project_meta['Pritschen_Trennattribut_wirksam'] = effective_fuhre_split_attr
+    project_meta['Verladegruppen'] = ' | '.join([f"{r['Gruppe']}: {r['Werte gemeinsam']}" for r in loading_group_rows]) if loading_group_rows else ''
     project_meta['Restplatz_mit_naechster_Gruppe_auffuellen'] = bool(fill_remainder_next_group)
 
     with st.expander('6c. Verladung mit Runge', expanded=False):
@@ -8331,7 +8479,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
 
     if verladeart == 'Automatisch':
         placements_df, summary_df, platforms_used_df, fuhren_log_df, plan_units_df = create_variant_a_loading_plan(
-            sorted_parts,
+            sorted_parts_for_loading,
             options_edit,
             pritschen_edit,
             standards=standards,
@@ -8353,7 +8501,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
             bundle_order_flex_percent=float(bundle_order_flex_percent),
             prevent_wide_on_narrow=bool(prevent_wide_on_narrow),
             min_support_width_ratio=float(min_support_width_percent) / 100.0,
-            fuhre_split_attr=fuhre_split_attr,
+            fuhre_split_attr=effective_fuhre_split_attr,
             fill_remainder_next_group=bool(fill_remainder_next_group),
         )
         # Ab hier arbeitet die App mit den tatsächlich je Pritschenblock gebildeten Verladeeinheiten.
@@ -8447,9 +8595,9 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
         layer_control_df = build_control_layer_table(edited_placements_df, platforms_used_df)
         control_issue_df = build_control_issue_table(bundle_control_df, assignment_control_df, layer_control_df)
 
-        st.markdown('**1. Bauteile sortiert**')
-        part_cols = [c for c in ['Bauteilnummer', 'Name', 'Pak/Unit', 'Länge_mm', 'Breite_mm', 'Höhe_mm', 'Gewicht_kg', 'Volumen_m3', 'Qualität', 'Profil'] if c in sorted_parts.columns]
-        st.dataframe(sorted_parts[part_cols] if part_cols else sorted_parts, use_container_width=True, hide_index=True)
+        st.markdown('**1. Bauteile sortiert / Attribute komplett**')
+        st.caption('Hier werden bewusst alle verfügbaren Attribute angezeigt, wie bei „Bauteile anzeigen“. Zusätzlich sichtbar: Verladegruppen-Spalten, falls in 6b gebildet.')
+        st.dataframe(sorted_parts_for_loading, use_container_width=True, hide_index=True)
 
         st.markdown('**2. Bunde / Verladeeinheiten gebildet**')
         st.dataframe(bundle_control_df, use_container_width=True, hide_index=True)
