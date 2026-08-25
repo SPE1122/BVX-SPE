@@ -1516,6 +1516,77 @@ def _support_area_ratio_for_candidate(state: Dict[str, Any], x: float, y: float,
     return max(0.0, min(1.0, supported_area / footprint))
 
 
+def _edge_free_span_mm(total0: float, total1: float, intervals: List[Tuple[float, float]]) -> float:
+    """Grösster freier Randüberhang vor/nach den tragenden Intervallen."""
+    total0 = float(total0)
+    total1 = float(total1)
+    clean = sorted((max(total0, float(a)), min(total1, float(b))) for a, b in intervals if float(b) > float(a))
+    clean = [(a, b) for a, b in clean if b > a]
+    if not clean:
+        return max(0.0, total1 - total0)
+    supported_start = min(a for a, _b in clean)
+    supported_end = max(b for _a, b in clean)
+    return max(0.0, supported_start - total0, total1 - supported_end)
+
+
+def _support_metrics_for_candidate(state: Dict[str, Any], x: float, y: float, z: float, length: float, width: float) -> Dict[str, float]:
+    """V114: Auflagefläche plus freier Überhang in Länge und Breite.
+
+    - area_ratio: gestützte Fläche / Grundfläche
+    - free_length_mm: grösster freier Randüberhang vorne/hinten
+    - free_side_mm: grösster freier Randüberhang links/rechts
+    """
+    length = float(length)
+    width = float(width)
+    footprint = max(1.0, length * width)
+    base_z = float(state.get('base_wood_height', 0.0))
+    if float(z) <= base_z + 0.1:
+        return {'area_ratio': 1.0, 'free_length_mm': 0.0, 'free_side_mm': 0.0}
+
+    rows = _real_load_placement_rows(state)
+    if not rows or length <= 0 or width <= 0:
+        return {'area_ratio': 0.0, 'free_length_mm': max(0.0, length), 'free_side_mm': max(0.0, width)}
+
+    tops: List[float] = []
+    for r in rows:
+        rz = safe_number(r.get('Z_mm'), 0.0)
+        rh = safe_number(r.get('Höhe_mm'), 0.0)
+        top = rz + rh
+        if top <= float(z) + 1.0:
+            tops.append(top)
+    if not tops:
+        return {'area_ratio': 0.0, 'free_length_mm': max(0.0, length), 'free_side_mm': max(0.0, width)}
+    top_z = max(tops)
+
+    x0, x1 = float(x), float(x) + length
+    y0, y1 = float(y), float(y) + width
+    overlaps: List[Tuple[float, float, float, float]] = []
+    x_intervals: List[Tuple[float, float]] = []
+    y_intervals: List[Tuple[float, float]] = []
+    for r in rows:
+        rz = safe_number(r.get('Z_mm'), 0.0)
+        rh = safe_number(r.get('Höhe_mm'), 0.0)
+        if abs((rz + rh) - top_z) > 2.0:
+            continue
+        rx0 = safe_number(r.get('X_mm'), 0.0)
+        rx1 = rx0 + safe_number(r.get('Länge_mm'), 0.0)
+        ry0 = safe_number(r.get('Y_mm'), 0.0)
+        ry1 = ry0 + safe_number(r.get('Breite_mm'), 0.0)
+        ox0, ox1 = max(x0, rx0), min(x1, rx1)
+        oy0, oy1 = max(y0, ry0), min(y1, ry1)
+        if ox1 > ox0 and oy1 > oy0:
+            overlaps.append((ox0, ox1, oy0, oy1))
+            x_intervals.append((ox0, ox1))
+            y_intervals.append((oy0, oy1))
+
+    supported_area = _rect_union_area(overlaps)
+    return {
+        'area_ratio': max(0.0, min(1.0, supported_area / footprint)),
+        'free_length_mm': _edge_free_span_mm(x0, x1, x_intervals),
+        'free_side_mm': _edge_free_span_mm(y0, y1, y_intervals),
+    }
+
+
 def can_place_stable(state: Dict[str, Any], unit: pd.Series, x: float, y: float, z: float, length: float, width: float, height: float, weight: float) -> bool:
     if not can_place(state, x, y, z, length, width, height, weight):
         return False
@@ -1525,12 +1596,19 @@ def can_place_stable(state: Dict[str, Any], unit: pd.Series, x: float, y: float,
     if float(z) <= base_z + 0.1:
         return True
 
-    # V112: nicht mehr nur Bunde prüfen. Auch Einzel-Bauteile müssen als obere
-    # Lage genügend echte Auflagefläche haben. Dadurch werden schwebende Elemente
-    # bereits beim Verladen verhindert und nicht nur nachträglich markiert.
+    # V114: Auflage wird nicht mehr nur als Prozentfläche bewertet. Optional
+    # werden zusätzlich freie Überhänge in Länge und Breite begrenzt.
     min_ratio = max(0.0, min(1.0, float(state.get('min_support_width_ratio', 0.80))))
-    area_ratio = _support_area_ratio_for_candidate(state, x, y, z, length, width)
-    return area_ratio + 1e-6 >= min_ratio
+    max_free_length = max(0.0, float(state.get('max_unsupported_length_mm', 0.0) or 0.0))
+    max_free_side = max(0.0, float(state.get('max_unsupported_side_mm', 0.0) or 0.0))
+    metrics = _support_metrics_for_candidate(state, x, y, z, length, width)
+    if metrics.get('area_ratio', 0.0) + 1e-6 < min_ratio:
+        return False
+    if max_free_length > 0 and metrics.get('free_length_mm', 0.0) > max_free_length + 1e-6:
+        return False
+    if max_free_side > 0 and metrics.get('free_side_mm', 0.0) > max_free_side + 1e-6:
+        return False
+    return True
 
 
 def commit_place(
@@ -1722,6 +1800,9 @@ def create_loading_plan(
     bundle_order_flex_percent: float = 0.0,
     prevent_wide_on_narrow: bool = True,
     min_support_width_ratio: float = 0.80,
+    max_unsupported_length_mm: float = 0.0,
+    max_unsupported_side_mm: float = 0.0,
+    prefer_length_before_stack: bool = True,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Greedy-Verladevorschlag für eine einzelne Fuhre."""
     if units.empty or platforms.empty:
@@ -1944,6 +2025,8 @@ def _clean_try_place_on_current_layer(
                     nx, nz = new_common
                     if can_place_stable(state, unit, nx, y, nz, use_length, use_width, use_height, weight):
                         candidates.append((nx, nz, True))
+            if bool(state.get('prefer_length_before_stack', True)) and any(not item[2] for item in candidates):
+                candidates = [item for item in candidates if not item[2]]
             for x, z, new_layer in candidates:
                 score = z * 1000000.0 + x * 1000.0 - use_width
                 candidate = {
@@ -1981,6 +2064,8 @@ def _clean_try_place_on_current_layer(
                     nx, nz = new_side
                     if can_place_stable(state, unit, nx, y, nz, use_length, use_width, use_height, weight):
                         candidates.append((nx, nz, True))
+            if bool(state.get('prefer_length_before_stack', True)) and any(not item[2] for item in candidates):
+                candidates = [item for item in candidates if not item[2]]
             for x, z, new_layer in candidates:
                 other = 'right' if side == 'left' else 'left'
                 after_x = x + use_length + float(state['gap_length'])
@@ -2058,6 +2143,9 @@ def create_loading_plan(
     bundle_order_flex_percent: float = 0.0,
     prevent_wide_on_narrow: bool = True,
     min_support_width_ratio: float = 0.80,
+    max_unsupported_length_mm: float = 0.0,
+    max_unsupported_side_mm: float = 0.0,
+    prefer_length_before_stack: bool = True,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Greedy-Verladevorschlag für eine einzelne Fuhre."""
     if units.empty or platforms.empty:
@@ -2404,6 +2492,9 @@ def create_loading_plan(
     bundle_order_flex_percent: float = 0.0,
     prevent_wide_on_narrow: bool = True,
     min_support_width_ratio: float = 0.80,
+    max_unsupported_length_mm: float = 0.0,
+    max_unsupported_side_mm: float = 0.0,
+    prefer_length_before_stack: bool = True,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """V17: ruhiger Lagen-Verladevorschlag für eine einzelne Fuhre.
 
@@ -2423,6 +2514,9 @@ def create_loading_plan(
     for state in states:
         state['prevent_wide_on_narrow'] = bool(prevent_wide_on_narrow)
         state['min_support_width_ratio'] = max(0.0, min(1.0, float(min_support_width_ratio)))
+        state['max_unsupported_length_mm'] = max(0.0, float(max_unsupported_length_mm or 0.0))
+        state['max_unsupported_side_mm'] = max(0.0, float(max_unsupported_side_mm or 0.0))
+        state['prefer_length_before_stack'] = bool(prefer_length_before_stack)
         _clean_init_runtime_state(state)
 
     not_loaded: List[Dict[str, Any]] = []
@@ -3026,6 +3120,9 @@ def create_variant_a_loading_plan(
     bundle_order_flex_percent: float = 0.0,
     prevent_wide_on_narrow: bool = True,
     min_support_width_ratio: float = 0.80,
+    max_unsupported_length_mm: float = 0.0,
+    max_unsupported_side_mm: float = 0.0,
+    prefer_length_before_stack: bool = True,
     fuhre_split_attr: str = '',
     fill_remainder_next_group: bool = False,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -3170,6 +3267,9 @@ def create_variant_a_loading_plan(
             bundle_order_flex_percent=bundle_order_flex_percent,
             prevent_wide_on_narrow=prevent_wide_on_narrow,
             min_support_width_ratio=min_support_width_ratio,
+            max_unsupported_length_mm=max_unsupported_length_mm,
+            max_unsupported_side_mm=max_unsupported_side_mm,
+            prefer_length_before_stack=prefer_length_before_stack,
         )
         if placements_try is None or placements_try.empty:
             return False, pd.DataFrame(), pd.DataFrame()
@@ -8505,7 +8605,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
         pritschen_edit['Rungenhoehe_mm'] = float(runge_height_mm)
 
     with st.expander('6d. Bund-Reihenfolge / Ladesicherheit', expanded=False):
-        st.caption('Die Bundfolge kann leicht gelockert werden. Es werden nur ganze Bunde verschoben; ein Bund wird nicht aufgelöst.')
+        st.caption('V114: Auflage nicht nur nach Prozent prüfen. Zusätzlich können freie Überhänge in Länge/Breite begrenzt werden.')
         scol1, scol2, scol3 = st.columns(3)
         bundle_order_flex_percent = scol1.number_input(
             'Bund-Reihenfolge lockern %',
@@ -8518,7 +8618,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
         prevent_wide_on_narrow = scol2.checkbox(
             'Obere Bauteile/Bunde mit ungenügender Auflage verhindern',
             value=False,
-            help='V113: Gilt auch ohne Bund. Die Prozentgrenze wirkt nur, wenn dieser Haken aktiv ist. Obere Einzelteile und Bunde werden nur gesetzt, wenn darunter genügend Auflagefläche vorhanden ist.'
+            help='Gilt auch ohne Bund. Die folgenden Grenzen wirken nur, wenn dieser Haken aktiv ist.'
         )
         min_support_width_percent = scol3.number_input(
             'Mindestauflagefläche beim Verladen %',
@@ -8526,7 +8626,29 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
             max_value=100,
             value=60,
             step=5,
-            help='Grenze für die echte Verladeprüfung. Beispiel 60 % = obere Einheit braucht mindestens ca. 60 % Auflagefläche. 100 % ist sehr streng und erzeugt meist mehr Fuhren.'
+            help='Grenze für die echte Verladeprüfung. Beispiel 30–60 % als Praxisbereich; 100 % ist sehr streng.'
+        )
+        ocol1, ocol2, ocol3 = st.columns(3)
+        max_free_length_mm = ocol1.number_input(
+            'Max. freier Überhang Länge mm',
+            min_value=0,
+            max_value=5000,
+            value=0,
+            step=50,
+            help='0 = keine zusätzliche Begrenzung. Wirkt auf obere Bauteile: grösster freier Randüberhang vorne/hinten.'
+        )
+        max_free_side_mm = ocol2.number_input(
+            'Max. freier Überhang seitlich mm',
+            min_value=0,
+            max_value=2500,
+            value=0,
+            step=25,
+            help='0 = keine zusätzliche Begrenzung. Wirkt auf obere Bauteile: grösster freier Randüberhang links/rechts.'
+        )
+        prefer_length_before_stack = ocol3.checkbox(
+            'Zuerst hintereinander versuchen',
+            value=True,
+            help='Wenn auf gleicher Lage eine gültige Position gefunden wird, wird nicht sofort eine neue Lage oben begonnen.'
         )
 
     project_meta['Bund_Reihenfolge_lockern_%'] = int(bundle_order_flex_percent)
@@ -8534,10 +8656,16 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
     project_meta['Breiten_Bund_auf_schmaler_Auflage_verhindern'] = bool(prevent_wide_on_narrow)
     project_meta['Mindestauflagefläche_beim_Verladen_%'] = int(min_support_width_percent)
     project_meta['Mindest_Stützbreite_obere_Bunde_%'] = int(min_support_width_percent)
+    project_meta['Max_freier_Überhang_Länge_mm'] = int(max_free_length_mm)
+    project_meta['Max_freier_Überhang_seitlich_mm'] = int(max_free_side_mm)
+    project_meta['Zuerst_hintereinander_versuchen'] = bool(prefer_length_before_stack)
     if not pritschen_edit.empty:
         pritschen_edit = pritschen_edit.copy()
         pritschen_edit['Breite_Bund_auf_schmal_verhindern'] = bool(prevent_wide_on_narrow)
         pritschen_edit['Mindest_Stützbreite_%'] = float(min_support_width_percent)
+        pritschen_edit['Max_freier_Überhang_Länge_mm'] = float(max_free_length_mm)
+        pritschen_edit['Max_freier_Überhang_seitlich_mm'] = float(max_free_side_mm)
+        pritschen_edit['Zuerst_hintereinander_versuchen'] = bool(prefer_length_before_stack)
 
     st.subheader('7. Auflage / Unterbau')
     st.caption('V113: Prüfung und Einzeichnen sind getrennt. Die App kann Auflage/Unterbau prüfen und warnen, ohne dass Auflager automatisch im PDF/BSD gezeichnet werden.')
@@ -8600,6 +8728,9 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
             bundle_order_flex_percent=float(bundle_order_flex_percent),
             prevent_wide_on_narrow=bool(prevent_wide_on_narrow),
             min_support_width_ratio=float(min_support_width_percent) / 100.0,
+            max_unsupported_length_mm=float(max_free_length_mm),
+            max_unsupported_side_mm=float(max_free_side_mm),
+            prefer_length_before_stack=bool(prefer_length_before_stack),
             fuhre_split_attr=effective_fuhre_split_attr,
             fill_remainder_next_group=bool(fill_remainder_next_group),
         )
@@ -8743,8 +8874,8 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
         st.dataframe(edited_summary_df, use_container_width=True, hide_index=True)
 
 
-        with st.expander('V113: einzelne Fuhre / Pritsche neu berechnen', expanded=False):
-            st.caption('Damit kannst du z. B. nur F05/F07 mit eigenen Werten neu testen. Bestehende Fuhren werden nicht automatisch verändert. Eine zusätzliche Fuhre wird nur nach ausdrücklicher Freigabe vorbereitet.')
+        with st.expander('V114: einzelne Fuhre / Pritsche neu berechnen', expanded=False):
+            st.caption('Damit kannst du z. B. nur F05/F07 mit eigenen Auflage-/Überhangwerten neu testen. Bestehende Fuhren werden nicht automatisch verändert. Eine zusätzliche Fuhre wird nur nach ausdrücklicher Freigabe vorbereitet.')
             if verladeart != 'Automatisch':
                 st.info('Diese selektive Neuberechnung ist für die automatische Verladung gedacht. Im manuellen Modus bitte über „Manuelle Verladung“ arbeiten.')
             elif platforms_used_df is None or platforms_used_df.empty or edited_placements_df is None or edited_placements_df.empty:
@@ -8775,12 +8906,12 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                             max_value=5000.0,
                             value=float(safe_number(p_row.get('Max_Höhe_mm'), safe_number(standards.get('Max_Höhe_mm'), 2800.0))),
                             step=20.0,
-                            key='v113_recalc_max_height',
+                            key='v114_recalc_max_height',
                         )
                         recalc_prevent_support = rc2.checkbox(
                             'ungenügende Auflage verhindern',
                             value=bool(prevent_wide_on_narrow),
-                            key='v113_recalc_prevent_support',
+                            key='v114_recalc_prevent_support',
                         )
                         recalc_min_support = rc3.number_input(
                             'Mindestauflage diese Fuhre %',
@@ -8788,10 +8919,34 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                             max_value=100,
                             value=int(min_support_width_percent),
                             step=5,
-                            key='v113_recalc_min_support',
+                            key='v114_recalc_min_support',
                         )
-                        recalc_allow_beside = rc4.checkbox('nebeneinander erlauben', value=bool(allow_beside), key='v113_recalc_beside')
-                        recalc_allow_stack = st.checkbox('stapeln erlauben', value=bool(allow_stack), key='v113_recalc_stack')
+                        recalc_allow_beside = rc4.checkbox('nebeneinander erlauben', value=bool(allow_beside), key='v114_recalc_beside')
+                        oc1, oc2, oc3 = st.columns(3)
+                        recalc_max_free_length = oc1.number_input(
+                            'Max. freier Überhang Länge mm',
+                            min_value=0,
+                            max_value=5000,
+                            value=int(max_free_length_mm),
+                            step=50,
+                            key='v114_recalc_free_length',
+                        )
+                        recalc_max_free_side = oc2.number_input(
+                            'Max. freier Überhang seitlich mm',
+                            min_value=0,
+                            max_value=2500,
+                            value=int(max_free_side_mm),
+                            step=25,
+                            key='v114_recalc_free_side',
+                        )
+                        recalc_prefer_length = oc3.checkbox(
+                            'zuerst hintereinander versuchen',
+                            value=bool(prefer_length_before_stack),
+                            key='v114_recalc_prefer_length',
+                        )
+                        sc1, sc2 = st.columns(2)
+                        recalc_allow_stack = sc1.checkbox('stapeln erlauben', value=bool(allow_stack), key='v114_recalc_stack')
+                        sc2.caption('Neue Zusatzfuhre wird weiterhin nur nach deiner Bestätigung erzeugt.')
 
                         def _v113_preview_for_units(local_units: pd.DataFrame, local_platform: pd.Series, suffix: str = '') -> Tuple[pd.DataFrame, pd.DataFrame]:
                             local_platform = local_platform.copy()
@@ -8811,6 +8966,9 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                                 bundle_order_flex_percent=float(bundle_order_flex_percent),
                                 prevent_wide_on_narrow=bool(recalc_prevent_support),
                                 min_support_width_ratio=float(recalc_min_support) / 100.0,
+                                max_unsupported_length_mm=float(recalc_max_free_length),
+                                max_unsupported_side_mm=float(recalc_max_free_side),
+                                prefer_length_before_stack=bool(recalc_prefer_length),
                             )
 
                         if st.button('Vorschau neu berechnen', key='v113_recalc_preview_button'):
@@ -8818,6 +8976,9 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                             preview_p['Max_Höhe_mm'] = float(recalc_max_height)
                             preview_p['Breite_Bund_auf_schmal_verhindern'] = bool(recalc_prevent_support)
                             preview_p['Mindest_Stützbreite_%'] = float(recalc_min_support)
+                            preview_p['Max_freier_Überhang_Länge_mm'] = float(recalc_max_free_length)
+                            preview_p['Max_freier_Überhang_seitlich_mm'] = float(recalc_max_free_side)
+                            preview_p['Zuerst_hintereinander_versuchen'] = bool(recalc_prefer_length)
                             preview_placements, preview_summary = _v113_preview_for_units(target_units, preview_p)
                             st.session_state['v113_recalc_preview'] = {
                                 'platform': str(recalc_platform),
