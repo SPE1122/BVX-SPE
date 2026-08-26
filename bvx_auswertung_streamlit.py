@@ -1399,7 +1399,7 @@ def _support_width_ratio_for_candidate(state: Dict[str, Any], x: float, y: float
     """
     base_z = float(state.get('base_wood_height', 0.0))
     if float(z) <= base_z + 0.1:
-        return 1.0
+        return float(_base_support_metrics_for_candidate(state, x, y, length, width).get('area_ratio', 0.0))
 
     rows = _real_load_placement_rows(state)
     if not rows or float(width) <= 0:
@@ -1465,6 +1465,45 @@ def _rect_union_area(rects: List[Tuple[float, float, float, float]]) -> float:
     return area
 
 
+
+def _platform_physical_support_rect_from_state(state: Dict[str, Any]) -> Tuple[float, float, float, float]:
+    """V117: physische Pritsche als echte untere Auflagefläche.
+
+    X-Koordinaten der Verladung laufen über den effektiven Raum
+    (Überhang hinten + Pritschenlänge + Überhang vorne). Die Pritsche selbst
+    trägt aber nur zwischen Überhang_hinten und Überhang_hinten + Länge_mm.
+    Kantholz darf dadurch nicht im freien Überhang als Auflage zählen.
+    """
+    base_len = max(0.0, float(state.get('Länge_mm', 0.0) or 0.0))
+    back_allow = max(0.0, float(state.get('Überhang_hinten_mm', 0.0) or 0.0))
+    platform_width = max(0.0, float(state.get('Breite_mm', 0.0) or 0.0))
+    return back_allow, back_allow + base_len, 0.0, platform_width
+
+
+def _base_support_metrics_for_candidate(state: Dict[str, Any], x: float, y: float, length: float, width: float) -> Dict[str, float]:
+    """V117: Auflage auf der Pritsche/Kantholz real begrenzen.
+
+    Die erste Lage darf überhängen, aber der Überhang ist nicht getragen.
+    Deshalb wird als Basisauflage nur der Schnitt mit der physischen Pritsche
+    bewertet. Das korrigiert den alten Fehler, dass Kantholz wie eine
+    durchgehende Ebene über die ganze Ladung wirkte.
+    """
+    x0, x1 = float(x), float(x) + float(length)
+    y0, y1 = float(y), float(y) + float(width)
+    px0, px1, py0, py1 = _platform_physical_support_rect_from_state(state)
+    ox0, ox1 = max(x0, px0), min(x1, px1)
+    oy0, oy1 = max(y0, py0), min(y1, py1)
+    footprint = max(1.0, float(length) * float(width))
+    if ox1 <= ox0 or oy1 <= oy0:
+        return {'area_ratio': 0.0, 'free_length_mm': max(0.0, float(length)), 'free_side_mm': max(0.0, float(width))}
+    overlap_area = (ox1 - ox0) * (oy1 - oy0)
+    return {
+        'area_ratio': max(0.0, min(1.0, overlap_area / footprint)),
+        'free_length_mm': _edge_free_span_mm(x0, x1, [(ox0, ox1)]),
+        'free_side_mm': _edge_free_span_mm(y0, y1, [(oy0, oy1)]),
+    }
+
+
 def _support_area_ratio_for_candidate(state: Dict[str, Any], x: float, y: float, z: float, length: float, width: float) -> float:
     """Ermittelt die gestützte Auflagefläche direkt unter einer geplanten Einheit.
 
@@ -1477,7 +1516,7 @@ def _support_area_ratio_for_candidate(state: Dict[str, Any], x: float, y: float,
     footprint = max(1.0, length * width)
     base_z = float(state.get('base_wood_height', 0.0))
     if float(z) <= base_z + 0.1:
-        return 1.0
+        return float(_base_support_metrics_for_candidate(state, x, y, length, width).get('area_ratio', 0.0))
 
     rows = _real_load_placement_rows(state)
     if not rows or length <= 0 or width <= 0:
@@ -1541,7 +1580,7 @@ def _support_metrics_for_candidate(state: Dict[str, Any], x: float, y: float, z:
     footprint = max(1.0, length * width)
     base_z = float(state.get('base_wood_height', 0.0))
     if float(z) <= base_z + 0.1:
-        return {'area_ratio': 1.0, 'free_length_mm': 0.0, 'free_side_mm': 0.0}
+        return _base_support_metrics_for_candidate(state, x, y, length, width)
 
     rows = _real_load_placement_rows(state)
     if not rows or length <= 0 or width <= 0:
@@ -1593,8 +1632,10 @@ def can_place_stable(state: Dict[str, Any], unit: pd.Series, x: float, y: float,
     if not bool(state.get('prevent_wide_on_narrow', True)):
         return True
     base_z = float(state.get('base_wood_height', 0.0))
-    if float(z) <= base_z + 0.1:
-        return True
+
+    # V117: Auch die erste Lage wird gegen die physische Pritsche geprüft.
+    # Kantholz zählt nicht mehr als fiktive Auflage im freien Überhang.
+    # Die Prüfung bleibt nur aktiv, wenn der Anwender die Auflage-Sperre einschaltet.
 
     # V116: Auflage kann selektiv nicht nur als Prozentfläche bewertet werden. Optional
     # werden zusätzlich freie Überhänge in Länge und Breite begrenzt.
@@ -5663,13 +5704,26 @@ def _pdf_add_visible_spacer_rows(rows: pd.DataFrame, platform: pd.Series, view: 
         })
         return base
 
-    # Kantholz erste Lage: als durchgehende Unterlage der tatsächlich belegten Fläche anzeigen.
+    # V117 Kantholz erste Lage: nicht mehr als durchgehende Ebene über die
+    # komplette Ladung zeichnen. Kantholz liegt quer auf der physischen Pritsche
+    # und erzeugt im Überhang vorne/hinten keine Auflage.
     if base_height > 0:
-        min_x = safe_number(rows['X_mm'].min(), 0.0)
-        max_x = safe_number((rows['X_mm'] + rows['Länge_mm']).max(), min_x)
-        min_y = safe_number(rows['Y_mm'].min(), 0.0)
-        max_y = safe_number((rows['Y_mm'] + rows['Breite_mm']).max(), min_y)
-        helpers.append(helper_row(None, 'Kantholz', _fmt_bsd_mm_label('Kantholz', base_height), min_x, min_y, 0.0, max(0.0, max_x - min_x), max(0.0, max_y - min_y), base_height))
+        base_len = safe_number(platform.get('Länge_mm'), 0.0)
+        back_allow = safe_number(platform.get('Überhang_hinten_mm'), 0.0)
+        platform_width = safe_number(platform.get('Breite_mm'), 0.0)
+        support_len = max(80.0, min(180.0, base_height * 1.6))
+        px0 = back_allow
+        px1 = back_allow + base_len
+        if base_len > support_len and platform_width > 0:
+            centers = [px0 + support_len / 2.0, (px0 + px1) / 2.0, px1 - support_len / 2.0]
+            seen_centers = set()
+            for cx in centers:
+                key = round(cx, 1)
+                if key in seen_centers:
+                    continue
+                seen_centers.add(key)
+                kx = max(px0, min(px1 - support_len, cx - support_len / 2.0))
+                helpers.append(helper_row(None, 'Kantholz', _fmt_bsd_mm_label('Kantholz', base_height), kx, 0.0, 0.0, support_len, platform_width, base_height))
 
     # Zwischenlagen: vor allem Bundeinlage/Lagenholz zwischen separaten Bundlagen.
     # Die Positionen entsprechen den Z-Sprüngen im Ladeplan BSD.
@@ -5713,41 +5767,41 @@ def _pdf_add_visible_spacer_rows(rows: pd.DataFrame, platform: pd.Series, view: 
 
 
 def _pdf_draw_underbau_blocks(c, rx: float, ry: float, rw: float, rh: float, view: str, label: str) -> None:
-    """Zeichnet Unterbau als Hilfselement: in Draufsicht gestrichelt, in Ansichten als Klötze."""
+    """V117: Unterbau/Auflager nur dezent als transparente Hilfsmarkierung.
+
+    Wichtig: Auflager dürfen in der Stirnansicht keine Bauteile und keine
+    Nummern verdecken. Deshalb wird nur gepunktet/gestrichelt im Hintergrund
+    gezeichnet und auf Textlabels weitgehend verzichtet.
+    """
     from reportlab.lib import colors
     if rw <= 0 or rh <= 0:
         return
     c.saveState()
-    c.setStrokeColor(colors.HexColor('#555555'))
-    c.setFillColor(colors.HexColor('#d9d9d9'))
-    c.setLineWidth(0.45)
+    c.setStrokeColor(colors.HexColor('#777777'))
+    c.setLineWidth(0.35)
+    c.setDash(1.3, 2.2)
+    try:
+        c.setFillAlpha(0.08)
+        c.setStrokeAlpha(0.45)
+    except Exception:
+        pass
+    c.setFillColor(colors.HexColor('#efefef'))
 
     if view == 'top':
-        # Nur gestrichelte Kontur, damit Bauteilnummern nicht verdeckt werden.
-        c.setDash(3, 2)
         c.rect(rx, ry, rw, rh, stroke=1, fill=0)
         c.setDash()
-        if rw > 22 and rh > 8:
-            c.setFont('Helvetica', 3.8)
-            c.setFillColor(colors.HexColor('#555555'))
-            c.drawString(rx + 2, ry + 2, str(label).replace('Unterbau', 'UB')[:10])
         c.restoreState()
         return
 
-    # Seiten-/Front-/Rückansichten: nicht als durchgehender Balken, sondern als 2 Auflagerklötze.
-    # Die Klötze werden annähernd quadratisch, aber nie breiter als 25% der Projektion.
-    block_w = max(4.0, min(max(rh, 5.0), rw * 0.22, 38.0))
+    # Seiten-/Front-/Rückansichten: Auflager als zwei dezente Auflagerzonen.
+    block_w = max(3.0, min(max(rh, 4.0), rw * 0.18, 28.0))
     if rw <= block_w * 2.4:
-        # Wenn das Bauteil sehr schmal projiziert ist, nur einen mittigen Klotz zeichnen.
         bx = rx + (rw - block_w) / 2
         c.rect(bx, ry, block_w, rh, stroke=1, fill=1)
     else:
         c.rect(rx, ry, block_w, rh, stroke=1, fill=1)
         c.rect(rx + rw - block_w, ry, block_w, rh, stroke=1, fill=1)
-    if rw > 35 and rh > 7:
-        c.setFont('Helvetica', 4.2)
-        c.setFillColor(colors.HexColor('#333333'))
-        c.drawCentredString(rx + rw / 2, ry + rh / 2 - 1.4, str(label).replace('Unterbau', 'UB')[:14])
+    c.setDash()
     c.restoreState()
 
 def _pdf_draw_view_orientation_helpers(c, ox: float, oy: float, draw_w: float, draw_h: float, view: str, front_at_x_max: bool, left_at_y_max: bool) -> None:
@@ -6074,6 +6128,52 @@ def _pdf_selective_recalc_center_metrics(placements: pd.DataFrame, platform: pd.
     }
 
 
+
+def _v117_basis_metrics_for_platform(placements_df: pd.DataFrame, platform: pd.Series) -> Dict[str, float]:
+    """V117: Kennzahl für tragende Basis der gewählten Fuhre.
+
+    Zeigt in der selektiven Neuberechnung, ob die unterste reale Lage als
+    Gesamtbasis zur darüberliegenden Lastprojektion passt. Es verändert selbst
+    keine Verladung; es ist eine nachvollziehbare Kontrolle für Fuhren wie F03.
+    """
+    if placements_df is None or placements_df.empty or platform is None:
+        return {}
+    pname = str(platform.get('Pritsche', ''))
+    rows = placements_df[placements_df.get('Pritsche', pd.Series(dtype=str)).astype(str).eq(pname)].copy()
+    if rows.empty:
+        return {}
+    helper_types = {'Unterbau', 'Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz'}
+    rows = rows[~rows.get('Typ', pd.Series(dtype=str)).astype(str).isin(helper_types)].copy()
+    if rows.empty:
+        return {}
+    for col in ['X_mm', 'Y_mm', 'Z_mm', 'Länge_mm', 'Breite_mm', 'Gewicht_kg']:
+        rows[col] = pd.to_numeric(rows.get(col, 0.0), errors='coerce').fillna(0.0)
+    base_z = float(rows['Z_mm'].min())
+    base_rows = rows[rows['Z_mm'].sub(base_z).abs() <= 2.0].copy()
+    if base_rows.empty:
+        return {}
+    base_rects = []
+    all_rects = []
+    for _idx, r in base_rows.iterrows():
+        x0 = safe_number(r.get('X_mm')); y0 = safe_number(r.get('Y_mm'))
+        base_rects.append((x0, x0 + safe_number(r.get('Länge_mm')), y0, y0 + safe_number(r.get('Breite_mm'))))
+    for _idx, r in rows.iterrows():
+        x0 = safe_number(r.get('X_mm')); y0 = safe_number(r.get('Y_mm'))
+        all_rects.append((x0, x0 + safe_number(r.get('Länge_mm')), y0, y0 + safe_number(r.get('Breite_mm'))))
+    base_area = _rect_union_area(base_rects)
+    all_area = _rect_union_area(all_rects)
+    upper_weight = float(rows.loc[rows['Z_mm'] > base_z + 2.0, 'Gewicht_kg'].sum()) if 'Gewicht_kg' in rows.columns else 0.0
+    total_weight = float(rows['Gewicht_kg'].sum()) if 'Gewicht_kg' in rows.columns else 0.0
+    return {
+        'Basis_Bauteile': float(len(base_rows)),
+        'Basisfläche_m2': base_area / 1_000_000.0,
+        'Lastprojektion_m2': all_area / 1_000_000.0,
+        'Basis_zu_Lastprojektion_%': 100.0 * base_area / all_area if all_area > 0 else 0.0,
+        'Gewicht_oberhalb_kg': upper_weight,
+        'Gesamtgewicht_kg': total_weight,
+    }
+
+
 def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y: float, w: float, h: float, view: str, title: str, front_at_x_max: bool = False, left_at_y_max: bool = False, bundle_overview_only: bool = False, show_dimensions: bool = True, scale_context: Optional[Dict[str, float]] = None) -> None:
     """Zeichnet eine PDF-Ansicht mit Pritschen- und Ladungsabmessungen.
 
@@ -6307,6 +6407,21 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
     def draw_projected_row(row: pd.Series, ghost: bool = False) -> None:
         px, py, pw, ph, _depth = _pdf_projection_values(row, view, eff_length, width, front_at_x_max, left_at_y_max)
         draw_projected_fragment(row, px, py, pw, ph, ghost=ghost, draw_label=not ghost)
+
+    # V117: Hilfselemente (Kantholz, Einlagen, Unterbau/Auflager) immer zuerst
+    # und im Hintergrund zeichnen. Sie dürfen in Stirn- und Seitenansicht keine
+    # Bauteile überdecken und zählen auch nicht als Sichtblocker für die
+    # Schraffurlogik.
+    helper_draw_types_v117 = {'Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz', 'Unterbau'}
+    if rows is not None and not rows.empty:
+        typ_series_v117 = rows.get('Typ', pd.Series(dtype=str)).astype(str)
+        helper_bg_rows_v117 = rows[typ_series_v117.isin(helper_draw_types_v117)].copy()
+        rows = rows[~typ_series_v117.isin(helper_draw_types_v117)].copy()
+        if not helper_bg_rows_v117.empty:
+            helper_bg_rows_v117['_pdf_sort'] = helper_bg_rows_v117.apply(lambda r: _pdf_visible_sort_value(r, view, eff_length, width, front_at_x_max, left_at_y_max), axis=1)
+            helper_bg_rows_v117 = helper_bg_rows_v117.sort_values(['Z_mm', '_pdf_sort', 'X_mm', 'Y_mm'], kind='stable')
+            for _, helper_row_v117 in helper_bg_rows_v117.iterrows():
+                draw_projected_row(helper_row_v117, ghost=False)
 
     # V116: Stirnansicht mit echter Sichtlogik.
     # Nahe Rechtecke decken entfernte Rechtecke ab; komplett verdeckte Elemente
@@ -9023,8 +9138,8 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
         st.dataframe(edited_summary_df, use_container_width=True, hide_index=True)
 
 
-        with st.expander('V116: einzelne Fuhre / Pritsche neu berechnen', expanded=False):
-            st.caption('Damit kannst du z. B. nur F05/F07 mit eigenen Auflage-/Überhangwerten neu testen. Bestehende Fuhren werden nicht automatisch verändert. Eine zusätzliche Fuhre wird nur nach ausdrücklicher Freigabe vorbereitet.')
+        with st.expander('V117: einzelne Fuhre / Pritsche neu berechnen / Fuhre stabilisieren', expanded=False):
+            st.caption('Damit kannst du z. B. nur F03/F05 mit eigenen Auflage-/Überhangwerten neu testen. Bestehende Fuhren bleiben fix. Eine zusätzliche Fuhre wird nur nach ausdrücklicher Freigabe vorbereitet.')
             if verladeart != 'Automatisch':
                 st.info('Diese selektive Neuberechnung ist für die automatische Verladung gedacht. Im manuellen Modus bitte über „Manuelle Verladung“ arbeiten.')
             elif platforms_used_df is None or platforms_used_df.empty or edited_placements_df is None or edited_placements_df.empty:
@@ -9101,6 +9216,20 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                             value=True,
                             key='v114_recalc_prefer_length',
                         )
+                        bc1, bc2 = st.columns(2)
+                        recalc_stabilize_basis = bc1.checkbox(
+                            'tragende Basis / unterste Lage stabilisieren',
+                            value=False,
+                            key='v117_recalc_stabilize_basis',
+                            help='Nur für die gewählte Fuhre. Versucht eine ruhigere Basis: hintereinander statt nebeneinander bevorzugen und grosse/schwere Teile eher unten halten.'
+                        )
+                        recalc_basis_report = bc2.checkbox(
+                            'Basisprüfung in Vorschau anzeigen',
+                            value=True,
+                            key='v117_recalc_basis_report',
+                        )
+                        if recalc_stabilize_basis:
+                            st.caption('V117: Für diese Vorschau wird nebeneinander auf der Basis reduziert und hintereinander bevorzugt. Andere Fuhren bleiben unverändert.')
                         sc1, sc2 = st.columns(2)
                         recalc_allow_stack = sc1.checkbox('stapeln erlauben', value=bool(allow_stack), key='v114_recalc_stack')
                         sc2.caption('Neue Zusatzfuhre wird weiterhin nur nach deiner Bestätigung erzeugt.')
@@ -9111,19 +9240,35 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                         if recalc_keep_sort_hint:
                             st.caption('V116: In der Vorschau werden die Bauteile aus der vorhandenen Fuhre in deren aktueller Reihenfolge neu versucht. Globale Fuhren davor/danach bleiben fix.')
 
+                        def _v117_basis_order_units(local_units: pd.DataFrame) -> pd.DataFrame:
+                            # Lokale Reparatur: nur für die gewählte Fuhre.
+                            # Grössere/schwerere Einheiten werden bei aktivierter Basis-Stabilisierung
+                            # früher versucht, damit sie eher unten und ruhiger verteilt liegen.
+                            if local_units is None or local_units.empty:
+                                return local_units
+                            ordered = local_units.copy()
+                            ordered['_V117_Footprint'] = pd.to_numeric(ordered.get('Länge_mm', 0.0), errors='coerce').fillna(0.0) * pd.to_numeric(ordered.get('Breite_mm', 0.0), errors='coerce').fillna(0.0)
+                            ordered['_V117_Weight'] = pd.to_numeric(ordered.get('Gewicht_kg', 0.0), errors='coerce').fillna(0.0)
+                            ordered['_V117_Length'] = pd.to_numeric(ordered.get('Länge_mm', 0.0), errors='coerce').fillna(0.0)
+                            ordered = ordered.sort_values(['_V117_Footprint', '_V117_Weight', '_V117_Length'], ascending=[False, False, False], kind='stable')
+                            return ordered.drop(columns=['_V117_Footprint', '_V117_Weight', '_V117_Length'])
+
                         def _v113_preview_for_units(local_units: pd.DataFrame, local_platform: pd.Series, suffix: str = '') -> Tuple[pd.DataFrame, pd.DataFrame]:
                             local_platform = local_platform.copy()
                             local_platform['Max_Höhe_mm'] = float(recalc_max_height)
                             local_platform['Breite_Bund_auf_schmal_verhindern'] = bool(recalc_prevent_support)
                             local_platform['Mindest_Stützbreite_%'] = float(recalc_min_support)
                             local_platform_df = pd.DataFrame([local_platform])
+                            preview_units_local = local_units.copy()
+                            if bool(recalc_stabilize_basis):
+                                preview_units_local = _v117_basis_order_units(preview_units_local)
                             return create_loading_plan(
-                                local_units.reset_index(drop=True),
+                                preview_units_local.reset_index(drop=True),
                                 local_platform_df.reset_index(drop=True),
                                 base_wood_height=float(base_wood_height),
                                 layer_spacer_height=float(bundle_spacer_height),
                                 gap_length=float(gap_length),
-                                allow_beside=bool(recalc_allow_beside),
+                                allow_beside=(False if bool(recalc_stabilize_basis) else bool(recalc_allow_beside)),
                                 allow_stack=bool(recalc_allow_stack),
                                 allow_rotation=bool(allow_rotation),
                                 bundle_order_flex_percent=float(bundle_order_flex_percent),
@@ -9131,7 +9276,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                                 min_support_width_ratio=float(recalc_min_support) / 100.0,
                                 max_unsupported_length_mm=float(recalc_max_free_length),
                                 max_unsupported_side_mm=float(recalc_max_free_side),
-                                prefer_length_before_stack=bool(recalc_prefer_length),
+                                prefer_length_before_stack=(True if bool(recalc_stabilize_basis) else bool(recalc_prefer_length)),
                             )
 
                         if st.button('Vorschau neu berechnen', key='v113_recalc_preview_button'):
@@ -9145,6 +9290,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                             preview_p['Max_freier_Überhang_Länge_mm'] = float(recalc_max_free_length)
                             preview_p['Max_freier_Überhang_seitlich_mm'] = float(recalc_max_free_side)
                             preview_p['Zuerst_hintereinander_versuchen'] = bool(recalc_prefer_length)
+                            preview_p['Tragende_Basis_stabilisieren'] = bool(recalc_stabilize_basis)
                             preview_placements, preview_summary = _v113_preview_for_units(preview_units, preview_p)
                             st.session_state['v113_recalc_preview'] = {
                                 'platform': str(recalc_platform),
@@ -9171,6 +9317,15 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                                         f"Ladungsmittelpunkt: Abweichung zur Pritschenmitte {center_metrics.get('Abweichung_zur_Pritschenmitte_mm', 0):.0f} mm, "
                                         f"Überhang hinten {center_metrics.get('Überhang_hinten_mm', 0):.0f} mm, "
                                         f"Überhang vorne {center_metrics.get('Überhang_vorne_mm', 0):.0f} mm."
+                                    )
+                            if recalc_basis_report and not loaded_preview.empty:
+                                basis_metrics = _v117_basis_metrics_for_platform(loaded_preview, preview_platform_row)
+                                if basis_metrics:
+                                    st.caption(
+                                        f"Tragende Basis: {basis_metrics.get('Basis_Bauteile', 0):.0f} Teile, "
+                                        f"Basisfläche {basis_metrics.get('Basisfläche_m2', 0):.2f} m², "
+                                        f"Basis zu Lastprojektion {basis_metrics.get('Basis_zu_Lastprojektion_%', 0):.0f} %, "
+                                        f"Gewicht oberhalb ca. {basis_metrics.get('Gewicht_oberhalb_kg', 0):.0f} kg."
                                     )
                             if not rest_preview.empty:
                                 st.warning(f'{len(rest_preview)} Verladeeinheiten passen mit diesen Werten nicht auf {recalc_platform}. Es wird keine zusätzliche Fuhre automatisch erzeugt.')
