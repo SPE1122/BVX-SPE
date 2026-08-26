@@ -1399,7 +1399,7 @@ def _support_width_ratio_for_candidate(state: Dict[str, Any], x: float, y: float
     """
     base_z = float(state.get('base_wood_height', 0.0))
     if float(z) <= base_z + 0.1:
-        return float(_base_support_metrics_for_candidate(state, x, y, length, width).get('area_ratio', 0.0))
+        return 1.0
 
     rows = _real_load_placement_rows(state)
     if not rows or float(width) <= 0:
@@ -1465,58 +1465,32 @@ def _rect_union_area(rects: List[Tuple[float, float, float, float]]) -> float:
     return area
 
 
-
-def _platform_physical_support_rect_from_state(state: Dict[str, Any]) -> Tuple[float, float, float, float]:
-    """V117: physische Pritsche als echte untere Auflagefläche.
-
-    X-Koordinaten der Verladung laufen über den effektiven Raum
-    (Überhang hinten + Pritschenlänge + Überhang vorne). Die Pritsche selbst
-    trägt aber nur zwischen Überhang_hinten und Überhang_hinten + Länge_mm.
-    Kantholz darf dadurch nicht im freien Überhang als Auflage zählen.
-    """
-    base_len = max(0.0, float(state.get('Länge_mm', 0.0) or 0.0))
-    back_allow = max(0.0, float(state.get('Überhang_hinten_mm', 0.0) or 0.0))
-    platform_width = max(0.0, float(state.get('Breite_mm', 0.0) or 0.0))
-    return back_allow, back_allow + base_len, 0.0, platform_width
-
-
-def _base_support_metrics_for_candidate(state: Dict[str, Any], x: float, y: float, length: float, width: float) -> Dict[str, float]:
-    """V117: Auflage auf der Pritsche/Kantholz real begrenzen.
-
-    Die erste Lage darf überhängen, aber der Überhang ist nicht getragen.
-    Deshalb wird als Basisauflage nur der Schnitt mit der physischen Pritsche
-    bewertet. Das korrigiert den alten Fehler, dass Kantholz wie eine
-    durchgehende Ebene über die ganze Ladung wirkte.
-    """
-    x0, x1 = float(x), float(x) + float(length)
-    y0, y1 = float(y), float(y) + float(width)
-    px0, px1, py0, py1 = _platform_physical_support_rect_from_state(state)
-    ox0, ox1 = max(x0, px0), min(x1, px1)
-    oy0, oy1 = max(y0, py0), min(y1, py1)
-    footprint = max(1.0, float(length) * float(width))
-    if ox1 <= ox0 or oy1 <= oy0:
-        return {'area_ratio': 0.0, 'free_length_mm': max(0.0, float(length)), 'free_side_mm': max(0.0, float(width))}
-    overlap_area = (ox1 - ox0) * (oy1 - oy0)
-    return {
-        'area_ratio': max(0.0, min(1.0, overlap_area / footprint)),
-        'free_length_mm': _edge_free_span_mm(x0, x1, [(ox0, ox1)]),
-        'free_side_mm': _edge_free_span_mm(y0, y1, [(oy0, oy1)]),
-    }
-
-
 def _support_area_ratio_for_candidate(state: Dict[str, Any], x: float, y: float, z: float, length: float, width: float) -> float:
     """Ermittelt die gestützte Auflagefläche direkt unter einer geplanten Einheit.
 
     V112: Diese Prüfung gilt für obere Bauteile UND Bunde. Bewertet wird die
     oberste reale Auflageebene unter der Einheit. Einlagenhöhen dürfen dazwischen
     liegen; entscheidend ist, welche Fläche direkt darunter trägt.
+
+    V118: Die erste Lage zählt nicht mehr automatisch als 100 % getragen.
+    Kantholz/Pritsche tragen unten nur über die physische Pritschenlänge, nicht
+    im freien Überhang vorne/hinten.
     """
     length = float(length)
     width = float(width)
     footprint = max(1.0, length * width)
     base_z = float(state.get('base_wood_height', 0.0))
     if float(z) <= base_z + 0.1:
-        return float(_base_support_metrics_for_candidate(state, x, y, length, width).get('area_ratio', 0.0))
+        px0 = float(state.get('Überhang_hinten_mm', 0.0) or 0.0)
+        px1 = px0 + float(state.get('Länge_mm', 0.0) or 0.0)
+        py0 = 0.0
+        py1 = float(state.get('Breite_mm', 0.0) or 0.0)
+        ox0 = max(float(x), px0)
+        ox1 = min(float(x) + length, px1)
+        oy0 = max(float(y), py0)
+        oy1 = min(float(y) + width, py1)
+        supported = max(0.0, ox1 - ox0) * max(0.0, oy1 - oy0)
+        return max(0.0, min(1.0, supported / footprint))
 
     rows = _real_load_placement_rows(state)
     if not rows or length <= 0 or width <= 0:
@@ -1580,7 +1554,25 @@ def _support_metrics_for_candidate(state: Dict[str, Any], x: float, y: float, z:
     footprint = max(1.0, length * width)
     base_z = float(state.get('base_wood_height', 0.0))
     if float(z) <= base_z + 0.1:
-        return _base_support_metrics_for_candidate(state, x, y, length, width)
+        # V118: Erste Lage wird gegen die physische Pritsche bewertet.
+        # Der Kantholz-/Pritschenauflagerbereich endet an der Pritsche und
+        # darf im Überhang vorne/hinten nicht als Auflage zählen.
+        x0, x1 = float(x), float(x) + length
+        y0, y1 = float(y), float(y) + width
+        px0 = float(state.get('Überhang_hinten_mm', 0.0) or 0.0)
+        px1 = px0 + float(state.get('Länge_mm', 0.0) or 0.0)
+        py0 = 0.0
+        py1 = float(state.get('Breite_mm', 0.0) or 0.0)
+        ox0, ox1 = max(x0, px0), min(x1, px1)
+        oy0, oy1 = max(y0, py0), min(y1, py1)
+        supported_area = max(0.0, ox1 - ox0) * max(0.0, oy1 - oy0)
+        x_intervals = [(ox0, ox1)] if ox1 > ox0 and oy1 > oy0 else []
+        y_intervals = [(oy0, oy1)] if ox1 > ox0 and oy1 > oy0 else []
+        return {
+            'area_ratio': max(0.0, min(1.0, supported_area / footprint)),
+            'free_length_mm': _edge_free_span_mm(x0, x1, x_intervals),
+            'free_side_mm': _edge_free_span_mm(y0, y1, y_intervals),
+        }
 
     rows = _real_load_placement_rows(state)
     if not rows or length <= 0 or width <= 0:
@@ -1632,10 +1624,8 @@ def can_place_stable(state: Dict[str, Any], unit: pd.Series, x: float, y: float,
     if not bool(state.get('prevent_wide_on_narrow', True)):
         return True
     base_z = float(state.get('base_wood_height', 0.0))
-
-    # V117: Auch die erste Lage wird gegen die physische Pritsche geprüft.
-    # Kantholz zählt nicht mehr als fiktive Auflage im freien Überhang.
-    # Die Prüfung bleibt nur aktiv, wenn der Anwender die Auflage-Sperre einschaltet.
+    if float(z) <= base_z + 0.1:
+        return True
 
     # V116: Auflage kann selektiv nicht nur als Prozentfläche bewertet werden. Optional
     # werden zusätzlich freie Überhänge in Länge und Breite begrenzt.
@@ -2661,283 +2651,6 @@ def create_loading_plan(
 
     placements.extend(not_loaded)
     return pd.DataFrame(placements), pd.DataFrame(summary)
-
-
-def _manual_recalc_usage_metrics(
-    placements_df: pd.DataFrame,
-    platform_row: pd.Series,
-) -> Dict[str, float]:
-    """Kennzahlen nur für die selektive manuellen Neuberechnung.
-
-    Flächennutzung = Summe der geladenen Grundflächen / nutzbare Ladefläche.
-    Kompaktheit = Summe der Grundflächen / umschließender belegter Bereich.
-    Höhennutzung = genutzte Ladehöhe oberhalb des Kantholzes / verfügbare Höhe.
-    """
-    helper_types = {'Unterbau', 'Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz'}
-    if placements_df is None or placements_df.empty:
-        loaded = pd.DataFrame()
-    else:
-        loaded = placements_df[
-            placements_df.get('Pritsche', pd.Series(dtype=str)).astype(str).ne('NICHT VERLADEN')
-            & ~placements_df.get('Typ', pd.Series(dtype=str)).astype(str).isin(helper_types)
-            & placements_df.get('X_mm', pd.Series(dtype=float)).notna()
-            & placements_df.get('Y_mm', pd.Series(dtype=float)).notna()
-            & placements_df.get('Z_mm', pd.Series(dtype=float)).notna()
-        ].copy()
-
-    available_length = max(
-        1.0,
-        safe_number(platform_row.get('Länge_mm'))
-        + safe_number(platform_row.get('Überhang_vorne_mm'))
-        + safe_number(platform_row.get('Überhang_hinten_mm')),
-    )
-    available_width = max(1.0, safe_number(platform_row.get('Breite_mm')))
-    base_height = max(0.0, safe_number(platform_row.get('Kantholz_erste_Lage_mm')))
-    max_height = max(base_height + 1.0, safe_number(platform_row.get('Max_Höhe_mm')))
-    available_area = available_length * available_width
-    available_load_height = max(1.0, max_height - base_height)
-
-    if loaded.empty:
-        return {
-            'Flächennutzung_%': 0.0,
-            'Kompaktheit_%': 0.0,
-            'Höhennutzung_%': 0.0,
-            'Belegte_Fläche_m2': 0.0,
-            'Belegter_Bereich_m2': 0.0,
-            'Geladene_Einheiten': 0.0,
-            'Nicht_geladene_Einheiten': 0.0,
-        }
-
-    numeric_cols = ['X_mm', 'Y_mm', 'Z_mm', 'Länge_mm', 'Breite_mm', 'Höhe_mm']
-    for col in numeric_cols:
-        if col in loaded.columns:
-            loaded[col] = pd.to_numeric(loaded[col], errors='coerce').fillna(0.0)
-
-    loaded_area = float((loaded['Länge_mm'] * loaded['Breite_mm']).sum())
-    min_x = float(loaded['X_mm'].min())
-    max_x = float((loaded['X_mm'] + loaded['Länge_mm']).max())
-    min_y = float(loaded['Y_mm'].min())
-    max_y = float((loaded['Y_mm'] + loaded['Breite_mm']).max())
-    envelope_area = max(1.0, (max_x - min_x) * (max_y - min_y))
-    used_top = float((loaded['Z_mm'] + loaded['Höhe_mm']).max())
-    loaded_area_percent = max(0.0, min(100.0, loaded_area / available_area * 100.0))
-    compactness_percent = max(0.0, min(100.0, loaded_area / envelope_area * 100.0))
-    height_percent = max(
-        0.0,
-        min(100.0, (used_top - base_height) / available_load_height * 100.0),
-    )
-    total_units = len(placements_df) if placements_df is not None else len(loaded)
-    return {
-        'Flächennutzung_%': loaded_area_percent,
-        'Kompaktheit_%': compactness_percent,
-        'Höhennutzung_%': height_percent,
-        'Belegte_Fläche_m2': loaded_area / 1_000_000.0,
-        'Belegter_Bereich_m2': envelope_area / 1_000_000.0,
-        'Geladene_Einheiten': float(len(loaded)),
-        'Nicht_geladene_Einheiten': float(max(0, total_units - len(loaded))),
-    }
-
-
-def _manual_recalc_not_loaded_rows(units: pd.DataFrame) -> pd.DataFrame:
-    """Erzeugt Restzeilen für eine manuelle Flächenobergrenze."""
-    if units is None or units.empty:
-        return pd.DataFrame()
-    rows: List[Dict[str, Any]] = []
-    for _, unit in units.iterrows():
-        rows.append({
-            'Fuhre_Nr': None,
-            'Fuhrenoption': '',
-            'Pritschenname': '',
-            'Pritsche': 'NICHT VERLADEN',
-            'Einheit_ID': unit.get('Einheit_ID', ''),
-            'Typ': unit.get('Typ', 'Bauteil'),
-            'Anzahl_Bauteile': int(safe_number(unit.get('Anzahl_Bauteile'), 1)),
-            'Bauteile': unit.get('Bauteile', ''),
-            'Bauteile_Liste': unit.get('Bauteile_Liste', unit.get('Bauteile', '')),
-            'Ansicht_Attribut': unit.get('Ansicht_Attribut', ''),
-            'Ansicht_Label': unit.get('Ansicht_Label', unit.get('Einheit_ID', '')),
-            'Ansicht_Liste': unit.get('Ansicht_Liste', unit.get('Ansicht_Label', '')),
-            'Bund_Attribute': unit.get('Bund_Attribute', ''),
-            'Einzellängen_mm': unit.get('Einzellängen_mm', ''),
-            'Einzelbreiten_mm': unit.get('Einzelbreiten_mm', ''),
-            'Einzelhöhen_mm': unit.get('Einzelhöhen_mm', ''),
-            'Einlage_allgemein_mm': safe_number(unit.get('Einlage_allgemein_mm')),
-            'Bundeinlage_mm': safe_number(unit.get('Bundeinlage_mm')),
-            'X_mm': None,
-            'Y_mm': None,
-            'Z_mm': None,
-            'Länge_mm': unit.get('Länge_mm', 0.0),
-            'Breite_mm': unit.get('Breite_mm', 0.0),
-            'Höhe_mm': unit.get('Höhe_mm', 0.0),
-            'Drehung': None,
-            'Ebene': 'nicht passend / Maximal-Flächennutzung',
-            'Gewicht_kg': round(safe_number(unit.get('Gewicht_kg')), 2),
-        })
-    return pd.DataFrame(rows)
-
-
-def create_manual_recalc_plan(
-    units: pd.DataFrame,
-    platform: pd.Series,
-    base_wood_height: float,
-    layer_spacer_height: float,
-    gap_length: float,
-    allow_beside: bool,
-    allow_stack: bool,
-    allow_rotation: bool,
-    order_flex_percent: float,
-    keep_order: bool,
-    min_area_percent: float,
-    target_area_percent: float,
-    max_area_percent: float,
-    target_height_percent: float,
-    prevent_wide_on_narrow: bool,
-    min_support_width_ratio: float,
-    max_unsupported_length_mm: float,
-    max_unsupported_side_mm: float,
-    prefer_length_before_stack: bool,
-) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, float]]:
-    """Optimiert ausschließlich die im manuellen Bereich ausgewählte Pritsche.
-
-    Die bestehende create_loading_plan-Grundlogik wird mehrfach mit begrenzten
-    Reihenfolgevarianten getestet. Anschließend wird der beste vollständige
-    Kandidat anhand der manuellen Zielwerte ausgewählt.
-    """
-    if units is None or units.empty or platform is None or platform.empty:
-        return pd.DataFrame(), pd.DataFrame(), _manual_recalc_usage_metrics(pd.DataFrame(), platform)
-
-    flex = max(0.0, min(100.0, float(order_flex_percent or 0.0)))
-    min_area = max(0.0, min(100.0, float(min_area_percent or 0.0)))
-    max_area = max(0.0, min(100.0, float(max_area_percent or 0.0)))
-    target_area = max(min_area, min(100.0, float(target_area_percent or 0.0)))
-    # Das Ziel darf niemals über einer vom Anwender gesetzten Obergrenze liegen.
-    target_area = min(target_area, max_area)
-    target_height = max(0.0, min(100.0, float(target_height_percent or 0.0)))
-
-    base_units = units.copy().reset_index(drop=True)
-    variants: List[pd.DataFrame] = [base_units]
-    if not keep_order and flex > 0.001:
-        sortable = base_units.copy()
-        sortable['_MRC_Footprint'] = (
-            pd.to_numeric(sortable.get('Länge_mm', 0.0), errors='coerce').fillna(0.0)
-            * pd.to_numeric(sortable.get('Breite_mm', 0.0), errors='coerce').fillna(0.0)
-        )
-        sortable['_MRC_Height'] = pd.to_numeric(sortable.get('Höhe_mm', 0.0), errors='coerce').fillna(0.0)
-        sortable['_MRC_Length'] = pd.to_numeric(sortable.get('Länge_mm', 0.0), errors='coerce').fillna(0.0)
-        sortable['_MRC_Width'] = pd.to_numeric(sortable.get('Breite_mm', 0.0), errors='coerce').fillna(0.0)
-        for sort_cols in [
-            ['_MRC_Footprint', '_MRC_Height', '_MRC_Length'],
-            ['_MRC_Height', '_MRC_Footprint', '_MRC_Length'],
-            ['_MRC_Length', '_MRC_Width', '_MRC_Height'],
-        ]:
-            variants.append(
-                sortable.sort_values(sort_cols, ascending=False, kind='stable')
-                .drop(columns=['_MRC_Footprint', '_MRC_Height', '_MRC_Length', '_MRC_Width'])
-                .reset_index(drop=True)
-            )
-
-    unique_variants: List[pd.DataFrame] = []
-    seen_orders = set()
-    for variant in variants:
-        order_key = tuple(variant.get('Einheit_ID', pd.Series(dtype=str)).astype(str).tolist())
-        if order_key in seen_orders:
-            continue
-        seen_orders.add(order_key)
-        unique_variants.append(variant)
-
-    platform_df = pd.DataFrame([platform.copy()])
-    effective_order_flex = 0.0 if keep_order else flex
-    candidates: List[Tuple[Tuple[float, ...], pd.DataFrame, pd.DataFrame, Dict[str, float]]] = []
-    for variant in unique_variants:
-        preview_placements, preview_summary = create_loading_plan(
-            variant,
-            platform_df,
-            base_wood_height=base_wood_height,
-            layer_spacer_height=layer_spacer_height,
-            gap_length=gap_length,
-            allow_beside=allow_beside,
-            allow_stack=allow_stack,
-            allow_rotation=allow_rotation,
-            bundle_order_flex_percent=effective_order_flex,
-            prevent_wide_on_narrow=prevent_wide_on_narrow,
-            min_support_width_ratio=min_support_width_ratio,
-            max_unsupported_length_mm=max_unsupported_length_mm,
-            max_unsupported_side_mm=max_unsupported_side_mm,
-            prefer_length_before_stack=prefer_length_before_stack,
-        )
-        metrics = _manual_recalc_usage_metrics(preview_placements, platform)
-        if metrics['Flächennutzung_%'] > max_area + 0.001:
-            available_length = max(
-                1.0,
-                safe_number(platform.get('Länge_mm'))
-                + safe_number(platform.get('Überhang_vorne_mm'))
-                + safe_number(platform.get('Überhang_hinten_mm')),
-            )
-            available_width = max(1.0, safe_number(platform.get('Breite_mm')))
-            area_limit = available_length * available_width * max_area / 100.0
-            area_so_far = 0.0
-            allowed_count = 0
-            for _, unit in variant.iterrows():
-                unit_area = safe_number(unit.get('Länge_mm')) * safe_number(unit.get('Breite_mm'))
-                if allowed_count > 0 and area_so_far + unit_area > area_limit + 0.001:
-                    break
-                if allowed_count == 0 and unit_area > area_limit + 0.001:
-                    break
-                area_so_far += unit_area
-                allowed_count += 1
-            limited_units = variant.iloc[:allowed_count].copy()
-            omitted_units = variant.iloc[allowed_count:].copy()
-            limited_placements, limited_summary = create_loading_plan(
-                limited_units,
-                platform_df,
-                base_wood_height=base_wood_height,
-                layer_spacer_height=layer_spacer_height,
-                gap_length=gap_length,
-                allow_beside=allow_beside,
-                allow_stack=allow_stack,
-                allow_rotation=allow_rotation,
-                bundle_order_flex_percent=effective_order_flex,
-                prevent_wide_on_narrow=prevent_wide_on_narrow,
-                min_support_width_ratio=min_support_width_ratio,
-                max_unsupported_length_mm=max_unsupported_length_mm,
-                max_unsupported_side_mm=max_unsupported_side_mm,
-                prefer_length_before_stack=prefer_length_before_stack,
-            )
-            rest_rows = _manual_recalc_not_loaded_rows(omitted_units)
-            preview_placements = (
-                pd.concat([limited_placements, rest_rows], ignore_index=True, sort=False)
-                if not rest_rows.empty
-                else limited_placements
-            )
-            preview_summary = limited_summary
-            metrics = _manual_recalc_usage_metrics(preview_placements, platform)
-        max_excess = max(0.0, metrics['Flächennutzung_%'] - max_area)
-        min_shortfall = max(0.0, min_area - metrics['Flächennutzung_%'])
-        target_distance = abs(metrics['Flächennutzung_%'] - target_area)
-        height_distance = abs(metrics['Höhennutzung_%'] - target_height)
-        # Vollständigkeit zuerst, dann Obergrenze, Zielnähe und kompakte Höhe.
-        score = (
-            metrics['Nicht_geladene_Einheiten'],
-            max_excess,
-            target_distance,
-            min_shortfall,
-            height_distance,
-            -metrics['Kompaktheit_%'],
-            -metrics['Flächennutzung_%'],
-        )
-        candidates.append((score, preview_placements, preview_summary, metrics))
-
-    feasible = [candidate for candidate in candidates if candidate[3]['Flächennutzung_%'] <= max_area + 0.001]
-    pool = feasible if feasible else candidates
-    best_score, best_placements, best_summary, best_metrics = min(pool, key=lambda candidate: candidate[0])
-    del best_score
-    if 'Ebene' in best_placements.columns:
-        best_placements = best_placements.copy()
-        best_placements['Ebene'] = best_placements['Ebene'].astype(str).apply(
-            lambda value: value if 'manuell optimiert' in value.lower() else f'{value} / manuell optimiert'
-        )
-    return best_placements, best_summary, best_metrics
-
 
 def center_placements_geometrically(placements_df: pd.DataFrame, platforms_df: pd.DataFrame) -> pd.DataFrame:
     """Ruhige geometrische Ausrichtung der fertigen Verladung.
@@ -4488,12 +4201,6 @@ def create_loading_excel(
                     ax.set_xlabel('Länge X (mm)', fontsize=7)
                     ax.set_ylabel('Breite Y (mm)', fontsize=7)
                     ax.add_patch(Rectangle((0, 0), eff_length, width, fill=False, edgecolor='black', linestyle='--', linewidth=1.5))
-                    if base_wood > 0:
-                        physical_x0 = safe_number(platform_row.get('Überhang_hinten_mm'))
-                        physical_x1 = physical_x0 + safe_number(platform_row.get('Länge_mm'))
-                        for beam_y in (width * 0.2, width * 0.8):
-                            ax.plot([physical_x0, physical_x1], [beam_y, beam_y], color='#6b4f2a', linestyle='-', linewidth=2.0)
-                        ax.text(physical_x0, width * 0.86, f'Kantholz längs {base_wood:.0f} mm', fontsize=6, color='#6b4f2a', va='bottom')
                     for _, row in loaded.iterrows():
                         x0 = safe_number(row.get('X_mm'))
                         y0 = safe_number(row.get('Y_mm'))
@@ -4705,25 +4412,6 @@ def draw_loading_view(placements_df: pd.DataFrame, platforms_df: pd.DataFrame, p
         fig.add_shape(type='rect', x0=0, y0=0, x1=eff_length, y1=width, line=dict(width=2, dash='dash'))
         # Echte Pritsche ohne Überstand = durchgezogen.
         fig.add_shape(type='rect', x0=platform_x0, y0=0, x1=platform_x1, y1=width, line=dict(width=2))
-        if base_wood > 0:
-            # Zwei schematische Kanthölzer laufen längs der echten Pritsche.
-            for beam_y in (width * 0.2, width * 0.8):
-                fig.add_shape(
-                    type='line',
-                    x0=platform_x0,
-                    y0=beam_y,
-                    x1=platform_x1,
-                    y1=beam_y,
-                    line=dict(width=3, color='#6b4f2a'),
-                )
-            fig.add_annotation(
-                x=platform_x0,
-                y=width * 0.86,
-                text=f'Kantholz längs ({base_wood:.0f} mm)',
-                showarrow=False,
-                font=dict(size=9, color='#6b4f2a'),
-                xanchor='left',
-            )
         if over_back > 0:
             fig.add_annotation(x=over_back / 2, y=width * 0.05, text='Überstand hinten', showarrow=False, font=dict(size=9))
         if over_front > 0:
@@ -5919,21 +5607,25 @@ def _pdf_truncate_to_width(c, text: str, max_width: float, font_name: str, font_
     return result + ell if result else ''
 
 
-def _pdf_draw_label_lines(c, rx: float, ry: float, rw: float, rh: float, lines: List[str], view: str) -> None:
-    """Zeichnet Beschriftungen ohne Überlappung innerhalb eines Rechtecks."""
+def _pdf_draw_label_lines(c, rx: float, ry: float, rw: float, rh: float, lines: List[str], view: str) -> bool:
+    """Zeichnet Beschriftungen ohne Überlappung innerhalb eines Rechtecks.
+
+    Rückgabe: True wenn mindestens ein Text gezeichnet wurde.
+    """
     lines = [str(line).strip() for line in lines if str(line).strip()]
     if not lines:
-        return
+        return False
     # V106: in Stirn-/Seitenansichten Beschriftung früher zulassen, damit die Elemente nicht unbeschriftet wirken.
     if view in ('front', 'back', 'side', 'side_left', 'side_right'):
         if rw < 7 or rh < 4:
-            return
+            return False
     elif rw < 12 or rh < 7:
-        return
+        return False
 
     from reportlab.lib import colors
     font_name = 'Helvetica'
     n = len(lines)
+    drawn = False
     if n == 1:
         # V110: Beschriftung etwas grösser, aber weiterhin innerhalb der Elemente.
         font_size = max(3.5, min(6.2, rw / max(8, len(lines[0]) * 1.72), rh * 0.54))
@@ -5942,7 +5634,8 @@ def _pdf_draw_label_lines(c, rx: float, ry: float, rw: float, rh: float, lines: 
         txt = _pdf_truncate_to_width(c, lines[0], max(4, rw - 4), font_name, font_size)
         if txt:
             c.drawCentredString(rx + rw / 2, ry + rh / 2 - font_size / 3, txt)
-        return
+            drawn = True
+        return drawn
 
     # Mehrere Nummern im Bund: vertikal von unten nach oben, Reihenfolge = Verladereihenfolge.
     font_size = min(5.8, max(2.7, (rh - 3) / max(1, n) * 0.88))
@@ -5958,6 +5651,44 @@ def _pdf_draw_label_lines(c, rx: float, ry: float, rw: float, rh: float, lines: 
         txt = _pdf_truncate_to_width(c, line, max(4, rw - 4), font_name, font_size)
         if txt:
             c.drawCentredString(rx + rw / 2, yy, txt)
+            drawn = True
+    return drawn
+
+
+def _pdf_draw_priority_label(c, rx: float, ry: float, rw: float, rh: float, lines: List[str], view: str) -> None:
+    """V118: Bauteilnummern nach allen Flächen nochmals obenauf zeichnen.
+
+    Dadurch verschwinden wichtige Nummern wie BE 53 nicht mehr hinter später
+    gezeichneten Bauteilen, Unterbau- oder Schraffurflächen. Wenn die Nummer
+    nicht in die Box passt, wird sie klein oberhalb mit kurzer Führungslinie
+    gesetzt.
+    """
+    from reportlab.lib import colors
+    lines = [str(v).strip() for v in lines if str(v).strip()]
+    if not lines:
+        return
+    c.saveState()
+    # Eine dezente weisse Textfläche verbessert die Lesbarkeit ohne Bauteile stark zu verdecken.
+    drawn = _pdf_draw_label_lines(c, rx, ry, rw, rh, lines, view)
+    if not drawn and view in ('front', 'back', 'side', 'side_left', 'side_right'):
+        label = ' / '.join(lines[:2])
+        if len(label) > 18:
+            label = label[:15] + '...'
+        font_name = 'Helvetica'
+        font_size = 4.8
+        c.setFont(font_name, font_size)
+        text_w = c.stringWidth(label, font_name, font_size)
+        tx = rx + rw / 2.0
+        ty = ry + rh + 3.0
+        c.setFillColor(colors.white)
+        c.rect(tx - text_w / 2.0 - 1.3, ty - 1.0, text_w + 2.6, font_size + 1.8, stroke=0, fill=1)
+        c.setStrokeColor(colors.black)
+        c.setLineWidth(0.25)
+        c.line(rx + rw / 2.0, ry + rh, tx, ty - 0.6)
+        c.setFillColor(colors.black)
+        c.drawCentredString(tx, ty, label)
+    c.restoreState()
+
 
 
 
@@ -6006,26 +5737,16 @@ def _pdf_add_visible_spacer_rows(rows: pd.DataFrame, platform: pd.Series, view: 
         })
         return base
 
-    # V117 Kantholz erste Lage: nicht mehr als durchgehende Ebene über die
-    # komplette Ladung zeichnen. Kantholz liegt quer auf der physischen Pritsche
-    # und erzeugt im Überhang vorne/hinten keine Auflage.
+    # V118: Kantholz erste Lage weiterhin längs als einfache Unterlage anzeigen,
+    # aber nur über die physische Pritschenlänge. Im Überhang vorne/hinten darf
+    # das Kantholz weder optisch noch fachlich als durchgehendes Auflager wirken.
     if base_height > 0:
         base_len = safe_number(platform.get('Länge_mm'), 0.0)
-        back_allow = safe_number(platform.get('Überhang_hinten_mm'), 0.0)
-        platform_width = safe_number(platform.get('Breite_mm'), 0.0)
-        support_len = max(80.0, min(180.0, base_height * 1.6))
-        px0 = back_allow
-        px1 = back_allow + base_len
-        if base_len > support_len and platform_width > 0:
-            centers = [px0 + support_len / 2.0, (px0 + px1) / 2.0, px1 - support_len / 2.0]
-            seen_centers = set()
-            for cx in centers:
-                key = round(cx, 1)
-                if key in seen_centers:
-                    continue
-                seen_centers.add(key)
-                kx = max(px0, min(px1 - support_len, cx - support_len / 2.0))
-                helpers.append(helper_row(None, 'Kantholz', _fmt_bsd_mm_label('Kantholz', base_height), kx, 0.0, 0.0, support_len, platform_width, base_height))
+        over_back = safe_number(platform.get('Überhang_hinten_mm'), 0.0)
+        min_y = safe_number(rows['Y_mm'].min(), 0.0)
+        max_y = safe_number((rows['Y_mm'] + rows['Breite_mm']).max(), min_y)
+        if base_len > 0 and max_y > min_y:
+            helpers.append(helper_row(None, 'Kantholz', _fmt_bsd_mm_label('Kantholz', base_height), over_back, min_y, 0.0, base_len, max(0.0, max_y - min_y), base_height))
 
     # Zwischenlagen: vor allem Bundeinlage/Lagenholz zwischen separaten Bundlagen.
     # Die Positionen entsprechen den Z-Sprüngen im Ladeplan BSD.
@@ -6069,41 +5790,41 @@ def _pdf_add_visible_spacer_rows(rows: pd.DataFrame, platform: pd.Series, view: 
 
 
 def _pdf_draw_underbau_blocks(c, rx: float, ry: float, rw: float, rh: float, view: str, label: str) -> None:
-    """V117: Unterbau/Auflager nur dezent als transparente Hilfsmarkierung.
-
-    Wichtig: Auflager dürfen in der Stirnansicht keine Bauteile und keine
-    Nummern verdecken. Deshalb wird nur gepunktet/gestrichelt im Hintergrund
-    gezeichnet und auf Textlabels weitgehend verzichtet.
-    """
+    """Zeichnet Unterbau als Hilfselement: in Draufsicht gestrichelt, in Ansichten als Klötze."""
     from reportlab.lib import colors
     if rw <= 0 or rh <= 0:
         return
     c.saveState()
-    c.setStrokeColor(colors.HexColor('#777777'))
-    c.setLineWidth(0.35)
-    c.setDash(1.3, 2.2)
-    try:
-        c.setFillAlpha(0.08)
-        c.setStrokeAlpha(0.45)
-    except Exception:
-        pass
-    c.setFillColor(colors.HexColor('#efefef'))
+    c.setStrokeColor(colors.HexColor('#555555'))
+    c.setFillColor(colors.HexColor('#d9d9d9'))
+    c.setLineWidth(0.45)
 
     if view == 'top':
+        # Nur gestrichelte Kontur, damit Bauteilnummern nicht verdeckt werden.
+        c.setDash(3, 2)
         c.rect(rx, ry, rw, rh, stroke=1, fill=0)
         c.setDash()
+        if rw > 22 and rh > 8:
+            c.setFont('Helvetica', 3.8)
+            c.setFillColor(colors.HexColor('#555555'))
+            c.drawString(rx + 2, ry + 2, str(label).replace('Unterbau', 'UB')[:10])
         c.restoreState()
         return
 
-    # Seiten-/Front-/Rückansichten: Auflager als zwei dezente Auflagerzonen.
-    block_w = max(3.0, min(max(rh, 4.0), rw * 0.18, 28.0))
+    # Seiten-/Front-/Rückansichten: nicht als durchgehender Balken, sondern als 2 Auflagerklötze.
+    # Die Klötze werden annähernd quadratisch, aber nie breiter als 25% der Projektion.
+    block_w = max(4.0, min(max(rh, 5.0), rw * 0.22, 38.0))
     if rw <= block_w * 2.4:
+        # Wenn das Bauteil sehr schmal projiziert ist, nur einen mittigen Klotz zeichnen.
         bx = rx + (rw - block_w) / 2
         c.rect(bx, ry, block_w, rh, stroke=1, fill=1)
     else:
         c.rect(rx, ry, block_w, rh, stroke=1, fill=1)
         c.rect(rx + rw - block_w, ry, block_w, rh, stroke=1, fill=1)
-    c.setDash()
+    if rw > 35 and rh > 7:
+        c.setFont('Helvetica', 4.2)
+        c.setFillColor(colors.HexColor('#333333'))
+        c.drawCentredString(rx + rw / 2, ry + rh / 2 - 1.4, str(label).replace('Unterbau', 'UB')[:14])
     c.restoreState()
 
 def _pdf_draw_view_orientation_helpers(c, ox: float, oy: float, draw_w: float, draw_h: float, view: str, front_at_x_max: bool, left_at_y_max: bool) -> None:
@@ -6430,52 +6151,6 @@ def _pdf_selective_recalc_center_metrics(placements: pd.DataFrame, platform: pd.
     }
 
 
-
-def _v117_basis_metrics_for_platform(placements_df: pd.DataFrame, platform: pd.Series) -> Dict[str, float]:
-    """V117: Kennzahl für tragende Basis der gewählten Fuhre.
-
-    Zeigt in der selektiven Neuberechnung, ob die unterste reale Lage als
-    Gesamtbasis zur darüberliegenden Lastprojektion passt. Es verändert selbst
-    keine Verladung; es ist eine nachvollziehbare Kontrolle für Fuhren wie F03.
-    """
-    if placements_df is None or placements_df.empty or platform is None:
-        return {}
-    pname = str(platform.get('Pritsche', ''))
-    rows = placements_df[placements_df.get('Pritsche', pd.Series(dtype=str)).astype(str).eq(pname)].copy()
-    if rows.empty:
-        return {}
-    helper_types = {'Unterbau', 'Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz'}
-    rows = rows[~rows.get('Typ', pd.Series(dtype=str)).astype(str).isin(helper_types)].copy()
-    if rows.empty:
-        return {}
-    for col in ['X_mm', 'Y_mm', 'Z_mm', 'Länge_mm', 'Breite_mm', 'Gewicht_kg']:
-        rows[col] = pd.to_numeric(rows.get(col, 0.0), errors='coerce').fillna(0.0)
-    base_z = float(rows['Z_mm'].min())
-    base_rows = rows[rows['Z_mm'].sub(base_z).abs() <= 2.0].copy()
-    if base_rows.empty:
-        return {}
-    base_rects = []
-    all_rects = []
-    for _idx, r in base_rows.iterrows():
-        x0 = safe_number(r.get('X_mm')); y0 = safe_number(r.get('Y_mm'))
-        base_rects.append((x0, x0 + safe_number(r.get('Länge_mm')), y0, y0 + safe_number(r.get('Breite_mm'))))
-    for _idx, r in rows.iterrows():
-        x0 = safe_number(r.get('X_mm')); y0 = safe_number(r.get('Y_mm'))
-        all_rects.append((x0, x0 + safe_number(r.get('Länge_mm')), y0, y0 + safe_number(r.get('Breite_mm'))))
-    base_area = _rect_union_area(base_rects)
-    all_area = _rect_union_area(all_rects)
-    upper_weight = float(rows.loc[rows['Z_mm'] > base_z + 2.0, 'Gewicht_kg'].sum()) if 'Gewicht_kg' in rows.columns else 0.0
-    total_weight = float(rows['Gewicht_kg'].sum()) if 'Gewicht_kg' in rows.columns else 0.0
-    return {
-        'Basis_Bauteile': float(len(base_rows)),
-        'Basisfläche_m2': base_area / 1_000_000.0,
-        'Lastprojektion_m2': all_area / 1_000_000.0,
-        'Basis_zu_Lastprojektion_%': 100.0 * base_area / all_area if all_area > 0 else 0.0,
-        'Gewicht_oberhalb_kg': upper_weight,
-        'Gesamtgewicht_kg': total_weight,
-    }
-
-
 def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y: float, w: float, h: float, view: str, title: str, front_at_x_max: bool = False, left_at_y_max: bool = False, bundle_overview_only: bool = False, show_dimensions: bool = True, scale_context: Optional[Dict[str, float]] = None) -> None:
     """Zeichnet eine PDF-Ansicht mit Pritschen- und Ladungsabmessungen.
 
@@ -6495,7 +6170,6 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
     platform_x1 = over_back_allowed + base_length
     width = safe_number(platform.get('Breite_mm'))
     max_height = safe_number(platform.get('Max_Höhe_mm'))
-    base_wood = safe_number(platform.get('Kantholz_erste_Lage_mm'))
     pname = str(platform.get('Pritsche', ''))
 
     rows = placements[placements['Pritsche'].astype(str) == pname].copy()
@@ -6617,13 +6291,6 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
         c.setStrokeColor(colors.HexColor('#8c8c8c'))
         c.setLineWidth(0.45)
         c.rect(px0, oy, max(px1 - px0, 0.1), draw_h, stroke=1, fill=1)
-        if base_wood > 0:
-            c.setStrokeColor(colors.HexColor('#6b4f2a'))
-            c.setLineWidth(1.5)
-            for beam_y in (width * 0.2, width * 0.8):
-                c.line(tx(platform_x0), ty(beam_y), tx(platform_x1), ty(beam_y))
-            c.setFont('Helvetica', 5.8)
-            c.drawString(tx(platform_x0), ty(width * 0.86), f'Kantholz längs {base_wood:.0f} mm')
     elif view == 'top_rotated':
         py0 = ty(platform_x0)
         py1 = ty(platform_x1)
@@ -6631,13 +6298,6 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
         c.setStrokeColor(colors.HexColor('#8c8c8c'))
         c.setLineWidth(0.45)
         c.rect(ox, py0, draw_w, max(py1 - py0, 0.1), stroke=1, fill=1)
-        if base_wood > 0:
-            c.setStrokeColor(colors.HexColor('#6b4f2a'))
-            c.setLineWidth(1.5)
-            for beam_x in (width * 0.2, width * 0.8):
-                c.line(tx(beam_x), ty(platform_x0), tx(beam_x), ty(platform_x1))
-            c.setFont('Helvetica', 5.8)
-            c.drawString(tx(width * 0.2), ty(platform_x1), f'Kantholz längs {base_wood:.0f} mm')
     elif view in ('side', 'side_left', 'side_right'):
         sx0, sx1 = _pdf_project_x_range_for_side(platform_x0, platform_x1, eff_length, view, left_at_y_max=left_at_y_max)
         px0 = tx(sx0)
@@ -6647,10 +6307,6 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
         c.setStrokeColor(colors.black)
         c.setLineWidth(0.45)
         c.rect(px0, oy - bar_h, max(px1 - px0, 0.1), bar_h, stroke=1, fill=1)
-        if base_wood > 0:
-            c.setStrokeColor(colors.HexColor('#6b4f2a'))
-            c.setLineWidth(1.0)
-            c.line(px0, ty(base_wood), px1, ty(base_wood))
     elif view in ('front', 'back'):
         bar_h = 5.0
         c.setFillColor(colors.HexColor('#9b9b9b'))
@@ -6683,6 +6339,9 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
         right_px = ox + ((width - load_y0) if left_at_y_max else load_y1) * scale_x
         _pdf_dim_line_h(c, left_px, right_px, oy - 24, f'Ladungsbreite {used_wid:.0f} mm')
 
+    priority_label_items: List[Tuple[float, float, float, float, List[str], str]] = []
+    helper_label_types = {'Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz', 'Unterbau'}
+
     def draw_projected_fragment(row: pd.Series, px: float, py: float, pw: float, ph: float, ghost: bool = False, draw_label: bool = True) -> None:
         rx = ox + (px - view_x_offset) * scale_x
         ry = oy + (py - view_y_offset) * scale_y
@@ -6701,6 +6360,8 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
             if draw_label:
                 label_lines = _pdf_label_lines(row, view, bundle_overview_only=bundle_overview_only)
                 _pdf_draw_label_lines(c, rx, ry, rw, rh, label_lines, view)
+                if view in ('front', 'back', 'side', 'side_left', 'side_right') and row_typ not in helper_label_types:
+                    priority_label_items.append((rx, ry, rw, rh, label_lines, view))
             return
         if row_typ == 'Kantholz':
             c.setFillColor(colors.HexColor('#b8b8b8'))
@@ -6724,25 +6385,12 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
                 else:
                     label_lines = label_lines[:1]
             _pdf_draw_label_lines(c, rx, ry, rw, rh, label_lines, view)
+            if view in ('front', 'back', 'side', 'side_left', 'side_right') and row_typ not in helper_label_types:
+                priority_label_items.append((rx, ry, rw, rh, label_lines, view))
 
     def draw_projected_row(row: pd.Series, ghost: bool = False) -> None:
         px, py, pw, ph, _depth = _pdf_projection_values(row, view, eff_length, width, front_at_x_max, left_at_y_max)
         draw_projected_fragment(row, px, py, pw, ph, ghost=ghost, draw_label=not ghost)
-
-    # V117: Hilfselemente (Kantholz, Einlagen, Unterbau/Auflager) immer zuerst
-    # und im Hintergrund zeichnen. Sie dürfen in Stirn- und Seitenansicht keine
-    # Bauteile überdecken und zählen auch nicht als Sichtblocker für die
-    # Schraffurlogik.
-    helper_draw_types_v117 = {'Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz', 'Unterbau'}
-    if rows is not None and not rows.empty:
-        typ_series_v117 = rows.get('Typ', pd.Series(dtype=str)).astype(str)
-        helper_bg_rows_v117 = rows[typ_series_v117.isin(helper_draw_types_v117)].copy()
-        rows = rows[~typ_series_v117.isin(helper_draw_types_v117)].copy()
-        if not helper_bg_rows_v117.empty:
-            helper_bg_rows_v117['_pdf_sort'] = helper_bg_rows_v117.apply(lambda r: _pdf_visible_sort_value(r, view, eff_length, width, front_at_x_max, left_at_y_max), axis=1)
-            helper_bg_rows_v117 = helper_bg_rows_v117.sort_values(['Z_mm', '_pdf_sort', 'X_mm', 'Y_mm'], kind='stable')
-            for _, helper_row_v117 in helper_bg_rows_v117.iterrows():
-                draw_projected_row(helper_row_v117, ghost=False)
 
     # V116: Stirnansicht mit echter Sichtlogik.
     # Nahe Rechtecke decken entfernte Rechtecke ab; komplett verdeckte Elemente
@@ -6782,6 +6430,8 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
                 piece_h = max(0.0, qy1 - qy0)
                 draw_projected_fragment(row, qx0, qy0, piece_w, piece_h, ghost=is_hatched, draw_label=True)
             pending_same_depth.append(rect)
+        for lrx, lry, lrw, lrh, llines, lview in priority_label_items:
+            _pdf_draw_priority_label(c, lrx, lry, lrw, lrh, llines, lview)
         return
 
     if view in ('side', 'side_left', 'side_right') and ghost_rows is not None and not ghost_rows.empty:
@@ -6799,6 +6449,9 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
 
     for _, row in rows.iterrows():
         draw_projected_row(row, ghost=False)
+
+    for lrx, lry, lrw, lrh, llines, lview in priority_label_items:
+        _pdf_draw_priority_label(c, lrx, lry, lrw, lrh, llines, lview)
 
 def _bsd_cell_text_for_matrix(value: Any) -> str:
     """Text für eine BSD-Matrixzelle.
@@ -9459,8 +9112,8 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
         st.dataframe(edited_summary_df, use_container_width=True, hide_index=True)
 
 
-        with st.expander('V118: einzelne Fuhre / Pritsche neu berechnen / Fuhre stabilisieren', expanded=False):
-            st.caption('Damit kannst du z. B. nur F03/F05 mit eigenen Auflage-/Überhangwerten neu testen. Bestehende Fuhren bleiben fix. Eine zusätzliche Fuhre wird nur nach ausdrücklicher Freigabe vorbereitet.')
+        with st.expander('V116: einzelne Fuhre / Pritsche neu berechnen', expanded=False):
+            st.caption('Damit kannst du z. B. nur F05/F07 mit eigenen Auflage-/Überhangwerten neu testen. Bestehende Fuhren werden nicht automatisch verändert. Eine zusätzliche Fuhre wird nur nach ausdrücklicher Freigabe vorbereitet.')
             if verladeart != 'Automatisch':
                 st.info('Diese selektive Neuberechnung ist für die automatische Verladung gedacht. Im manuellen Modus bitte über „Manuelle Verladung“ arbeiten.')
             elif platforms_used_df is None or platforms_used_df.empty or edited_placements_df is None or edited_placements_df.empty:
@@ -9492,50 +9145,6 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                         st.warning('Für diese Pritsche wurden keine Verladeeinheiten gefunden.')
                     else:
                         st.write(f'Neu berechnet werden {len(target_units)} Verladeeinheiten aus {recalc_platform}.')
-                        st.caption(
-                            'Bedeutung der Prozentwerte: Mindest-Flächennutzung = Warnschwelle '
-                            '(die Vorschau wird nicht automatisch abgelehnt), Ziel-Flächennutzung = '
-                            'bevorzugter Wert für die Bewertung, Maximal-Flächennutzung = harte Obergrenze. '
-                            'Alle drei Werte beziehen sich auf die Summe der geladenen Grundflächen / nutzbare Ladefläche. '
-                            'Kompaktheit und Höhennutzung werden zusätzlich bewertet.'
-                        )
-                        area1, area2, area3, area4 = st.columns(4)
-                        recalc_min_area = area1.number_input(
-                            'Mindest-Flächennutzung %',
-                            min_value=0,
-                            max_value=100,
-                            value=60,
-                            step=5,
-                            key='v118_recalc_min_area',
-                            help='Nur eine Warnschwelle für die Vorschau. Sie verhindert keine Platzierung.',
-                        )
-                        recalc_target_area = area2.number_input(
-                            'Ziel-Flächennutzung %',
-                            min_value=0,
-                            max_value=100,
-                            value=80,
-                            step=5,
-                            key='v118_recalc_target_area',
-                            help='Die Vorschau bevorzugt eine geladene Grundfläche möglichst nahe an diesem Wert.',
-                        )
-                        recalc_max_area = area3.number_input(
-                            'Maximal-Flächennutzung %',
-                            min_value=0,
-                            max_value=100,
-                            value=100,
-                            step=5,
-                            key='v118_recalc_max_area',
-                            help='Harte Obergrenze für die geladene Grundfläche. Das Ziel wird nicht über diesen Wert angehoben.',
-                        )
-                        recalc_target_height = area4.number_input(
-                            'Ziel-Höhennutzung %',
-                            min_value=0,
-                            max_value=100,
-                            value=85,
-                            step=5,
-                            key='v118_recalc_target_height',
-                            help='Bewertet die genutzte Höhe oberhalb des Kantholzes im Verhältnis zur verfügbaren Ladehöhe.',
-                        )
                         rc1, rc2, rc3, rc4 = st.columns(4)
                         recalc_max_height = rc1.number_input(
                             'Max. Ladehöhe nur diese Fuhre mm',
@@ -9581,80 +9190,37 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                             value=True,
                             key='v114_recalc_prefer_length',
                         )
-                        bc1, bc2 = st.columns(2)
-                        recalc_stabilize_basis = bc1.checkbox(
-                            'tragende Basis / unterste Lage stabilisieren',
-                            value=False,
-                            key='v117_recalc_stabilize_basis',
-                            help='Nur für die gewählte Fuhre. Versucht eine ruhigere Basis: hintereinander statt nebeneinander bevorzugen und grosse/schwere Teile eher unten halten.'
-                        )
-                        recalc_basis_report = bc2.checkbox(
-                            'Basisprüfung in Vorschau anzeigen',
-                            value=True,
-                            key='v117_recalc_basis_report',
-                        )
-                        if recalc_stabilize_basis:
-                            st.caption('V117: Für diese Vorschau wird nebeneinander auf der Basis reduziert und hintereinander bevorzugt. Andere Fuhren bleiben unverändert.')
                         sc1, sc2 = st.columns(2)
                         recalc_allow_stack = sc1.checkbox('stapeln erlauben', value=bool(allow_stack), key='v114_recalc_stack')
                         sc2.caption('Neue Zusatzfuhre wird weiterhin nur nach deiner Bestätigung erzeugt.')
-                        rr1, rr2, rr3, rr4 = st.columns(4)
+                        rr1, rr2, rr3 = st.columns(3)
                         recalc_keep_order = rr1.checkbox('Verladereihenfolge der gewählten Fuhre übernehmen', value=True, key='v116_recalc_keep_order')
                         recalc_keep_sort_hint = rr2.checkbox('Grundsortierung / Gruppen als Hinweis anzeigen', value=True, key='v116_recalc_sort_hint')
                         recalc_check_center = rr3.checkbox('Ladungsmittelpunkt prüfen', value=True, key='v116_recalc_center_check')
-                        recalc_order_flex = rr4.number_input(
-                            'Reihenfolge-Bewertungsfenster %',
-                            min_value=0,
-                            max_value=100,
-                            value=35,
-                            step=5,
-                            key='v118_recalc_order_flex',
-                            help='0 = Reihenfolge strikt. 100 = breites Suchfenster für ganze Verladeeinheiten; kein Bund wird aufgelöst.',
-                        )
                         if recalc_keep_sort_hint:
-                            st.caption('V118: Die Bewertung gilt nur für die gewählte Pritsche. Globale Fuhren davor/danach bleiben fix.')
+                            st.caption('V116: In der Vorschau werden die Bauteile aus der vorhandenen Fuhre in deren aktueller Reihenfolge neu versucht. Globale Fuhren davor/danach bleiben fix.')
 
-                        def _v117_basis_order_units(local_units: pd.DataFrame) -> pd.DataFrame:
-                            # Lokale Reparatur: nur für die gewählte Fuhre.
-                            # Grössere/schwerere Einheiten werden bei aktivierter Basis-Stabilisierung
-                            # früher versucht, damit sie eher unten und ruhiger verteilt liegen.
-                            if local_units is None or local_units.empty:
-                                return local_units
-                            ordered = local_units.copy()
-                            ordered['_V117_Footprint'] = pd.to_numeric(ordered.get('Länge_mm', 0.0), errors='coerce').fillna(0.0) * pd.to_numeric(ordered.get('Breite_mm', 0.0), errors='coerce').fillna(0.0)
-                            ordered['_V117_Weight'] = pd.to_numeric(ordered.get('Gewicht_kg', 0.0), errors='coerce').fillna(0.0)
-                            ordered['_V117_Length'] = pd.to_numeric(ordered.get('Länge_mm', 0.0), errors='coerce').fillna(0.0)
-                            ordered = ordered.sort_values(['_V117_Footprint', '_V117_Weight', '_V117_Length'], ascending=[False, False, False], kind='stable')
-                            return ordered.drop(columns=['_V117_Footprint', '_V117_Weight', '_V117_Length'])
-
-                        def _v113_preview_for_units(local_units: pd.DataFrame, local_platform: pd.Series, suffix: str = '') -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, float]]:
+                        def _v113_preview_for_units(local_units: pd.DataFrame, local_platform: pd.Series, suffix: str = '') -> Tuple[pd.DataFrame, pd.DataFrame]:
                             local_platform = local_platform.copy()
                             local_platform['Max_Höhe_mm'] = float(recalc_max_height)
                             local_platform['Breite_Bund_auf_schmal_verhindern'] = bool(recalc_prevent_support)
                             local_platform['Mindest_Stützbreite_%'] = float(recalc_min_support)
-                            preview_units_local = local_units.copy()
-                            if bool(recalc_stabilize_basis):
-                                preview_units_local = _v117_basis_order_units(preview_units_local)
-                            return create_manual_recalc_plan(
-                                preview_units_local.reset_index(drop=True),
-                                local_platform,
+                            local_platform_df = pd.DataFrame([local_platform])
+                            return create_loading_plan(
+                                local_units.reset_index(drop=True),
+                                local_platform_df.reset_index(drop=True),
                                 base_wood_height=float(base_wood_height),
                                 layer_spacer_height=float(bundle_spacer_height),
                                 gap_length=float(gap_length),
-                                allow_beside=(False if bool(recalc_stabilize_basis) else bool(recalc_allow_beside)),
+                                allow_beside=bool(recalc_allow_beside),
                                 allow_stack=bool(recalc_allow_stack),
                                 allow_rotation=bool(allow_rotation),
-                                order_flex_percent=float(recalc_order_flex),
-                                keep_order=bool(recalc_keep_order),
-                                min_area_percent=float(recalc_min_area),
-                                target_area_percent=float(recalc_target_area),
-                                max_area_percent=float(recalc_max_area),
-                                target_height_percent=float(recalc_target_height),
+                                bundle_order_flex_percent=float(bundle_order_flex_percent),
                                 prevent_wide_on_narrow=bool(recalc_prevent_support),
                                 min_support_width_ratio=float(recalc_min_support) / 100.0,
                                 max_unsupported_length_mm=float(recalc_max_free_length),
                                 max_unsupported_side_mm=float(recalc_max_free_side),
-                                prefer_length_before_stack=(True if bool(recalc_stabilize_basis) else bool(recalc_prefer_length)),
+                                prefer_length_before_stack=bool(recalc_prefer_length),
                             )
 
                         if st.button('Vorschau neu berechnen', key='v113_recalc_preview_button'):
@@ -9668,14 +9234,12 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                             preview_p['Max_freier_Überhang_Länge_mm'] = float(recalc_max_free_length)
                             preview_p['Max_freier_Überhang_seitlich_mm'] = float(recalc_max_free_side)
                             preview_p['Zuerst_hintereinander_versuchen'] = bool(recalc_prefer_length)
-                            preview_p['Tragende_Basis_stabilisieren'] = bool(recalc_stabilize_basis)
-                            preview_placements, preview_summary, preview_metrics = _v113_preview_for_units(preview_units, preview_p)
+                            preview_placements, preview_summary = _v113_preview_for_units(preview_units, preview_p)
                             st.session_state['v113_recalc_preview'] = {
                                 'platform': str(recalc_platform),
                                 'target_ids': target_ids,
                                 'placements': preview_placements,
                                 'summary': preview_summary,
-                                'metrics': preview_metrics,
                                 'platform_row': preview_p,
                             }
 
@@ -9683,28 +9247,10 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                         if isinstance(preview, dict) and preview.get('platform') == str(recalc_platform):
                             preview_placements = clean_placements_dataframe(preview.get('placements', pd.DataFrame()))
                             preview_summary = preview.get('summary', pd.DataFrame())
-                            preview_metrics = preview.get('metrics', {})
                             preview_platform_row = preview.get('platform_row', p_row).copy()
                             loaded_preview = preview_placements[preview_placements.get('Pritsche', pd.Series(dtype=str)).astype(str).ne('NICHT VERLADEN')].copy() if not preview_placements.empty else pd.DataFrame()
                             rest_preview = preview_placements[preview_placements.get('Pritsche', pd.Series(dtype=str)).astype(str).eq('NICHT VERLADEN')].copy() if not preview_placements.empty else pd.DataFrame()
                             st.markdown('**Vorschau Ergebnis**')
-                            if preview_metrics:
-                                metric_cols = st.columns(4)
-                                metric_cols[0].metric('Flächennutzung', f"{preview_metrics.get('Flächennutzung_%', 0.0):.1f} %")
-                                metric_cols[1].metric('Kompaktheit', f"{preview_metrics.get('Kompaktheit_%', 0.0):.1f} %")
-                                metric_cols[2].metric('Höhennutzung', f"{preview_metrics.get('Höhennutzung_%', 0.0):.1f} %")
-                                metric_cols[3].metric('Geladene Einheiten', f"{preview_metrics.get('Geladene_Einheiten', 0.0):.0f}")
-                                if preview_metrics.get('Flächennutzung_%', 0.0) + 0.001 < float(recalc_min_area):
-                                    st.warning(
-                                        f"Die Mindest-Flächennutzung von {float(recalc_min_area):.0f} % "
-                                        f"wird mit {preview_metrics.get('Flächennutzung_%', 0.0):.1f} % unterschritten."
-                                    )
-                                if preview_metrics.get('Flächennutzung_%', 0.0) > float(recalc_max_area) + 0.001:
-                                    st.error(
-                                        f"Die Maximal-Flächennutzung von {float(recalc_max_area):.0f} % "
-                                        f"wird mit {preview_metrics.get('Flächennutzung_%', 0.0):.1f} % überschritten. "
-                                        'Es wurde kein vollständig passender Kandidat gefunden.'
-                                    )
                             if preview_summary is not None and not preview_summary.empty:
                                 st.dataframe(preview_summary, use_container_width=True, hide_index=True)
                             if recalc_check_center and not loaded_preview.empty:
@@ -9714,15 +9260,6 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                                         f"Ladungsmittelpunkt: Abweichung zur Pritschenmitte {center_metrics.get('Abweichung_zur_Pritschenmitte_mm', 0):.0f} mm, "
                                         f"Überhang hinten {center_metrics.get('Überhang_hinten_mm', 0):.0f} mm, "
                                         f"Überhang vorne {center_metrics.get('Überhang_vorne_mm', 0):.0f} mm."
-                                    )
-                            if recalc_basis_report and not loaded_preview.empty:
-                                basis_metrics = _v117_basis_metrics_for_platform(loaded_preview, preview_platform_row)
-                                if basis_metrics:
-                                    st.caption(
-                                        f"Tragende Basis: {basis_metrics.get('Basis_Bauteile', 0):.0f} Teile, "
-                                        f"Basisfläche {basis_metrics.get('Basisfläche_m2', 0):.2f} m², "
-                                        f"Basis zu Lastprojektion {basis_metrics.get('Basis_zu_Lastprojektion_%', 0):.0f} %, "
-                                        f"Gewicht oberhalb ca. {basis_metrics.get('Gewicht_oberhalb_kg', 0):.0f} kg."
                                     )
                             if not rest_preview.empty:
                                 st.warning(f'{len(rest_preview)} Verladeeinheiten passen mit diesen Werten nicht auf {recalc_platform}. Es wird keine zusätzliche Fuhre automatisch erzeugt.')
@@ -9738,7 +9275,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                                     extra_p['Pritschenname'] = base_name
                                     rest_ids = rest_preview.get('Einheit_ID', pd.Series(dtype=str)).dropna().astype(str).tolist()
                                     rest_units = target_units[target_units.get('Einheit_ID', pd.Series(dtype=str)).astype(str).isin(rest_ids)].copy()
-                                    extra_placements, extra_summary, _extra_metrics = _v113_preview_for_units(rest_units, extra_p)
+                                    extra_placements, extra_summary = _v113_preview_for_units(rest_units, extra_p)
                                     extra_rest = extra_placements[extra_placements.get('Pritsche', pd.Series(dtype=str)).astype(str).eq('NICHT VERLADEN')].copy() if not extra_placements.empty else pd.DataFrame()
                                     if not extra_rest.empty:
                                         st.error('Auch mit zusätzlicher Fuhre passen nicht alle Restteile. Es wurde nichts übernommen.')
