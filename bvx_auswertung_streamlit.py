@@ -1588,7 +1588,13 @@ def _load_center_of_gravity_values_for_platform(placements_df: pd.DataFrame, pla
     rows = _load_dimension_rows_for_platform(placements_df, platform)
     base_len = safe_number(platform.get('Länge_mm'), 0.0)
     over_back = safe_number(platform.get('Überhang_hinten_mm'), 0.0)
-    platform_center_x = over_back + base_len / 2.0 if base_len > 0 else 0.0
+    # Interner X-Bezug bleibt wie in der Verladung: X läuft von hinten nach vorne
+    # innerhalb des erlaubten Ladebereichs. Für die Ausgabe wird zusätzlich ein
+    # eindeutiger Bezug von vorne erzeugt: 0 = vorderes Ende der physischen Pritsche.
+    platform_rear_x = over_back
+    platform_front_x = over_back + base_len
+    platform_center_x = platform_rear_x + base_len / 2.0 if base_len > 0 else 0.0
+    platform_center_from_front = base_len / 2.0 if base_len > 0 else 0.0
     width = safe_number(platform.get('Breite_mm'), 0.0)
     platform_center_y = width / 2.0 if width > 0 else 0.0
     empty = {
@@ -1596,6 +1602,11 @@ def _load_center_of_gravity_values_for_platform(placements_df: pd.DataFrame, pla
         'Schwerpunkt_Y_mm': 0.0,
         'Pritschenmitte_X_mm': platform_center_x,
         'Pritschenmitte_Y_mm': platform_center_y,
+        'Pritschenheck_X_mm': platform_rear_x,
+        'Pritschenfront_X_mm': platform_front_x,
+        'Schwerpunkt_X_ab_Vorne_mm': 0.0,
+        'Pritschenmitte_ab_Vorne_mm': platform_center_from_front,
+        'Schwerpunkt_Abstand_ab_Vorne_mm': 0.0,
         'Schwerpunkt_Abstand_X_mm': 0.0,
         'Schwerpunkt_Abstand_Y_mm': 0.0,
     }
@@ -1611,11 +1622,19 @@ def _load_center_of_gravity_values_for_platform(placements_df: pd.DataFrame, pla
     y_centers = pd.to_numeric(rows.get('Y_mm'), errors='coerce').fillna(0.0) + pd.to_numeric(rows.get('Breite_mm'), errors='coerce').fillna(0.0) / 2.0
     sp_x = float((x_centers * weights).sum() / total_w)
     sp_y = float((y_centers * weights).sum() / total_w)
+    sp_x_from_front = platform_front_x - sp_x if base_len > 0 else 0.0
+    # Positiv bedeutet: Schwerpunkt liegt von vorne gemessen weiter hinten als die Pritschenmitte.
+    sp_delta_from_front = sp_x_from_front - platform_center_from_front
     return {
         'Schwerpunkt_X_mm': sp_x,
         'Schwerpunkt_Y_mm': sp_y,
         'Pritschenmitte_X_mm': platform_center_x,
         'Pritschenmitte_Y_mm': platform_center_y,
+        'Pritschenheck_X_mm': platform_rear_x,
+        'Pritschenfront_X_mm': platform_front_x,
+        'Schwerpunkt_X_ab_Vorne_mm': sp_x_from_front,
+        'Pritschenmitte_ab_Vorne_mm': platform_center_from_front,
+        'Schwerpunkt_Abstand_ab_Vorne_mm': sp_delta_from_front,
         'Schwerpunkt_Abstand_X_mm': sp_x - platform_center_x,
         'Schwerpunkt_Abstand_Y_mm': sp_y - platform_center_y,
     }
@@ -5062,6 +5081,9 @@ def recompute_summary_from_placements(placements_df: pd.DataFrame, platforms_df:
             'Schwerpunkt_Y_mm': round(cog_vals.get('Schwerpunkt_Y_mm', 0.0), 1),
             'Pritschenmitte_X_mm': round(cog_vals.get('Pritschenmitte_X_mm', 0.0), 1),
             'Schwerpunkt_Abstand_X_mm': round(cog_vals.get('Schwerpunkt_Abstand_X_mm', 0.0), 1),
+            'Schwerpunkt_X_ab_Vorne_mm': round(cog_vals.get('Schwerpunkt_X_ab_Vorne_mm', 0.0), 1),
+            'Pritschenmitte_ab_Vorne_mm': round(cog_vals.get('Pritschenmitte_ab_Vorne_mm', 0.0), 1),
+            'Schwerpunkt_Abstand_ab_Vorne_mm': round(cog_vals.get('Schwerpunkt_Abstand_ab_Vorne_mm', 0.0), 1),
         })
     return pd.DataFrame(rows)
 
@@ -5227,7 +5249,23 @@ def _load_dimension_values_for_platform(placements_df: pd.DataFrame, platform: p
         'Schwerpunkt_Y_mm': cog_vals.get('Schwerpunkt_Y_mm', 0.0),
         'Pritschenmitte_X_mm': cog_vals.get('Pritschenmitte_X_mm', 0.0),
         'Schwerpunkt_Abstand_X_mm': cog_vals.get('Schwerpunkt_Abstand_X_mm', 0.0),
+        'Schwerpunkt_X_ab_Vorne_mm': cog_vals.get('Schwerpunkt_X_ab_Vorne_mm', 0.0),
+        'Pritschenmitte_ab_Vorne_mm': cog_vals.get('Pritschenmitte_ab_Vorne_mm', 0.0),
+        'Schwerpunkt_Abstand_ab_Vorne_mm': cog_vals.get('Schwerpunkt_Abstand_ab_Vorne_mm', 0.0),
     }
+
+
+def _format_sp_deviation_from_front(value: Any) -> str:
+    """Text für Schwerpunktabweichung mit eindeutigem Bezug von vorne.
+
+    Positiv bedeutet: Schwerpunkt liegt weiter hinten als die Pritschenmitte.
+    Negativ bedeutet: Schwerpunkt liegt weiter vorne als die Pritschenmitte.
+    """
+    v = safe_number(value, 0.0)
+    if abs(v) < 0.5:
+        return 'SP Abw.: 0 mm'
+    direction = 'nach hinten' if v > 0 else 'nach vorne'
+    return f'SP Abw.: {abs(v):.0f} mm {direction}'
 
 def create_bsd_header_for_platform(
     platform: pd.Series,
@@ -5265,6 +5303,9 @@ def create_bsd_header_for_platform(
         'Schwerpunkt_X_mm': load_vals.get('Schwerpunkt_X_mm', 0.0),
         'Schwerpunkt_Abstand_X_mm': load_vals.get('Schwerpunkt_Abstand_X_mm', 0.0),
         'Pritschenmitte_X_mm': load_vals.get('Pritschenmitte_X_mm', 0.0),
+        'Schwerpunkt_X_ab_Vorne_mm': load_vals.get('Schwerpunkt_X_ab_Vorne_mm', 0.0),
+        'Pritschenmitte_ab_Vorne_mm': load_vals.get('Pritschenmitte_ab_Vorne_mm', 0.0),
+        'Schwerpunkt_Abstand_ab_Vorne_mm': load_vals.get('Schwerpunkt_Abstand_ab_Vorne_mm', 0.0),
         'Max_Gewicht_kg': safe_number(platform.get('Max_Gewicht_kg')),
         'Warnungen': warn_count,
         'Objekt_Name': project_meta.get('Objekt_Name', ''),
@@ -6137,10 +6178,10 @@ def _pdf_draw_view_orientation_helpers(c, ox: float, oy: float, draw_w: float, d
     c.setFillColor(colors.black)
     c.setLineWidth(0.35)
     c.setDash(2, 2)
-    # Mittellinie als Bezug
-    if view in ('top', 'top_rotated', 'side', 'side_left', 'side_right'):
-        c.line(ox + draw_w / 2.0, oy, ox + draw_w / 2.0, oy + draw_h)
-    elif view in ('front', 'back'):
+    # Mittellinie als Bezug: Bei Seitenansicht wird die echte Pritschenmitte
+    # separat aus der Plattformgeometrie gezeichnet. Nicht die Ansichtsmitte verwenden,
+    # weil diese bei Überhang nicht der Pritschenmitte entspricht.
+    if view in ('front', 'back'):
         c.line(ox + draw_w / 2.0, oy, ox + draw_w / 2.0, oy + draw_h)
     c.setDash()
     c.setFont('Helvetica', 5.8)
@@ -6150,7 +6191,6 @@ def _pdf_draw_view_orientation_helpers(c, ox: float, oy: float, draw_w: float, d
         right_lbl = 'Vorne' if front_at_x_max else 'Hinten'
         c.drawString(ox, oy + draw_h + 2.5, left_lbl)
         c.drawRightString(ox + draw_w, oy + draw_h + 2.5, right_lbl)
-        c.drawCentredString(ox + draw_w / 2.0, oy + draw_h + 2.5, 'Mitte X')
     if view == 'top':
         left_lbl = 'Hinten' if front_at_x_max else 'Vorne'
         right_lbl = 'Vorne' if front_at_x_max else 'Hinten'
@@ -6618,19 +6658,35 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
 
     _pdf_draw_view_orientation_helpers(c, ox, oy, draw_w, draw_h, view, front_at_x_max, left_at_y_max)
 
-    # V119: Schwerpunkt der gesamten Ladung inkl. Überhang als dünne Bezugslinie in der Seitenansicht.
+    # V122: echte Pritschenmitte und Schwerpunkt in der Seitenansicht zeichnen.
+    # Die Mitte-Linie ist NICHT die Mitte des ganzen Ladefensters inkl. Überhang,
+    # sondern die Mitte der physischen Pritsche.
     cog_vals_for_view = _load_center_of_gravity_values_for_platform(placements, platform)
     if used_len > 0 and view in ('side', 'side_left', 'side_right'):
+        target_x = safe_number(cog_vals_for_view.get('Pritschenmitte_X_mm'), 0.0)
+        if target_x > 0:
+            sx_mid0, _sx_mid1 = _pdf_project_x_range_for_side(target_x, target_x, eff_length, view, left_at_y_max=left_at_y_max)
+            c.saveState()
+            c.setStrokeColor(colors.HexColor('#8a8a8a'))
+            c.setDash(2, 2)
+            c.setLineWidth(0.38)
+            c.line(tx(sx_mid0), oy, tx(sx_mid0), oy + draw_h)
+            c.setDash()
+            c.setFont('Helvetica', 5.0)
+            c.setFillColor(colors.HexColor('#555555'))
+            c.drawCentredString(tx(sx_mid0), oy + draw_h - 13, 'Mitte P')
+            c.restoreState()
+
         sp_x = safe_number(cog_vals_for_view.get('Schwerpunkt_X_mm'), 0.0)
         if sp_x > 0:
             sx_sp0, _sx_sp1 = _pdf_project_x_range_for_side(sp_x, sp_x, eff_length, view, left_at_y_max=left_at_y_max)
             c.saveState()
-            c.setStrokeColor(colors.HexColor('#404040'))
-            c.setDash(3, 2)
-            c.setLineWidth(0.45)
+            c.setStrokeColor(colors.HexColor('#202020'))
+            c.setDash(5, 2)
+            c.setLineWidth(0.55)
             c.line(tx(sx_sp0), oy, tx(sx_sp0), oy + draw_h)
             c.setDash()
-            c.setFont('Helvetica', 5.2)
+            c.setFont('Helvetica-Bold', 5.4)
             c.setFillColor(colors.black)
             c.drawCentredString(tx(sx_sp0), oy + draw_h - 7, 'SP')
             c.restoreState()
@@ -7460,8 +7516,8 @@ def create_loading_pdf(
             f'Ladegewicht: {load_vals["Ladegewicht_kg"]:.0f} kg',
             f'Eigengewicht: {load_vals["Eigengewicht_kg"]:.0f} kg',
             f'Gesamtgewicht: {load_vals["Gesamtgewicht_kg"]:.0f} kg',
-            f'SP Länge: {load_vals.get("Schwerpunkt_X_mm", 0.0):.0f} mm / Mitte {load_vals.get("Pritschenmitte_X_mm", 0.0):.0f} mm',
-            f'SP Abw.: {load_vals.get("Schwerpunkt_Abstand_X_mm", 0.0):+.0f} mm',
+            f'SP ab vorne: {load_vals.get("Schwerpunkt_X_ab_Vorne_mm", 0.0):.0f} mm / Mitte P: {load_vals.get("Pritschenmitte_ab_Vorne_mm", 0.0):.0f} mm',
+            _format_sp_deviation_from_front(load_vals.get("Schwerpunkt_Abstand_ab_Vorne_mm", 0.0)),
         ]
         for i, line in enumerate(info_lines):
             c.drawString(info_x, info_y - 16 - i * 13, line)
