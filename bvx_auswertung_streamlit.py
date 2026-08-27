@@ -1,5 +1,5 @@
 """
-BVX Auswertung + Verladeplanung - Streamlit Version v119
+BVX Auswertung + Verladeplanung - Streamlit Version v120
 
 Installation:
     pip install streamlit pandas plotly openpyxl reportlab pillow
@@ -1380,7 +1380,7 @@ def _real_load_placement_rows(state: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 
-# V119: Geometrische Grundprüfung für echte Bauteile.
+# V119/V120: Geometrische Grundprüfung für echte Bauteile.
 # Ziel: Bauteile dürfen sich in X/Y/Z nicht überschneiden. Damit werden Fälle wie
 # BE 51/52/53 verhindert: gleiche Lage + überlappende Länge + gemeinsame Breite
 # grösser als Pritschenbreite darf nicht als gültige Verladung entstehen.
@@ -1494,6 +1494,94 @@ def find_geometry_conflicts(placements_df: pd.DataFrame, platforms_df: Optional[
                 })
     return pd.DataFrame(warnings, columns=cols)
 
+
+
+
+def resolve_x_collisions_by_layer(placements_df: pd.DataFrame, platforms_df: pd.DataFrame, gap_mm: float = 0.0) -> pd.DataFrame:
+    """V120: Sicherheitsnetz gegen X/Y/Z-Kollisionen nach der Ausrichtung.
+
+    Falls eine nachträgliche Zentrierung Bauteile in derselben Lage und mit
+    überlappender Breite übereinander schiebt, werden die betroffenen realen
+    Bauteile einer Z-Lage in X wieder hintereinander gelegt. Das verändert keine
+    Reihenfolge und keine Y-/Z-Lage, sondern verhindert nur unmögliche Geometrie.
+    Kann die Lage in der erlaubten Gesamtlänge nicht konfliktfrei abgelegt werden,
+    bleibt sie unverändert und die Warnung aus find_geometry_conflicts zeigt den
+    Fehler weiterhin.
+    """
+    if placements_df is None or placements_df.empty or platforms_df is None or platforms_df.empty:
+        return placements_df.copy() if placements_df is not None else pd.DataFrame()
+    result = placements_df.copy()
+    if 'Pritsche' not in result.columns:
+        return result
+    for col in ['X_mm', 'Y_mm', 'Z_mm', 'Länge_mm', 'Breite_mm', 'Höhe_mm']:
+        if col in result.columns:
+            result[col] = pd.to_numeric(result[col], errors='coerce')
+    helper_types = {'Unterbau', 'Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz'}
+    p_lookup = {str(r.get('Pritsche', '')): r for _, r in platforms_df.iterrows()}
+    for pname, prow in p_lookup.items():
+        eff_len = safe_number(prow.get('Länge_mm'), 0.0) + safe_number(prow.get('Überhang_vorne_mm'), 0.0) + safe_number(prow.get('Überhang_hinten_mm'), 0.0)
+        if eff_len <= 0:
+            continue
+        mask_real = (
+            result['Pritsche'].astype(str).eq(pname)
+            & result['X_mm'].notna() & result['Y_mm'].notna() & result['Z_mm'].notna()
+            & result['Länge_mm'].notna() & result['Breite_mm'].notna() & result['Höhe_mm'].notna()
+            & ~result.get('Typ', pd.Series(dtype=str)).astype(str).isin(helper_types)
+        )
+        if not mask_real.any():
+            continue
+        sub = result.loc[mask_real].copy()
+        # nur gleiche Z-Unterkante/Lage betrachten; unterschiedliche Lagen dürfen übereinander liegen.
+        for z_key, grp in sub.groupby(sub['Z_mm'].round(1), sort=False):
+            idxs = grp.sort_values(['X_mm', 'Y_mm', 'Länge_mm'], ascending=[True, True, False], kind='stable').index.tolist()
+            if len(idxs) < 2:
+                continue
+            # Test: gibt es in dieser Lage überhaupt echte Y- und X-Überlappungen?
+            needs_fix = False
+            for pos_i, i in enumerate(idxs):
+                bi = _row_box_values(result.loc[i])
+                if bi is None:
+                    continue
+                for j in idxs[pos_i+1:]:
+                    bj = _row_box_values(result.loc[j])
+                    if bj is None:
+                        continue
+                    # gleiche Lage: Z-Überlappung ist gegeben; relevant ist X+Y.
+                    if _axis_overlap_mm(bi[0], bi[1], bj[0], bj[1], tol=1.0) > 0 and _axis_overlap_mm(bi[2], bi[3], bj[2], bj[3], tol=1.0) > 0:
+                        needs_fix = True
+                        break
+                if needs_fix:
+                    break
+            if not needs_fix:
+                continue
+            # Betroffene Lage in X hintereinander legen, dabei Y/Z unverändert lassen.
+            ordered = idxs
+            x_cursor = min(float(result.loc[ordered[0], 'X_mm']), max(0.0, eff_len))
+            new_x: Dict[Any, float] = {}
+            for idx in ordered:
+                lx = safe_number(result.loc[idx].get('Länge_mm'), 0.0)
+                if lx <= 0:
+                    continue
+                new_x[idx] = x_cursor
+                x_cursor += lx + max(0.0, float(gap_mm or 0.0))
+            if not new_x:
+                continue
+            span0 = min(new_x.values())
+            span1 = max(new_x[idx] + safe_number(result.loc[idx].get('Länge_mm'), 0.0) for idx in new_x)
+            span = span1 - span0
+            if span > eff_len + 0.1:
+                # Nicht zwangsweise kaputt schieben: Warnung bleibt bestehen.
+                continue
+            # Lage als Block auf gültigen Bereich setzen.
+            target0 = max(0.0, min(span0, eff_len - span))
+            block_shift = target0 - span0
+            for idx, xval in new_x.items():
+                result.loc[idx, 'X_mm'] = round(xval + block_shift, 1)
+                if 'Ebene' in result.columns:
+                    v = str(result.loc[idx, 'Ebene'])
+                    if 'Kollision X korrigiert' not in v:
+                        result.loc[idx, 'Ebene'] = f'{v} / Kollision X korrigiert'
+    return result
 
 def _load_center_of_gravity_values_for_platform(placements_df: pd.DataFrame, platform: pd.Series) -> Dict[str, float]:
     """Schwerpunkt der echten Ladung über die gesamte Ladung inkl. Überhang."""
@@ -2970,22 +3058,15 @@ def center_length_groups_from_platform_center(placements_df: pd.DataFrame, platf
         if not mask.any():
             continue
 
-        center_y = width / 2.0
         subset = result.loc[mask].copy()
-        side_keys = []
-        for _, r in subset.iterrows():
-            y0 = safe_number(r.get('Y_mm'))
-            by = safe_number(r.get('Breite_mm'))
-            y1 = y0 + by
-            if by >= width * 0.75 or (y0 < center_y < y1):
-                side_keys.append('mittig')
-            elif y0 + by / 2.0 <= center_y:
-                side_keys.append('links')
-            else:
-                side_keys.append('rechts')
 
-        # Gleiche Z-Lage + gleiche Breiten-Seite = eine Stapelgruppe.
-        subset['_x_center_group'] = [f"{round(float(z), 1)}|{s}" for z, s in zip(subset['Z_mm'], side_keys)]
+        # V120: X-Ausrichtung nicht mehr je Breiten-Seite trennen.
+        # Das frühere Gruppieren nach Z+links/rechts/mittig konnte breite Elemente
+        # (z. B. BE53) unabhängig von den Nachbarelementen verschieben und dadurch
+        # scheinbare/echte X-Überlappungen in derselben Lage erzeugen.
+        # Darum bleibt jede komplette Z-Lage in X zusammen und wird als Ganzes
+        # ausgerichtet. So bleiben die echten Längenabstände erhalten.
+        subset['_x_center_group'] = subset['Z_mm'].round(1).astype(str)
 
         for _group_key, grp in subset.groupby('_x_center_group', sort=False):
             idxs = grp.index.tolist()
@@ -3014,12 +3095,16 @@ def center_length_groups_from_platform_center(placements_df: pd.DataFrame, platf
 
 
 def shift_x_to_use_front_overhang(placements_df: pd.DataFrame, platforms_df: pd.DataFrame) -> pd.DataFrame:
-    """V98: Fertige Ladung je Pritsche in X-Richtung praxisnah ausrichten.
+    """V120: Fertige Ladung je Pritsche in X-Richtung auf echte Pritschenmitte ausrichten.
 
-    Pritschenlänge = physisches Auflager. Wenn Ladung länger ist als die
-    Pritsche, wird zuerst der erlaubte vordere Überhang genutzt und der
-    hintere Überhang dadurch reduziert. Bunde/Bauteile bleiben relativ
-    zueinander unverändert; es wird nur der komplette Pritschenblock verschoben.
+    Der Schwerpunkt wird über die ganze Ladung inkl. Überhang berechnet. Verschoben
+    wird aber nur innerhalb der tatsächlich erlaubten Grenzen:
+    - passt die Ladung auf die physische Pritsche, bleibt sie auf der Pritsche;
+    - braucht sie Überhang, darf sie nur innerhalb der erlaubten Überhänge wandern.
+
+    Wichtig: Es wird nicht neu verladen und keine Reihenfolge geändert. Es wird nur
+    die komplette Fuhre als Block in X verschoben, damit der Ladungsschwerpunkt so
+    nah wie möglich an die echte Pritschenmitte kommt.
     """
     if placements_df is None or placements_df.empty or platforms_df is None or platforms_df.empty:
         return placements_df.copy() if placements_df is not None else pd.DataFrame()
@@ -3028,7 +3113,7 @@ def shift_x_to_use_front_overhang(placements_df: pd.DataFrame, platforms_df: pd.
     if 'Pritsche' not in result.columns:
         return result
 
-    for col in ['X_mm', 'Y_mm', 'Z_mm', 'Länge_mm', 'Breite_mm', 'Höhe_mm']:
+    for col in ['X_mm', 'Y_mm', 'Z_mm', 'Länge_mm', 'Breite_mm', 'Höhe_mm', 'Gewicht_kg']:
         if col in result.columns:
             result[col] = pd.to_numeric(result[col], errors='coerce')
 
@@ -3063,25 +3148,36 @@ def shift_x_to_use_front_overhang(placements_df: pd.DataFrame, platforms_df: pd.
 
         platform_x0 = back_allow
         platform_x1 = back_allow + base_len
+        platform_center_x = platform_x0 + base_len / 2.0
 
-        if load_len <= base_len:
-            # Ladung passt auf die physische Pritsche: auf dem Auflager zentrieren,
-            # nicht im gesamten Überhang-Zeichenraum.
-            target_x0 = platform_x0 + (base_len - load_len) / 2.0
+        # Zulässiger Verschiebebereich für den kompletten Ladungsblock.
+        if load_len <= base_len + 0.1:
+            # Keine unnötigen Überhänge erzeugen, wenn die Ladung auf die Pritsche passt.
+            min_x0 = platform_x0
+            max_x0 = platform_x1 - load_len
         else:
-            # Ladung braucht Überhang: vorne den erlaubten Überhang ausnutzen,
-            # damit hinten weniger freie Länge ohne Auflager entsteht.
-            total_overhang = load_len - base_len
-            target_front = min(front_allow, total_overhang)
-            target_back = total_overhang - target_front
-            if target_back > back_allow:
-                target_back = back_allow
-                target_front = total_overhang - target_back
-            target_front = max(0.0, min(front_allow, target_front))
-            target_back = max(0.0, min(back_allow, target_back))
-            target_x0 = platform_x0 - target_back
+            # Überhang ist nötig: nur innerhalb der erlaubten Überhangreserve bewegen.
+            min_x0 = max(0.0, platform_x0 - back_allow)
+            max_x0 = min(eff_len - load_len, platform_x1 + front_allow - load_len)
+        if max_x0 < min_x0:
+            min_x0, max_x0 = max_x0, min_x0
 
-        target_x0 = max(0.0, min(target_x0, eff_len - load_len))
+        # Schwerpunkt der echten Ladung inkl. Überhang berechnen.
+        real = result.loc[mask_real].copy()
+        weights = pd.to_numeric(real.get('Gewicht_kg'), errors='coerce').fillna(0.0)
+        if float(weights.sum()) <= 0:
+            weights = pd.to_numeric(real.get('Länge_mm'), errors='coerce').fillna(0.0) * pd.to_numeric(real.get('Breite_mm'), errors='coerce').fillna(0.0)
+        total_w = float(weights.sum())
+        if total_w <= 0:
+            sp_x = (load_x0 + load_x1) / 2.0
+        else:
+            centers = pd.to_numeric(real.get('X_mm'), errors='coerce').fillna(0.0) + pd.to_numeric(real.get('Länge_mm'), errors='coerce').fillna(0.0) / 2.0
+            sp_x = float((centers * weights).sum() / total_w)
+
+        # Idealer Shift: SP auf echte Pritschenmitte. Dann auf Grenzen begrenzen.
+        desired_shift = platform_center_x - sp_x
+        desired_x0 = load_x0 + desired_shift
+        target_x0 = max(min_x0, min(max_x0, desired_x0))
         shift = target_x0 - load_x0
         if abs(shift) < 0.1:
             continue
@@ -3089,11 +3185,10 @@ def shift_x_to_use_front_overhang(placements_df: pd.DataFrame, platforms_df: pd.
         result.loc[mask_all, 'X_mm'] = (result.loc[mask_all, 'X_mm'] + shift).round(1)
         if 'Ebene' in result.columns:
             result.loc[mask_all, 'Ebene'] = result.loc[mask_all, 'Ebene'].astype(str).apply(
-                lambda v: v if 'Überhang vorne genutzt' in v else f'{v} / Überhang vorne genutzt'
+                lambda v: v if 'SP zur Pritschenmitte' in v else f'{v} / SP zur Pritschenmitte'
             )
 
     return result
-
 
 def normalize_y_from_platform_center(placements_df: pd.DataFrame, platforms_df: pd.DataFrame) -> pd.DataFrame:
     """Richtet die Y-Positionen praxisnah von der Pritschenmitte aus.
@@ -3694,6 +3789,10 @@ def create_variant_a_loading_plan(
         # Die stabile globale X-Ausrichtung aus center_placements_geometrically
         # bleibt aktiv; die per-Lage-Nachverschiebung wird nicht mehr angewendet.
         placements_df = center_length_groups_from_platform_center(placements_df, platforms_used_df)
+        # V120: nach der X-Ausrichtung Kollisionen reparieren, dann die ganze
+        # Fuhre so verschieben, dass der Ladungsschwerpunkt möglichst nahe an
+        # der echten Pritschenmitte liegt.
+        placements_df = resolve_x_collisions_by_layer(placements_df, platforms_used_df, gap_mm=gap_length)
         placements_df = shift_x_to_use_front_overhang(placements_df, platforms_used_df)
         summary_df = recompute_summary_from_placements(placements_df, platforms_used_df)
 
@@ -5807,7 +5906,19 @@ def _pdf_draw_label_lines(c, rx: float, ry: float, rw: float, rh: float, lines: 
         c.setFillColor(colors.black)
         txt = _pdf_truncate_to_width(c, lines[0], max(4, rw - 4), font_name, font_size)
         if txt:
-            c.drawCentredString(rx + rw / 2, ry + rh / 2 - font_size / 3, txt)
+            # V120: kleine weisse Hinterlegung, damit BE-Nummern auf hellen/
+            # schmalen Elementen sichtbar bleiben, ohne pauschal doppelt zu schreiben.
+            from reportlab.lib import colors as _label_colors
+            tx = rx + rw / 2
+            ty = ry + rh / 2 - font_size / 3
+            tw = c.stringWidth(txt, font_name, font_size)
+            c.saveState()
+            c.setFillColor(_label_colors.white)
+            c.rect(tx - tw / 2 - 1.0, ty - 0.8, tw + 2.0, font_size + 1.5, stroke=0, fill=1)
+            c.restoreState()
+            c.setFont(font_name, font_size)
+            c.setFillColor(colors.black)
+            c.drawCentredString(tx, ty, txt)
             drawn = True
         return drawn
 
@@ -7349,6 +7460,8 @@ def create_loading_pdf(
             f'Ladegewicht: {load_vals["Ladegewicht_kg"]:.0f} kg',
             f'Eigengewicht: {load_vals["Eigengewicht_kg"]:.0f} kg',
             f'Gesamtgewicht: {load_vals["Gesamtgewicht_kg"]:.0f} kg',
+            f'SP Länge: {load_vals.get("Schwerpunkt_X_mm", 0.0):.0f} mm / Mitte {load_vals.get("Pritschenmitte_X_mm", 0.0):.0f} mm',
+            f'SP Abw.: {load_vals.get("Schwerpunkt_Abstand_X_mm", 0.0):+.0f} mm',
         ]
         for i, line in enumerate(info_lines):
             c.drawString(info_x, info_y - 16 - i * 13, line)
