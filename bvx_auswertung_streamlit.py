@@ -3792,7 +3792,7 @@ def create_variant_a_loading_plan(
         # V120: nach der X-Ausrichtung Kollisionen reparieren, dann die ganze
         # Fuhre so verschieben, dass der Ladungsschwerpunkt möglichst nahe an
         # der echten Pritschenmitte liegt.
-        placements_df = resolve_x_collisions_by_layer(placements_df, platforms_used_df, gap_mm=gap_length)
+        placements_df = resolve_x_collisions_by_layer(placements_df, platforms_used_df, gap_mm=gap_default)
         placements_df = shift_x_to_use_front_overhang(placements_df, platforms_used_df)
         summary_df = recompute_summary_from_placements(placements_df, platforms_used_df)
 
