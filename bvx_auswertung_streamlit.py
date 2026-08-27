@@ -1,5 +1,5 @@
 """
-BVX Auswertung + Verladeplanung - Streamlit Version v104
+BVX Auswertung + Verladeplanung - Streamlit Version v119
 
 Installation:
     pip install streamlit pandas plotly openpyxl reportlab pillow
@@ -1357,6 +1357,9 @@ def can_place(state: Dict[str, Any], x: float, y: float, z: float, length: float
         return False
     if _blocked_by_runge(state, y, z, width):
         return False
+    # V119: echte Bauteile/Bunde dürfen sich im Raum nicht überschneiden.
+    if _collides_with_existing_real_load(state, x, y, z, length, width, height):
+        return False
     return True
 
 
@@ -1375,6 +1378,159 @@ def _real_load_placement_rows(state: Dict[str, Any]) -> List[Dict[str, Any]]:
     return rows
 
 
+
+
+# V119: Geometrische Grundprüfung für echte Bauteile.
+# Ziel: Bauteile dürfen sich in X/Y/Z nicht überschneiden. Damit werden Fälle wie
+# BE 51/52/53 verhindert: gleiche Lage + überlappende Länge + gemeinsame Breite
+# grösser als Pritschenbreite darf nicht als gültige Verladung entstehen.
+def _is_real_load_type_value(value: Any) -> bool:
+    return str(value or '').strip() not in {'Unterbau', 'Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz'}
+
+
+def _axis_overlap_mm(a0: float, a1: float, b0: float, b1: float, tol: float = 1.0) -> float:
+    try:
+        return max(0.0, min(float(a1), float(b1)) - max(float(a0), float(b0)) - float(tol))
+    except Exception:
+        return 0.0
+
+
+def _row_box_values(row: Any) -> Optional[Tuple[float, float, float, float, float, float]]:
+    try:
+        x0 = safe_number(row.get('X_mm'), 0.0)
+        y0 = safe_number(row.get('Y_mm'), 0.0)
+        z0 = safe_number(row.get('Z_mm'), 0.0)
+        lx = safe_number(row.get('Länge_mm'), 0.0)
+        by = safe_number(row.get('Breite_mm'), 0.0)
+        hz = safe_number(row.get('Höhe_mm'), 0.0)
+        if lx <= 0 or by <= 0 or hz <= 0:
+            return None
+        return x0, x0 + lx, y0, y0 + by, z0, z0 + hz
+    except Exception:
+        return None
+
+
+def _boxes_overlap_3d(a: Tuple[float, float, float, float, float, float], b: Tuple[float, float, float, float, float, float], tol: float = 1.0) -> bool:
+    ax0, ax1, ay0, ay1, az0, az1 = a
+    bx0, bx1, by0, by1, bz0, bz1 = b
+    return (
+        _axis_overlap_mm(ax0, ax1, bx0, bx1, tol) > 0
+        and _axis_overlap_mm(ay0, ay1, by0, by1, tol) > 0
+        and _axis_overlap_mm(az0, az1, bz0, bz1, tol) > 0
+    )
+
+
+def _collides_with_existing_real_load(state: Dict[str, Any], x: float, y: float, z: float, length: float, width: float, height: float) -> bool:
+    candidate = (float(x), float(x) + float(length), float(y), float(y) + float(width), float(z), float(z) + float(height))
+    for existing in state.get('placements', []) or []:
+        if not _is_real_load_type_value(existing.get('Typ', '')):
+            continue
+        box = _row_box_values(existing)
+        if box is None:
+            continue
+        if _boxes_overlap_3d(candidate, box, tol=1.0):
+            return True
+    return False
+
+
+def find_geometry_conflicts(placements_df: pd.DataFrame, platforms_df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+    """Findet echte X/Y/Z-Überschneidungen zwischen Bauteilen/Bunden."""
+    cols = ['Typ', 'Pritsche', 'Einheit_ID', 'Warnung', 'Details']
+    if placements_df is None or placements_df.empty:
+        return pd.DataFrame(columns=cols)
+    rows = placements_df.copy()
+    if 'Pritsche' not in rows.columns:
+        return pd.DataFrame(columns=cols)
+    for col in ['X_mm', 'Y_mm', 'Z_mm', 'Länge_mm', 'Breite_mm', 'Höhe_mm']:
+        if col in rows.columns:
+            rows[col] = pd.to_numeric(rows[col], errors='coerce')
+    typ_series = rows.get('Typ', pd.Series(dtype=str)).astype(str)
+    rows = rows[
+        rows['X_mm'].notna()
+        & rows['Y_mm'].notna()
+        & rows['Z_mm'].notna()
+        & rows['Länge_mm'].notna()
+        & rows['Breite_mm'].notna()
+        & rows['Höhe_mm'].notna()
+        & typ_series.apply(_is_real_load_type_value)
+        & rows['Pritsche'].astype(str).ne('NICHT VERLADEN')
+    ].copy()
+    if rows.empty:
+        return pd.DataFrame(columns=cols)
+    platform_width_lookup: Dict[str, float] = {}
+    if platforms_df is not None and not platforms_df.empty and 'Pritsche' in platforms_df.columns:
+        for _, pr in platforms_df.iterrows():
+            platform_width_lookup[str(pr.get('Pritsche', ''))] = safe_number(pr.get('Breite_mm'), 0.0)
+    warnings: List[Dict[str, Any]] = []
+    for pname, grp in rows.groupby(rows['Pritsche'].astype(str), sort=False):
+        idxs = grp.index.tolist()
+        for pos_i in range(len(idxs)):
+            i = idxs[pos_i]
+            row_i = rows.loc[i]
+            box_i = _row_box_values(row_i)
+            if box_i is None:
+                continue
+            for j in idxs[pos_i + 1:]:
+                row_j = rows.loc[j]
+                box_j = _row_box_values(row_j)
+                if box_j is None:
+                    continue
+                if not _boxes_overlap_3d(box_i, box_j, tol=1.0):
+                    continue
+                label_i = _format_label_value(row_i.get('Ansicht_Label')) or _format_label_value(row_i.get('Bauteile')) or _format_label_value(row_i.get('Einheit_ID'))
+                label_j = _format_label_value(row_j.get('Ansicht_Label')) or _format_label_value(row_j.get('Bauteile')) or _format_label_value(row_j.get('Einheit_ID'))
+                bx_overlap = _axis_overlap_mm(box_i[0], box_i[1], box_j[0], box_j[1], tol=0.0)
+                by_span = max(box_i[3], box_j[3]) - min(box_i[2], box_j[2])
+                p_width = platform_width_lookup.get(str(pname), 0.0)
+                width_hint = f', Y-Spanne {by_span:.0f} mm'
+                if p_width > 0:
+                    width_hint += f' / Pritsche {p_width:.0f} mm'
+                warnings.append({
+                    'Typ': 'Breiten-/Kollisionsprüfung',
+                    'Pritsche': pname,
+                    'Einheit_ID': f'{label_i} / {label_j}',
+                    'Warnung': 'Bauteile überschneiden sich geometrisch',
+                    'Details': f'X-Überlappung {bx_overlap:.0f} mm{width_hint}; gleiche Raumlage prüfen',
+                })
+    return pd.DataFrame(warnings, columns=cols)
+
+
+def _load_center_of_gravity_values_for_platform(placements_df: pd.DataFrame, platform: pd.Series) -> Dict[str, float]:
+    """Schwerpunkt der echten Ladung über die gesamte Ladung inkl. Überhang."""
+    rows = _load_dimension_rows_for_platform(placements_df, platform)
+    base_len = safe_number(platform.get('Länge_mm'), 0.0)
+    over_back = safe_number(platform.get('Überhang_hinten_mm'), 0.0)
+    platform_center_x = over_back + base_len / 2.0 if base_len > 0 else 0.0
+    width = safe_number(platform.get('Breite_mm'), 0.0)
+    platform_center_y = width / 2.0 if width > 0 else 0.0
+    empty = {
+        'Schwerpunkt_X_mm': 0.0,
+        'Schwerpunkt_Y_mm': 0.0,
+        'Pritschenmitte_X_mm': platform_center_x,
+        'Pritschenmitte_Y_mm': platform_center_y,
+        'Schwerpunkt_Abstand_X_mm': 0.0,
+        'Schwerpunkt_Abstand_Y_mm': 0.0,
+    }
+    if rows is None or rows.empty:
+        return empty
+    weights = pd.to_numeric(rows.get('Gewicht_kg'), errors='coerce').fillna(0.0)
+    if float(weights.sum()) <= 0:
+        weights = pd.to_numeric(rows.get('Länge_mm'), errors='coerce').fillna(0.0) * pd.to_numeric(rows.get('Breite_mm'), errors='coerce').fillna(0.0)
+    total_w = float(weights.sum())
+    if total_w <= 0:
+        return empty
+    x_centers = pd.to_numeric(rows.get('X_mm'), errors='coerce').fillna(0.0) + pd.to_numeric(rows.get('Länge_mm'), errors='coerce').fillna(0.0) / 2.0
+    y_centers = pd.to_numeric(rows.get('Y_mm'), errors='coerce').fillna(0.0) + pd.to_numeric(rows.get('Breite_mm'), errors='coerce').fillna(0.0) / 2.0
+    sp_x = float((x_centers * weights).sum() / total_w)
+    sp_y = float((y_centers * weights).sum() / total_w)
+    return {
+        'Schwerpunkt_X_mm': sp_x,
+        'Schwerpunkt_Y_mm': sp_y,
+        'Pritschenmitte_X_mm': platform_center_x,
+        'Pritschenmitte_Y_mm': platform_center_y,
+        'Schwerpunkt_Abstand_X_mm': sp_x - platform_center_x,
+        'Schwerpunkt_Abstand_Y_mm': sp_y - platform_center_y,
+    }
 def _interval_union_length(intervals: List[Tuple[float, float]]) -> float:
     clean = sorted((float(a), float(b)) for a, b in intervals if float(b) > float(a))
     if not clean:
@@ -4756,6 +4912,11 @@ def compute_loading_warnings(placements_df: pd.DataFrame, platforms_df: pd.DataF
             if total_weight > max_weight:
                 warnings.append({'Typ': 'Gewicht', 'Pritsche': name, 'Einheit_ID': '', 'Warnung': 'Max. Gesamtgewicht überschritten', 'Details': f'{total_weight:.0f} kg inkl. Eigengewicht > {max_weight:.0f} kg'})
 
+    # V119: nach allen Ausrichtungen echte Geometrie-/Breitenkollisionen melden.
+    collision_df = find_geometry_conflicts(placements_df, platforms_df)
+    if collision_df is not None and not collision_df.empty:
+        warnings.extend(collision_df.to_dict('records'))
+
     return pd.DataFrame(warnings)
 
 
@@ -4782,6 +4943,7 @@ def recompute_summary_from_placements(placements_df: pd.DataFrame, platforms_df:
             used_height = base_height
         used_weight = float(pd.to_numeric(group.get('Gewicht_kg'), errors='coerce').fillna(0).sum()) if not group.empty else 0.0
         platform_own_weight = safe_number(prow.get('Eigengewicht_Pritsche_kg'), 0.0)
+        cog_vals = _load_center_of_gravity_values_for_platform(placements_df, prow)
         rows.append({
             'Fuhre_Nr': prow.get('Fuhre_Nr'),
             'Fuhrenoption': prow.get('Fuhrenoption'),
@@ -4797,6 +4959,10 @@ def recompute_summary_from_placements(placements_df: pd.DataFrame, platforms_df:
             'Max Breite_mm': round(safe_number(prow.get('Breite_mm')), 1),
             'Max Höhe_mm': round(safe_number(prow.get('Max_Höhe_mm')), 1),
             'Max Gewicht_kg': round(safe_number(prow.get('Max_Gewicht_kg')), 1),
+            'Schwerpunkt_X_mm': round(cog_vals.get('Schwerpunkt_X_mm', 0.0), 1),
+            'Schwerpunkt_Y_mm': round(cog_vals.get('Schwerpunkt_Y_mm', 0.0), 1),
+            'Pritschenmitte_X_mm': round(cog_vals.get('Pritschenmitte_X_mm', 0.0), 1),
+            'Schwerpunkt_Abstand_X_mm': round(cog_vals.get('Schwerpunkt_Abstand_X_mm', 0.0), 1),
         })
     return pd.DataFrame(rows)
 
@@ -4950,6 +5116,7 @@ def _load_dimension_values_for_platform(placements_df: pd.DataFrame, platform: p
         height = safe_number(summary_row.get('Höhe genutzt_mm'))
         weight = safe_number(summary_row.get('Gewicht genutzt_kg'))
     eigen = safe_number(platform.get('Eigengewicht_Pritsche_kg'), 0.0)
+    cog_vals = _load_center_of_gravity_values_for_platform(placements_df, platform)
     return {
         'Länge_Ladung_mm': length,
         'Breite_Ladung_mm': width,
@@ -4957,6 +5124,10 @@ def _load_dimension_values_for_platform(placements_df: pd.DataFrame, platform: p
         'Ladegewicht_kg': weight,
         'Eigengewicht_kg': eigen,
         'Gesamtgewicht_kg': weight + eigen,
+        'Schwerpunkt_X_mm': cog_vals.get('Schwerpunkt_X_mm', 0.0),
+        'Schwerpunkt_Y_mm': cog_vals.get('Schwerpunkt_Y_mm', 0.0),
+        'Pritschenmitte_X_mm': cog_vals.get('Pritschenmitte_X_mm', 0.0),
+        'Schwerpunkt_Abstand_X_mm': cog_vals.get('Schwerpunkt_Abstand_X_mm', 0.0),
     }
 
 def create_bsd_header_for_platform(
@@ -4992,6 +5163,9 @@ def create_bsd_header_for_platform(
         'Ladegewicht_kg': load_vals['Ladegewicht_kg'],
         'Eigengewicht_Pritsche_kg': load_vals['Eigengewicht_kg'],
         'Gesamtgewicht_kg': load_vals['Gesamtgewicht_kg'],
+        'Schwerpunkt_X_mm': load_vals.get('Schwerpunkt_X_mm', 0.0),
+        'Schwerpunkt_Abstand_X_mm': load_vals.get('Schwerpunkt_Abstand_X_mm', 0.0),
+        'Pritschenmitte_X_mm': load_vals.get('Pritschenmitte_X_mm', 0.0),
         'Max_Gewicht_kg': safe_number(platform.get('Max_Gewicht_kg')),
         'Warnungen': warn_count,
         'Objekt_Name': project_meta.get('Objekt_Name', ''),
@@ -5655,40 +5829,57 @@ def _pdf_draw_label_lines(c, rx: float, ry: float, rw: float, rh: float, lines: 
     return drawn
 
 
-def _pdf_draw_priority_label(c, rx: float, ry: float, rw: float, rh: float, lines: List[str], view: str) -> None:
-    """V118: Bauteilnummern nach allen Flächen nochmals obenauf zeichnen.
+def _pdf_label_fits_inside(c, rx: float, ry: float, rw: float, rh: float, lines: List[str], view: str) -> bool:
+    """Prüft nur, ob eine Beschriftung in die Box passt - ohne zu zeichnen."""
+    lines = [str(v).strip() for v in lines if str(v).strip()]
+    if not lines:
+        return True
+    if view in ('front', 'back', 'side', 'side_left', 'side_right'):
+        if rw < 7 or rh < 4:
+            return False
+    elif rw < 12 or rh < 7:
+        return False
+    font_name = 'Helvetica'
+    if len(lines) == 1:
+        font_size = max(3.5, min(6.2, rw / max(8, len(lines[0]) * 1.72), rh * 0.54))
+        return bool(_pdf_truncate_to_width(c, lines[0], max(4, rw - 4), font_name, font_size))
+    font_size = min(5.8, max(2.7, (rh - 3) / max(1, len(lines)) * 0.88))
+    return font_size >= 2.7 and rh >= max(5.0, len(lines) * font_size * 0.85)
 
-    Dadurch verschwinden wichtige Nummern wie BE 53 nicht mehr hinter später
-    gezeichneten Bauteilen, Unterbau- oder Schraffurflächen. Wenn die Nummer
-    nicht in die Box passt, wird sie klein oberhalb mit kurzer Führungslinie
-    gesetzt.
+
+def _pdf_draw_priority_label(c, rx: float, ry: float, rw: float, rh: float, lines: List[str], view: str) -> None:
+    """V119: Nur unlesbare/schmale Elemente extern beschriften.
+
+    V118 hatte die Nummern pauschal nochmals über alle Elemente geschrieben; dadurch
+    entstanden doppelte und übereinanderliegende Texte. Neu bleibt die normale
+    Innenbeschriftung einmalig. Nur wenn die Box zu klein ist, wird aussen ein
+    kleines weisses Textfeld mit Führungslinie gesetzt.
     """
     from reportlab.lib import colors
     lines = [str(v).strip() for v in lines if str(v).strip()]
-    if not lines:
+    if not lines or view not in ('front', 'back', 'side', 'side_left', 'side_right'):
         return
-    c.saveState()
-    # Eine dezente weisse Textfläche verbessert die Lesbarkeit ohne Bauteile stark zu verdecken.
-    drawn = _pdf_draw_label_lines(c, rx, ry, rw, rh, lines, view)
-    if not drawn and view in ('front', 'back', 'side', 'side_left', 'side_right'):
-        label = ' / '.join(lines[:2])
-        if len(label) > 18:
-            label = label[:15] + '...'
-        font_name = 'Helvetica'
-        font_size = 4.8
-        c.setFont(font_name, font_size)
-        text_w = c.stringWidth(label, font_name, font_size)
-        tx = rx + rw / 2.0
-        ty = ry + rh + 3.0
-        c.setFillColor(colors.white)
-        c.rect(tx - text_w / 2.0 - 1.3, ty - 1.0, text_w + 2.6, font_size + 1.8, stroke=0, fill=1)
-        c.setStrokeColor(colors.black)
-        c.setLineWidth(0.25)
-        c.line(rx + rw / 2.0, ry + rh, tx, ty - 0.6)
-        c.setFillColor(colors.black)
-        c.drawCentredString(tx, ty, label)
-    c.restoreState()
+    if _pdf_label_fits_inside(c, rx, ry, rw, rh, lines, view):
+        return
 
+    label = ' / '.join(lines[:2])
+    if len(label) > 18:
+        label = label[:15] + '...'
+    font_name = 'Helvetica'
+    font_size = 4.8
+    c.saveState()
+    c.setFont(font_name, font_size)
+    text_w = c.stringWidth(label, font_name, font_size)
+    tx = rx + rw / 2.0
+    ty = ry + rh + 3.0
+    c.setFillColor(colors.white)
+    c.rect(tx - text_w / 2.0 - 1.3, ty - 1.0, text_w + 2.6, font_size + 1.8, stroke=0, fill=1)
+    c.setStrokeColor(colors.black)
+    c.setLineWidth(0.25)
+    c.line(rx + rw / 2.0, ry + rh, tx, ty - 0.6)
+    c.setFillColor(colors.black)
+    c.drawCentredString(tx, ty, label)
+    c.restoreState()
 
 
 
@@ -6316,6 +6507,23 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
 
     _pdf_draw_view_orientation_helpers(c, ox, oy, draw_w, draw_h, view, front_at_x_max, left_at_y_max)
 
+    # V119: Schwerpunkt der gesamten Ladung inkl. Überhang als dünne Bezugslinie in der Seitenansicht.
+    cog_vals_for_view = _load_center_of_gravity_values_for_platform(placements, platform)
+    if used_len > 0 and view in ('side', 'side_left', 'side_right'):
+        sp_x = safe_number(cog_vals_for_view.get('Schwerpunkt_X_mm'), 0.0)
+        if sp_x > 0:
+            sx_sp0, _sx_sp1 = _pdf_project_x_range_for_side(sp_x, sp_x, eff_length, view, left_at_y_max=left_at_y_max)
+            c.saveState()
+            c.setStrokeColor(colors.HexColor('#404040'))
+            c.setDash(3, 2)
+            c.setLineWidth(0.45)
+            c.line(tx(sx_sp0), oy, tx(sx_sp0), oy + draw_h)
+            c.setDash()
+            c.setFont('Helvetica', 5.2)
+            c.setFillColor(colors.black)
+            c.drawCentredString(tx(sx_sp0), oy + draw_h - 7, 'SP')
+            c.restoreState()
+
     if show_dimensions and used_len > 0 and view in ('side', 'side_left', 'side_right'):
         sx0, sx1 = _pdf_project_x_range_for_side(platform_x0, platform_x1, eff_length, view, left_at_y_max=left_at_y_max)
         lx0, lx1 = _pdf_project_x_range_for_side(load_x0, load_x1, eff_length, view, left_at_y_max=left_at_y_max)
@@ -6374,8 +6582,8 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
             return
         else:
             c.setFillColor(colors.lightgrey)
-            c.setStrokeColor(colors.darkgrey)
-        c.setLineWidth(0.38)
+            c.setStrokeColor(colors.HexColor('#555555'))
+        c.setLineWidth(0.52 if row_typ not in ['Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz', 'Unterbau'] else 0.38)
         c.rect(rx, ry, rw, rh, stroke=1, fill=1)
         if draw_label:
             label_lines = _pdf_label_lines(row, view, bundle_overview_only=bundle_overview_only)
