@@ -1,5 +1,5 @@
 """
-BVX Auswertung + Verladeplanung - Streamlit Version v120
+BVX Auswertung + Verladeplanung - Streamlit Version v123
 
 Installation:
     pip install streamlit pandas plotly openpyxl reportlab pillow
@@ -3209,6 +3209,167 @@ def shift_x_to_use_front_overhang(placements_df: pd.DataFrame, platforms_df: pd.
 
     return result
 
+
+def improve_longitudinal_weight_balance(
+    placements_df: pd.DataFrame,
+    platforms_df: pd.DataFrame,
+    gap_mm: float = 0.0,
+    max_swaps_per_platform: int = 12,
+    min_improve_mm: float = 25.0,
+) -> pd.DataFrame:
+    """V123: Gewicht innerhalb einer fertigen Fuhre längs besser zur echten Pritschenmitte bringen.
+
+    Ziel: Wenn die ganze Fuhre wegen ausgeschöpfter Überhänge nicht mehr als Block
+    verschoben werden kann, werden nur sehr konservative X-Tausche innerhalb derselben
+    Z-Lage geprüft. Ein Tausch wird nur übernommen, wenn:
+    - der Schwerpunkt-Abstand zur echten Pritschenmitte kleiner wird,
+    - die erlaubte Gesamtlänge nicht überschritten wird,
+    - keine echte X/Y/Z-Kollision entsteht,
+    - Y- und Z-Lage unverändert bleiben.
+
+    Damit wird nicht global neu optimiert und keine Zusatzfuhre erzeugt. Es wird nur
+    versucht, schwere Elemente derselben Lage eher Richtung vorne und leichtere eher
+    Richtung hinten zu tauschen, falls das geometrisch gültig ist.
+    """
+    if placements_df is None or placements_df.empty or platforms_df is None or platforms_df.empty:
+        return placements_df.copy() if placements_df is not None else pd.DataFrame()
+
+    result = placements_df.copy()
+    if 'Pritsche' not in result.columns:
+        return result
+
+    for col in ['X_mm', 'Y_mm', 'Z_mm', 'Länge_mm', 'Breite_mm', 'Höhe_mm', 'Gewicht_kg']:
+        if col in result.columns:
+            result[col] = pd.to_numeric(result[col], errors='coerce')
+
+    helper_types = {'Unterbau', 'Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz'}
+    p_lookup = {str(r.get('Pritsche', '')): r for _, r in platforms_df.iterrows()}
+
+    def _weight_for_row(row: pd.Series) -> float:
+        w = safe_number(row.get('Gewicht_kg'), 0.0)
+        if w > 0:
+            return w
+        return max(0.0, safe_number(row.get('Länge_mm'), 0.0) * safe_number(row.get('Breite_mm'), 0.0) * safe_number(row.get('Höhe_mm'), 0.0) / 1_000_000.0)
+
+    def _platform_bounds_ok(df: pd.DataFrame, pname: str, prow: pd.Series) -> bool:
+        eff_len = safe_number(prow.get('Länge_mm'), 0.0) + safe_number(prow.get('Überhang_vorne_mm'), 0.0) + safe_number(prow.get('Überhang_hinten_mm'), 0.0)
+        width = safe_number(prow.get('Breite_mm'), 0.0)
+        mask = df['Pritsche'].astype(str).eq(pname) & df['X_mm'].notna() & df['Y_mm'].notna()
+        if not mask.any():
+            return True
+        x0 = pd.to_numeric(df.loc[mask, 'X_mm'], errors='coerce').fillna(0.0)
+        x1 = x0 + pd.to_numeric(df.loc[mask, 'Länge_mm'], errors='coerce').fillna(0.0)
+        y0 = pd.to_numeric(df.loc[mask, 'Y_mm'], errors='coerce').fillna(0.0)
+        y1 = y0 + pd.to_numeric(df.loc[mask, 'Breite_mm'], errors='coerce').fillna(0.0)
+        if eff_len > 0 and (float(x0.min()) < -0.1 or float(x1.max()) > eff_len + 0.1):
+            return False
+        if width > 0 and (float(y0.min()) < -0.1 or float(y1.max()) > width + 0.1):
+            return False
+        return True
+
+    def _candidate_ok(df: pd.DataFrame, pname: str, prow: pd.Series) -> bool:
+        if not _platform_bounds_ok(df, pname, prow):
+            return False
+        # Echte Kollisionen nach dem Tausch dürfen nicht entstehen.
+        check_platforms = pd.DataFrame([prow])
+        conflicts = find_geometry_conflicts(df[df['Pritsche'].astype(str).eq(pname)].copy(), check_platforms)
+        return conflicts is None or conflicts.empty
+
+    for pname, prow in p_lookup.items():
+        if not pname or pname == 'NICHT VERLADEN':
+            continue
+        if safe_number(prow.get('Länge_mm'), 0.0) <= 0:
+            continue
+
+        mask_real = (
+            result['Pritsche'].astype(str).eq(pname)
+            & result['X_mm'].notna()
+            & result['Y_mm'].notna()
+            & result['Z_mm'].notna()
+            & result['Länge_mm'].notna()
+            & result['Breite_mm'].notna()
+            & result['Höhe_mm'].notna()
+            & ~result.get('Typ', pd.Series(dtype=str)).astype(str).isin(helper_types)
+        )
+        if mask_real.sum() < 2:
+            continue
+
+        for _pass in range(int(max_swaps_per_platform)):
+            cog_now = _load_center_of_gravity_values_for_platform(result, prow)
+            current_delta = safe_number(cog_now.get('Schwerpunkt_Abstand_X_mm'), 0.0)
+            current_abs = abs(current_delta)
+            if current_abs < min_improve_mm:
+                break
+
+            sub = result.loc[mask_real].copy()
+            best: Optional[Tuple[float, pd.DataFrame, Any, Any]] = None
+
+            for _z_key, grp in sub.groupby(sub['Z_mm'].round(1), sort=False):
+                idxs = grp.index.tolist()
+                if len(idxs) < 2:
+                    continue
+                for pos_i in range(len(idxs)):
+                    i = idxs[pos_i]
+                    ri = result.loc[i]
+                    li = safe_number(ri.get('Länge_mm'), 0.0)
+                    if li <= 0:
+                        continue
+                    ci = safe_number(ri.get('X_mm'), 0.0) + li / 2.0
+                    wi = _weight_for_row(ri)
+                    for j in idxs[pos_i + 1:]:
+                        rj = result.loc[j]
+                        lj = safe_number(rj.get('Länge_mm'), 0.0)
+                        if lj <= 0:
+                            continue
+                        cj = safe_number(rj.get('X_mm'), 0.0) + lj / 2.0
+                        wj = _weight_for_row(rj)
+                        if abs(ci - cj) < 10.0 or abs(wi - wj) <= 0.01:
+                            continue
+
+                        # Nur tauschen, wenn das schwerere Element in Richtung Zielmitte wandert.
+                        # current_delta < 0: Schwerpunkt liegt intern zu weit hinten -> schwere Teile nach vorne (größeres X).
+                        # current_delta > 0: Schwerpunkt liegt intern zu weit vorne -> schwere Teile nach hinten (kleineres X).
+                        heavy_i = wi >= wj
+                        if current_delta < 0:
+                            helps_direction = (heavy_i and ci < cj) or ((not heavy_i) and cj < ci)
+                        else:
+                            helps_direction = (heavy_i and ci > cj) or ((not heavy_i) and cj > ci)
+                        if not helps_direction:
+                            continue
+
+                        # Variante A: Mittelpunkt tauschen. Das erhält die Lagefolge besser, auch wenn Längen unterschiedlich sind.
+                        candidate_positions = [
+                            (cj - li / 2.0, ci - lj / 2.0),
+                            # Variante B: Startpunkte tauschen als Fallback.
+                            (safe_number(rj.get('X_mm'), 0.0), safe_number(ri.get('X_mm'), 0.0)),
+                        ]
+                        for new_x_i, new_x_j in candidate_positions:
+                            tmp = result.copy()
+                            tmp.loc[i, 'X_mm'] = round(float(new_x_i), 1)
+                            tmp.loc[j, 'X_mm'] = round(float(new_x_j), 1)
+                            if not _candidate_ok(tmp, pname, prow):
+                                continue
+                            cog_tmp = _load_center_of_gravity_values_for_platform(tmp, prow)
+                            new_abs = abs(safe_number(cog_tmp.get('Schwerpunkt_Abstand_X_mm'), current_delta))
+                            improve = current_abs - new_abs
+                            if improve < min_improve_mm:
+                                continue
+                            if best is None or improve > best[0]:
+                                best = (improve, tmp, i, j)
+
+            if best is None:
+                break
+
+            _improve, tmp_best, idx_a, idx_b = best
+            result = tmp_best
+            if 'Ebene' in result.columns:
+                for idx in [idx_a, idx_b]:
+                    v = str(result.loc[idx, 'Ebene'])
+                    if 'SP-Gewicht längs korrigiert' not in v:
+                        result.loc[idx, 'Ebene'] = f'{v} / SP-Gewicht längs korrigiert'
+
+    return result
+
 def normalize_y_from_platform_center(placements_df: pd.DataFrame, platforms_df: pd.DataFrame) -> pd.DataFrame:
     """Richtet die Y-Positionen praxisnah von der Pritschenmitte aus.
 
@@ -3808,9 +3969,13 @@ def create_variant_a_loading_plan(
         # Die stabile globale X-Ausrichtung aus center_placements_geometrically
         # bleibt aktiv; die per-Lage-Nachverschiebung wird nicht mehr angewendet.
         placements_df = center_length_groups_from_platform_center(placements_df, platforms_used_df)
-        # V120: nach der X-Ausrichtung Kollisionen reparieren, dann die ganze
-        # Fuhre so verschieben, dass der Ladungsschwerpunkt möglichst nahe an
-        # der echten Pritschenmitte liegt.
+        # V123: nach der X-Ausrichtung Kollisionen reparieren. Wenn die ganze
+        # Fuhre nicht mehr als Block verschoben werden kann, wird zusätzlich
+        # versucht, Gewicht innerhalb gleicher Z-Lagen längs näher zur echten
+        # Pritschenmitte zu bringen. Danach wird der Gesamtblock nochmals bis
+        # an die zulässigen Überhanggrenzen zur Mitte geschoben.
+        placements_df = resolve_x_collisions_by_layer(placements_df, platforms_used_df, gap_mm=gap_default)
+        placements_df = improve_longitudinal_weight_balance(placements_df, platforms_used_df, gap_mm=gap_default)
         placements_df = resolve_x_collisions_by_layer(placements_df, platforms_used_df, gap_mm=gap_default)
         placements_df = shift_x_to_use_front_overhang(placements_df, platforms_used_df)
         summary_df = recompute_summary_from_placements(placements_df, platforms_used_df)
