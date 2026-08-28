@@ -2005,6 +2005,104 @@ def _gap_candidate_score(state: Dict[str, Any], fit: Tuple[float, float, float, 
     return fill_l * 1000000.0 + fill_w * 10000.0 + area / 1000.0 + height
 
 
+
+
+def _state_sp_abs_delta_x(
+    state: Dict[str, Any],
+    extra_x: Optional[float] = None,
+    extra_length: float = 0.0,
+    extra_width: float = 0.0,
+    extra_height: float = 0.0,
+    extra_weight: float = 0.0,
+    extra_typ: str = '',
+) -> float:
+    """V124: Schwerpunkt-Abstand einer laufenden Fuhre zur echten Pritschenmitte.
+
+    Wird in der Haupt-Verladelogik als Bewertungswert genutzt, nicht erst im
+    PDF. X läuft intern von hinten nach vorne; die Zielmitte ist die Mitte der
+    physischen Pritsche: Überhang hinten + Pritschenlänge / 2.
+    """
+    helper_types = {'Unterbau', 'Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz'}
+    total_w = 0.0
+    weighted_x = 0.0
+
+    for r in state.get('placements', []) or []:
+        typ = str(r.get('Typ', '')).strip()
+        if typ in helper_types:
+            continue
+        length = safe_number(r.get('Länge_mm'), 0.0)
+        if length <= 0:
+            continue
+        w = safe_number(r.get('Gewicht_kg'), 0.0)
+        if w <= 0:
+            w = max(0.0, length * safe_number(r.get('Breite_mm'), 0.0) * safe_number(r.get('Höhe_mm'), 0.0) / 1_000_000.0)
+        if w <= 0:
+            continue
+        cx = safe_number(r.get('X_mm'), 0.0) + length / 2.0
+        total_w += w
+        weighted_x += cx * w
+
+    if extra_x is not None and str(extra_typ or '').strip() not in helper_types:
+        length = safe_number(extra_length, 0.0)
+        if length > 0:
+            w = safe_number(extra_weight, 0.0)
+            if w <= 0:
+                w = max(0.0, length * safe_number(extra_width, 0.0) * safe_number(extra_height, 0.0) / 1_000_000.0)
+            if w > 0:
+                total_w += w
+                weighted_x += (safe_number(extra_x, 0.0) + length / 2.0) * w
+
+    if total_w <= 0:
+        return 0.0
+    sp_x = weighted_x / total_w
+    platform_center_x = safe_number(state.get('Überhang_hinten_mm'), 0.0) + safe_number(state.get('Länge_mm'), 0.0) / 2.0
+    return abs(sp_x - platform_center_x)
+
+
+def _sp_candidate_x_values_for_unit(state: Dict[str, Any], base_x: float, length: float) -> List[float]:
+    """V125: X-Kandidaten für dieselbe geplante Platzierung.
+
+    Der Schwerpunkt wird nicht nur am Schluss korrigiert, sondern auch bei
+    einzelnen Elementen/Bunden während der Platzierung bewertet. Dafür bekommt
+    jede gültige Grundposition zusätzliche X-Varianten. Die spätere Prüfung mit
+    can_place_stable entscheidet weiterhin über Auflage, Überhang, Höhe und
+    Kollision. So wird kein Teil blind verschoben, aber eine gültige Position,
+    welche den Ladungsschwerpunkt näher zur echten Pritschenmitte bringt, kann
+    gewählt werden.
+    """
+    try:
+        base_x = float(base_x)
+        length = float(length)
+    except Exception:
+        return [base_x]
+    eff_len = float(state.get('Eff_Länge_mm', 0.0) or 0.0)
+    if length <= 0 or eff_len <= 0:
+        return [base_x]
+
+    min_x = 0.0
+    max_x = max(0.0, eff_len - length)
+    platform_center_x = safe_number(state.get('Überhang_hinten_mm'), 0.0) + safe_number(state.get('Länge_mm'), 0.0) / 2.0
+    centered_x = max(min_x, min(max_x, platform_center_x - length / 2.0))
+
+    values = [base_x, centered_x]
+    for step in (50.0, 100.0, 167.0, 250.0, 500.0, 750.0, 1000.0, 1500.0):
+        values.append(base_x + step)
+        values.append(base_x - step)
+        values.append(centered_x + step)
+        values.append(centered_x - step)
+
+    out: List[float] = []
+    seen = set()
+    for v in values:
+        vv = round(max(min_x, min(max_x, float(v))), 1)
+        key = round(vv, 1)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(vv)
+    return out
+
+
 def _find_later_gap_candidate(pending: List[pd.Series], state: Dict[str, Any], allow_rotation: bool, max_search: int = 40) -> Optional[Tuple[int, Tuple[float, float, float, float, float, float, int, str]]]:
     """Sucht in den nächsten Verladeeinheiten nach einem Teil, das die offene Lücke füllt."""
     if len(pending) <= 1:
@@ -2321,16 +2419,20 @@ def _clean_try_place_on_current_layer(
                         candidates.append((nx, nz, True))
             if bool(state.get('prefer_length_before_stack', False)) and any(not item[2] for item in candidates):
                 candidates = [item for item in candidates if not item[2]]
-            for x, z, new_layer in candidates:
-                score = z * 1000000.0 + x * 1000.0 - use_width
-                candidate = {
-                    'x': x, 'y': y, 'z': z, 'length': use_length, 'width': use_width,
-                    'height': use_height, 'rotation': rotation, 'mode': 'breit/mittig',
-                    'new_layer': new_layer, 'wide': True
-                }
-                updates = {'left': (x + use_length + float(state['gap_length']), z, use_height), 'right': (x + use_length + float(state['gap_length']), z, use_height)}
-                if best is None or score < best[0]:
-                    best = (score, candidate, ('left', 'right'), x + use_length + float(state['gap_length']), updates)
+            for base_x, z, new_layer in candidates:
+                for x in _sp_candidate_x_values_for_unit(state, base_x, use_length):
+                    if not can_place_stable(state, unit, x, y, z, use_length, use_width, use_height, weight):
+                        continue
+                    sp_score = _state_sp_abs_delta_x(state, x, use_length, use_width, use_height, weight, unit.get('Typ', '')) * 4500.0
+                    score = z * 1000000.0 + x * 35.0 + sp_score - use_width
+                    candidate = {
+                        'x': x, 'y': y, 'z': z, 'length': use_length, 'width': use_width,
+                        'height': use_height, 'rotation': rotation, 'mode': 'breit/mittig / SP bewertet',
+                        'new_layer': new_layer, 'wide': True
+                    }
+                    updates = {'left': (x + use_length + float(state['gap_length']), z, use_height), 'right': (x + use_length + float(state['gap_length']), z, use_height)}
+                    if best is None or score < best[0]:
+                        best = (score, candidate, ('left', 'right'), x + use_length + float(state['gap_length']), updates)
             continue
 
         sides = ['left']
@@ -2360,20 +2462,23 @@ def _clean_try_place_on_current_layer(
                         candidates.append((nx, nz, True))
             if bool(state.get('prefer_length_before_stack', False)) and any(not item[2] for item in candidates):
                 candidates = [item for item in candidates if not item[2]]
-            for x, z, new_layer in candidates:
-                other = 'right' if side == 'left' else 'left'
-                after_x = x + use_length + float(state['gap_length'])
-                balance = abs(after_x - float(state['_clean_lane_x'][other]))
-                # Niedrige Z zuerst, dann kompakte X-Position.
-                score = z * 1000000.0 + x * 1000.0 + balance
-                candidate = {
-                    'x': x, 'y': y, 'z': z, 'length': use_length, 'width': use_width,
-                    'height': use_height, 'rotation': rotation, 'mode': f'{side} / unabhängige Stapelhöhe',
-                    'new_layer': new_layer, 'wide': False
-                }
-                updates = {side: (after_x, z, use_height)}
-                if best is None or score < best[0]:
-                    best = (score, candidate, (side,), after_x, updates)
+            for base_x, z, new_layer in candidates:
+                for x in _sp_candidate_x_values_for_unit(state, base_x, use_length):
+                    if not can_place_stable(state, unit, x, y, z, use_length, use_width, use_height, weight):
+                        continue
+                    other = 'right' if side == 'left' else 'left'
+                    after_x = x + use_length + float(state['gap_length'])
+                    balance = abs(after_x - float(state['_clean_lane_x'][other]))
+                    sp_score = _state_sp_abs_delta_x(state, x, use_length, use_width, use_height, weight, unit.get('Typ', '')) * 4500.0
+                    score = z * 1000000.0 + x * 35.0 + balance * 0.7 + sp_score
+                    candidate = {
+                        'x': x, 'y': y, 'z': z, 'length': use_length, 'width': use_width,
+                        'height': use_height, 'rotation': rotation, 'mode': f'{side} / unabhängige Stapelhöhe / SP bewertet',
+                        'new_layer': new_layer, 'wide': False
+                    }
+                    updates = {side: (after_x, z, use_height)}
+                    if best is None or score < best[0]:
+                        best = (score, candidate, (side,), after_x, updates)
 
     if best is None:
         return None
@@ -2663,7 +2768,8 @@ def _clean_try_place_on_current_layer(
                     if can_place_stable(state, unit, nx, y, nz, use_length, use_width, use_height, weight):
                         candidates.append((nx, nz, True))
             for x, z, new_layer in candidates:
-                score = z * 1000000.0 + x * 1000.0 - use_width
+                sp_score = _state_sp_abs_delta_x(state, x, use_length, use_width, use_height, weight, unit.get('Typ', '')) * 1800.0
+                score = z * 1000000.0 + x * 150.0 + sp_score - use_width
                 candidate = {
                     'x': x, 'y': y, 'z': z, 'length': use_length, 'width': use_width,
                     'height': use_height, 'rotation': rotation, 'mode': 'breit/mittig',
@@ -2704,7 +2810,8 @@ def _clean_try_place_on_current_layer(
                 after_x = x + use_length + float(state['gap_length'])
                 balance = abs(after_x - float(state['_clean_lane_x'][other]))
                 # Niedrige Z zuerst, dann kompakte X-Position.
-                score = z * 1000000.0 + x * 1000.0 + balance
+                sp_score = _state_sp_abs_delta_x(state, x, use_length, use_width, use_height, weight, unit.get('Typ', '')) * 1800.0
+                score = z * 1000000.0 + x * 150.0 + balance + sp_score
                 candidate = {
                     'x': x, 'y': y, 'z': z, 'length': use_length, 'width': use_width,
                     'height': use_height, 'rotation': rotation, 'mode': f'{side} / unabhängige Stapelhöhe',
@@ -2872,11 +2979,16 @@ def create_loading_plan(
                 # für vorgezogene Bunde. Die Einheit selbst bleibt immer als Bund erhalten.
                 order_penalty = unit_idx * (100.0 - flex_percent) * 10000.0
                 z_score = safe_number(result.get('Z_mm'), 0.0) * 1000000.0
-                x_score = safe_number(result.get('X_mm'), 0.0) * 1000.0
+                x_score = safe_number(result.get('X_mm'), 0.0) * 150.0
                 # Bei gleicher Lage breite/lange Bunde eher unten nehmen.
                 footprint_bonus = safe_number(result.get('Breite_mm'), 0.0) * 100.0 + safe_number(result.get('Länge_mm'), 0.0) * 0.1
                 used_length_score = safe_number(trial_state.get('used_length'), 0.0)
-                score = order_penalty + z_score + x_score + used_length_score - footprint_bonus
+                # V124: Schwerpunkt schon während der Hauptverladung bewerten.
+                # Nicht erst am Schluss reparieren: bei gleich gültigen Kandidaten
+                # wird die Variante bevorzugt, die den Schwerpunkt der ganzen Fuhre
+                # näher zur echten Pritschenmitte bringt.
+                sp_score = _state_sp_abs_delta_x(trial_state) * 1800.0
+                score = order_penalty + z_score + x_score + used_length_score + sp_score - footprint_bonus
                 if best is None or score < best[0]:
                     best = (score, unit_idx, state_idx, result)
                     best_state = trial_state
@@ -3369,6 +3481,41 @@ def improve_longitudinal_weight_balance(
                         result.loc[idx, 'Ebene'] = f'{v} / SP-Gewicht längs korrigiert'
 
     return result
+
+
+
+def apply_main_loading_postprocess(
+    placements_df: pd.DataFrame,
+    summary_df: Optional[pd.DataFrame],
+    platforms_used_df: pd.DataFrame,
+    gap_mm: float = 0.0,
+    center_geometric: bool = True,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """V124: Gemeinsame Nachlogik für Hauptverladung und selektive Neuberechnung.
+
+    Damit die Funktion „Welche Fuhre / Pritsche neu rechnen?“ keine eigene,
+    vereinfachte Logik nutzt. Sie verwendet dieselbe Ausrichtung, Kollisions-
+    prüfung, Schwerpunkt-/Gewichtslogik und Überhang-Korrektur wie die normale
+    Hauptverladung – nur mit den Bauteilen der ausgewählten Fuhre.
+    """
+    if placements_df is None or placements_df.empty or platforms_used_df is None or platforms_used_df.empty:
+        clean_pl = placements_df.copy() if placements_df is not None else pd.DataFrame()
+        clean_sum = summary_df.copy() if summary_df is not None else pd.DataFrame()
+        return clean_pl, clean_sum
+
+    result = clean_placements_dataframe(placements_df)
+    platforms_local = platforms_used_df.copy()
+    if center_geometric:
+        result = center_placements_geometrically(result, platforms_local)
+        result = center_length_groups_from_platform_center(result, platforms_local)
+        result = resolve_x_collisions_by_layer(result, platforms_local, gap_mm=gap_mm)
+        # Schwerpunkt/Gewicht in der Hauptlogik bewerten und zusätzlich konservativ
+        # innerhalb gültiger Lagen korrigieren, wenn der Block nicht weiter wandern kann.
+        result = improve_longitudinal_weight_balance(result, platforms_local, gap_mm=gap_mm)
+        result = resolve_x_collisions_by_layer(result, platforms_local, gap_mm=gap_mm)
+        result = shift_x_to_use_front_overhang(result, platforms_local)
+    new_summary = recompute_summary_from_placements(result, platforms_local)
+    return result, new_summary
 
 def normalize_y_from_platform_center(placements_df: pd.DataFrame, platforms_df: pd.DataFrame) -> pd.DataFrame:
     """Richtet die Y-Positionen praxisnah von der Pritschenmitte aus.
@@ -3960,25 +4107,11 @@ def create_variant_a_loading_plan(
     plan_units_df = pd.concat(all_units, ignore_index=True) if all_units else pd.DataFrame()
 
     if center_geometric and not placements_df.empty and not platforms_used_df.empty:
-        placements_df = center_placements_geometrically(placements_df, platforms_used_df)
-        # V84: Wichtig.
-        # Diese zweite X-Zentrierung je Z-Lage/Seite hat bereits gelöste
-        # Pritschenplan-Probleme wieder sichtbar gemacht:
-        # einzelne Bundblöcke wurden gegenüber der tragenden Lage verschoben
-        # bzw. wirkten zu weit oben/unten oder seitlich herausgerutscht.
-        # Die stabile globale X-Ausrichtung aus center_placements_geometrically
-        # bleibt aktiv; die per-Lage-Nachverschiebung wird nicht mehr angewendet.
-        placements_df = center_length_groups_from_platform_center(placements_df, platforms_used_df)
-        # V123: nach der X-Ausrichtung Kollisionen reparieren. Wenn die ganze
-        # Fuhre nicht mehr als Block verschoben werden kann, wird zusätzlich
-        # versucht, Gewicht innerhalb gleicher Z-Lagen längs näher zur echten
-        # Pritschenmitte zu bringen. Danach wird der Gesamtblock nochmals bis
-        # an die zulässigen Überhanggrenzen zur Mitte geschoben.
-        placements_df = resolve_x_collisions_by_layer(placements_df, platforms_used_df, gap_mm=gap_default)
-        placements_df = improve_longitudinal_weight_balance(placements_df, platforms_used_df, gap_mm=gap_default)
-        placements_df = resolve_x_collisions_by_layer(placements_df, platforms_used_df, gap_mm=gap_default)
-        placements_df = shift_x_to_use_front_overhang(placements_df, platforms_used_df)
-        summary_df = recompute_summary_from_placements(placements_df, platforms_used_df)
+        # V124: Hauptverladung nutzt die gemeinsame Nachlogik. Dieselbe Funktion
+        # wird auch für „Welche Fuhre / Pritsche neu rechnen?“ verwendet.
+        placements_df, summary_df = apply_main_loading_postprocess(
+            placements_df, summary_df, platforms_used_df, gap_mm=gap_default, center_geometric=True
+        )
 
     fuhren_log_df = pd.DataFrame(fuhren_log)
     return placements_df, summary_df, platforms_used_df, fuhren_log_df, plan_units_df
@@ -6086,7 +6219,7 @@ def _pdf_truncate_to_width(c, text: str, max_width: float, font_name: str, font_
     return result + ell if result else ''
 
 
-def _pdf_draw_label_lines(c, rx: float, ry: float, rw: float, rh: float, lines: List[str], view: str) -> bool:
+def _pdf_draw_label_lines(c, rx: float, ry: float, rw: float, rh: float, lines: List[str], view: str, ghost: bool = False) -> bool:
     """Zeichnet Beschriftungen ohne Überlappung innerhalb eines Rechtecks.
 
     Rückgabe: True wenn mindestens ein Text gezeichnet wurde.
@@ -6109,22 +6242,31 @@ def _pdf_draw_label_lines(c, rx: float, ry: float, rw: float, rh: float, lines: 
         # V110: Beschriftung etwas grösser, aber weiterhin innerhalb der Elemente.
         font_size = max(3.5, min(6.2, rw / max(8, len(lines[0]) * 1.72), rh * 0.54))
         c.setFont(font_name, font_size)
-        c.setFillColor(colors.black)
         txt = _pdf_truncate_to_width(c, lines[0], max(4, rw - 4), font_name, font_size)
         if txt:
-            # V120: kleine weisse Hinterlegung, damit BE-Nummern auf hellen/
-            # schmalen Elementen sichtbar bleiben, ohne pauschal doppelt zu schreiben.
-            from reportlab.lib import colors as _label_colors
             tx = rx + rw / 2
             ty = ry + rh / 2 - font_size / 3
             tw = c.stringWidth(txt, font_name, font_size)
             c.saveState()
-            c.setFillColor(_label_colors.white)
-            c.rect(tx - tw / 2 - 1.0, ty - 0.8, tw + 2.0, font_size + 1.5, stroke=0, fill=1)
+            if ghost:
+                # V125: Nummern auf transparenten/dahinterliegenden Elementen bleiben sichtbar,
+                # aber ebenfalls dezent. Keine harte weisse Box, damit klar bleibt: hinten/teilweise verdeckt.
+                c.setFillColor(colors.HexColor('#777777'))
+                try:
+                    c.setFillAlpha(0.72)
+                except Exception:
+                    pass
+                c.drawCentredString(tx, ty, txt)
+            else:
+                # V120: kleine weisse Hinterlegung, damit BE-Nummern auf hellen/
+                # schmalen Elementen sichtbar bleiben, ohne pauschal doppelt zu schreiben.
+                from reportlab.lib import colors as _label_colors
+                c.setFillColor(_label_colors.white)
+                c.rect(tx - tw / 2 - 1.0, ty - 0.8, tw + 2.0, font_size + 1.5, stroke=0, fill=1)
+                c.setFont(font_name, font_size)
+                c.setFillColor(colors.black)
+                c.drawCentredString(tx, ty, txt)
             c.restoreState()
-            c.setFont(font_name, font_size)
-            c.setFillColor(colors.black)
-            c.drawCentredString(tx, ty, txt)
             drawn = True
         return drawn
 
@@ -6134,7 +6276,12 @@ def _pdf_draw_label_lines(c, rx: float, ry: float, rw: float, rh: float, lines: 
     total_h = line_step * (n - 1)
     start_y = ry + rh / 2 - total_h / 2
     c.setFont(font_name, font_size)
-    c.setFillColor(colors.black)
+    c.setFillColor(colors.HexColor('#777777') if ghost else colors.black)
+    try:
+        if ghost:
+            c.setFillAlpha(0.72)
+    except Exception:
+        pass
     for i, line in enumerate(lines):
         yy = start_y + i * line_step - font_size / 3
         if yy < ry + 1 or yy > ry + rh - font_size:
@@ -6164,7 +6311,7 @@ def _pdf_label_fits_inside(c, rx: float, ry: float, rw: float, rh: float, lines:
     return font_size >= 2.7 and rh >= max(5.0, len(lines) * font_size * 0.85)
 
 
-def _pdf_draw_priority_label(c, rx: float, ry: float, rw: float, rh: float, lines: List[str], view: str) -> None:
+def _pdf_draw_priority_label(c, rx: float, ry: float, rw: float, rh: float, lines: List[str], view: str, ghost: bool = False) -> None:
     """V119: Nur unlesbare/schmale Elemente extern beschriften.
 
     V118 hatte die Nummern pauschal nochmals über alle Elemente geschrieben; dadurch
@@ -6189,12 +6336,27 @@ def _pdf_draw_priority_label(c, rx: float, ry: float, rw: float, rh: float, line
     text_w = c.stringWidth(label, font_name, font_size)
     tx = rx + rw / 2.0
     ty = ry + rh + 3.0
-    c.setFillColor(colors.white)
+    if ghost:
+        c.setFillColor(colors.HexColor('#eeeeee'))
+        try:
+            c.setFillAlpha(0.55)
+        except Exception:
+            pass
+    else:
+        c.setFillColor(colors.white)
     c.rect(tx - text_w / 2.0 - 1.3, ty - 1.0, text_w + 2.6, font_size + 1.8, stroke=0, fill=1)
-    c.setStrokeColor(colors.black)
-    c.setLineWidth(0.25)
+    try:
+        c.setFillAlpha(1.0)
+    except Exception:
+        pass
+    c.setStrokeColor(colors.HexColor('#888888') if ghost else colors.black)
+    c.setLineWidth(0.22 if ghost else 0.25)
+    if ghost:
+        c.setDash(2, 2)
     c.line(rx + rw / 2.0, ry + rh, tx, ty - 0.6)
-    c.setFillColor(colors.black)
+    if ghost:
+        c.setDash()
+    c.setFillColor(colors.HexColor('#777777') if ghost else colors.black)
     c.drawCentredString(tx, ty, label)
     c.restoreState()
 
@@ -6879,7 +7041,7 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
         right_px = ox + ((width - load_y0) if left_at_y_max else load_y1) * scale_x
         _pdf_dim_line_h(c, left_px, right_px, oy - 24, f'Ladungsbreite {used_wid:.0f} mm')
 
-    priority_label_items: List[Tuple[float, float, float, float, List[str], str]] = []
+    priority_label_items: List[Tuple[float, float, float, float, List[str], str, bool]] = []
     helper_label_types = {'Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz', 'Unterbau'}
 
     def draw_projected_fragment(row: pd.Series, px: float, py: float, pw: float, ph: float, ghost: bool = False, draw_label: bool = True) -> None:
@@ -6899,9 +7061,9 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
                 _pdf_draw_hatched_overlay(c, rx, ry, rw, rh, spacing=6.0)
             if draw_label:
                 label_lines = _pdf_label_lines(row, view, bundle_overview_only=bundle_overview_only)
-                _pdf_draw_label_lines(c, rx, ry, rw, rh, label_lines, view)
+                _pdf_draw_label_lines(c, rx, ry, rw, rh, label_lines, view, ghost=True)
                 if view in ('front', 'back', 'side', 'side_left', 'side_right') and row_typ not in helper_label_types:
-                    priority_label_items.append((rx, ry, rw, rh, label_lines, view))
+                    priority_label_items.append((rx, ry, rw, rh, label_lines, view, True))
             return
         if row_typ == 'Kantholz':
             c.setFillColor(colors.HexColor('#b8b8b8'))
@@ -6924,9 +7086,9 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
                     label_lines = []
                 else:
                     label_lines = label_lines[:1]
-            _pdf_draw_label_lines(c, rx, ry, rw, rh, label_lines, view)
+            _pdf_draw_label_lines(c, rx, ry, rw, rh, label_lines, view, ghost=False)
             if view in ('front', 'back', 'side', 'side_left', 'side_right') and row_typ not in helper_label_types:
-                priority_label_items.append((rx, ry, rw, rh, label_lines, view))
+                priority_label_items.append((rx, ry, rw, rh, label_lines, view, False))
 
     def draw_projected_row(row: pd.Series, ghost: bool = False) -> None:
         px, py, pw, ph, _depth = _pdf_projection_values(row, view, eff_length, width, front_at_x_max, left_at_y_max)
@@ -6970,8 +7132,8 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
                 piece_h = max(0.0, qy1 - qy0)
                 draw_projected_fragment(row, qx0, qy0, piece_w, piece_h, ghost=is_hatched, draw_label=True)
             pending_same_depth.append(rect)
-        for lrx, lry, lrw, lrh, llines, lview in priority_label_items:
-            _pdf_draw_priority_label(c, lrx, lry, lrw, lrh, llines, lview)
+        for lrx, lry, lrw, lrh, llines, lview, lghost in priority_label_items:
+            _pdf_draw_priority_label(c, lrx, lry, lrw, lrh, llines, lview, ghost=lghost)
         return
 
     if view in ('side', 'side_left', 'side_right') and ghost_rows is not None and not ghost_rows.empty:
@@ -6990,8 +7152,8 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
     for _, row in rows.iterrows():
         draw_projected_row(row, ghost=False)
 
-    for lrx, lry, lrw, lrh, llines, lview in priority_label_items:
-        _pdf_draw_priority_label(c, lrx, lry, lrw, lrh, llines, lview)
+    for lrx, lry, lrw, lrh, llines, lview, lghost in priority_label_items:
+        _pdf_draw_priority_label(c, lrx, lry, lrw, lrh, llines, lview, ghost=lghost)
 
 def _bsd_cell_text_for_matrix(value: Any) -> str:
     """Text für eine BSD-Matrixzelle.
@@ -9675,7 +9837,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                     ].copy()
                     target_ids = p_units.get('Einheit_ID', pd.Series(dtype=str)).dropna().astype(str).drop_duplicates().tolist()
                     target_units = units_df[units_df.get('Einheit_ID', pd.Series(dtype=str)).astype(str).isin(target_ids)].copy() if target_ids else pd.DataFrame()
-                    # V116: Die selektive Neuberechnung übernimmt standardmässig
+                    # V124: Die selektive Neuberechnung nutzt die Hauptlogik und übernimmt standardmässig
                     # die Reihenfolge aus der bestehenden Fuhre. Dadurch laufen
                     # Verladereihenfolge/Sortierung nicht unbemerkt anders als im
                     # Grundplan.
@@ -9740,7 +9902,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                         recalc_keep_sort_hint = rr2.checkbox('Grundsortierung / Gruppen als Hinweis anzeigen', value=True, key='v116_recalc_sort_hint')
                         recalc_check_center = rr3.checkbox('Ladungsmittelpunkt prüfen', value=True, key='v116_recalc_center_check')
                         if recalc_keep_sort_hint:
-                            st.caption('V116: In der Vorschau werden die Bauteile aus der vorhandenen Fuhre in deren aktueller Reihenfolge neu versucht. Globale Fuhren davor/danach bleiben fix.')
+                            st.caption('V124: Vorschau nutzt dieselbe Hauptlogik/Nachlogik wie die normale Verladung, aber nur für diese Fuhre. Globale Fuhren davor/danach bleiben fix.')
 
                         def _v113_preview_for_units(local_units: pd.DataFrame, local_platform: pd.Series, suffix: str = '') -> Tuple[pd.DataFrame, pd.DataFrame]:
                             local_platform = local_platform.copy()
@@ -9748,7 +9910,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                             local_platform['Breite_Bund_auf_schmal_verhindern'] = bool(recalc_prevent_support)
                             local_platform['Mindest_Stützbreite_%'] = float(recalc_min_support)
                             local_platform_df = pd.DataFrame([local_platform])
-                            return create_loading_plan(
+                            preview_placements_raw, preview_summary_raw = create_loading_plan(
                                 local_units.reset_index(drop=True),
                                 local_platform_df.reset_index(drop=True),
                                 base_wood_height=float(base_wood_height),
@@ -9763,6 +9925,16 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                                 max_unsupported_length_mm=float(recalc_max_free_length),
                                 max_unsupported_side_mm=float(recalc_max_free_side),
                                 prefer_length_before_stack=bool(recalc_prefer_length),
+                            )
+                            # V124: selektive Neuberechnung benutzt jetzt dieselbe
+                            # Nachlogik wie die Hauptverladung. Kein hinten-bündiges
+                            # Ersatzschema mehr und kein Überhang als tragende Fläche.
+                            return apply_main_loading_postprocess(
+                                preview_placements_raw,
+                                preview_summary_raw,
+                                local_platform_df.reset_index(drop=True),
+                                gap_mm=float(gap_length),
+                                center_geometric=True,
                             )
 
                         if st.button('Vorschau neu berechnen', key='v113_recalc_preview_button'):
