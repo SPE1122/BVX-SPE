@@ -1,1 +1,2 @@
 - [GitHub sync history](github-sync-history.md) — A new project can have an unrelated starter commit; align the local branch to the selected GitHub branch before using Remote Updates.
+- [Streamlit preview startup](streamlit-preview-startup.md) — Streamlit workflows need headless mode when started without an interactive terminal.
