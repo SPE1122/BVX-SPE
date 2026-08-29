@@ -1,3 +1,4 @@
 - [GitHub sync history](github-sync-history.md) — A new project can have an unrelated starter commit; align the local branch to the selected GitHub branch before using Remote Updates.
 - [Streamlit preview startup](streamlit-preview-startup.md) — Streamlit workflows need headless mode when started without an interactive terminal.
 - [Overhang support chain](support-chain-overhang.md) — Overhangs are valid when inserts/supports transfer load down to the physical platform footprint.
+- [Center-of-gravity acceptance](center-of-gravity-acceptance.md) — A geometrically valid load is not sufficient; simple platforms should keep the load center near the platform center.
