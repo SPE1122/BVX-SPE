@@ -1805,6 +1805,84 @@ def _edge_free_span_mm(total0: float, total1: float, intervals: List[Tuple[float
     return max(0.0, supported_start - total0, total1 - supported_end)
 
 
+def _max_free_span_mm(total0: float, total1: float, intervals: List[Tuple[float, float]]) -> float:
+    """V127: grösster freier Abstand zwischen tragenden Auflagern.
+
+    Im Gegensatz zu _edge_free_span_mm zählen hier auch freie Felder zwischen
+    zwei Auflagerlinien. Genau das bildet die Praxis besser ab: Ein Element kann
+    innerhalb der Pritsche oder im Überhang nur dann stabil liegen, wenn zwischen
+    zwei echten/geplanten Auflagern kein zu langer freier Abschnitt entsteht.
+    """
+    total0 = float(total0)
+    total1 = float(total1)
+    if total1 <= total0:
+        return 0.0
+    clean = sorted((max(total0, float(a)), min(total1, float(b))) for a, b in intervals if float(b) > float(a))
+    clean = [(a, b) for a, b in clean if b > a]
+    if not clean:
+        return max(0.0, total1 - total0)
+    merged: List[Tuple[float, float]] = []
+    for a, b in clean:
+        if not merged or a > merged[-1][1]:
+            merged.append((a, b))
+        else:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], b))
+    free = max(0.0, merged[0][0] - total0, total1 - merged[-1][1])
+    for (_a, b), (na, _nb) in zip(merged, merged[1:]):
+        free = max(free, max(0.0, na - b))
+    return free
+
+
+def _planned_overhang_support_intervals(state: Dict[str, Any], x0: float, x1: float) -> List[Tuple[float, float]]:
+    """V127: geplante händische Auflager als tragende Linien im Überhang.
+
+    Die Pritsche selbst trägt nur innerhalb ihrer physischen Länge. Wenn in der
+    Praxis zusätzliche Auflager/Kanthölzer im Überhang eingelegt werden, werden
+    sie hier als schmale Auflagerlinien modelliert. Dadurch darf die Logik den
+    Überhang nicht mehr als leere Fläche behandeln, aber sie begrenzt trotzdem
+    den freien Abstand bis zum nächsten Auflager.
+    """
+    if not bool(state.get('manual_overhang_support_enabled', False)):
+        return []
+    spacing = max(0.0, float(state.get('manual_support_spacing_mm', 0.0) or 0.0))
+    if spacing <= 0.0 or x1 <= x0:
+        return []
+    support_w = max(40.0, min(200.0, float(state.get('manual_support_width_mm', 120.0) or 120.0)))
+    px0 = float(state.get('Überhang_hinten_mm', 0.0) or 0.0)
+    px1 = px0 + float(state.get('Länge_mm', 0.0) or 0.0)
+    intervals: List[Tuple[float, float]] = []
+
+    def add_support_at(center_x: float) -> None:
+        a = max(x0, float(center_x) - support_w / 2.0)
+        b = min(x1, float(center_x) + support_w / 2.0)
+        if b > a:
+            intervals.append((a, b))
+
+    # Hinterer Überhang: von Ladungsende hinten bis physisches Pritschenende.
+    if x0 < px0:
+        over_a = x0
+        over_b = min(x1, px0)
+        pos = over_a
+        add_support_at(over_a)
+        while pos + spacing < over_b:
+            pos += spacing
+            add_support_at(pos)
+        add_support_at(over_b)
+
+    # Vorderer Überhang: von physischem Pritschenende bis Ladungsende vorne.
+    if x1 > px1:
+        over_a = max(x0, px1)
+        over_b = x1
+        pos = over_a
+        add_support_at(over_a)
+        while pos + spacing < over_b:
+            pos += spacing
+            add_support_at(pos)
+        add_support_at(over_b)
+
+    return intervals
+
+
 def _support_metrics_for_candidate(state: Dict[str, Any], x: float, y: float, z: float, length: float, width: float) -> Dict[str, float]:
     """V116: Auflagefläche plus freier Überhang in Länge und Breite (nur selektiv genutzt).
 
@@ -1817,9 +1895,9 @@ def _support_metrics_for_candidate(state: Dict[str, Any], x: float, y: float, z:
     footprint = max(1.0, length * width)
     base_z = float(state.get('base_wood_height', 0.0))
     if float(z) <= base_z + 0.1:
-        # V118: Erste Lage wird gegen die physische Pritsche bewertet.
-        # Der Kantholz-/Pritschenauflagerbereich endet an der Pritsche und
-        # darf im Überhang vorne/hinten nicht als Auflage zählen.
+        # V127: Erste Lage wird gegen echte Pritsche PLUS optional geplante
+        # händische Auflager im Überhang bewertet. Die Pritsche selbst bleibt
+        # nur innerhalb der physischen Pritschenlänge tragend.
         x0, x1 = float(x), float(x) + length
         y0, y1 = float(y), float(y) + width
         px0 = float(state.get('Überhang_hinten_mm', 0.0) or 0.0)
@@ -1830,10 +1908,13 @@ def _support_metrics_for_candidate(state: Dict[str, Any], x: float, y: float, z:
         oy0, oy1 = max(y0, py0), min(y1, py1)
         supported_area = max(0.0, ox1 - ox0) * max(0.0, oy1 - oy0)
         x_intervals = [(ox0, ox1)] if ox1 > ox0 and oy1 > oy0 else []
+        # Geplante Auflager zählen als Traglinien für freie Längsspanne, nicht
+        # als vollflächige Pritsche. So bleibt Überhang ein Überhang.
+        x_intervals.extend(_planned_overhang_support_intervals(state, x0, x1))
         y_intervals = [(oy0, oy1)] if ox1 > ox0 and oy1 > oy0 else []
         return {
             'area_ratio': max(0.0, min(1.0, supported_area / footprint)),
-            'free_length_mm': _edge_free_span_mm(x0, x1, x_intervals),
+            'free_length_mm': _max_free_span_mm(x0, x1, x_intervals),
             'free_side_mm': _edge_free_span_mm(y0, y1, y_intervals),
         }
 
@@ -1876,7 +1957,7 @@ def _support_metrics_for_candidate(state: Dict[str, Any], x: float, y: float, z:
     supported_area = _rect_union_area(overlaps)
     return {
         'area_ratio': max(0.0, min(1.0, supported_area / footprint)),
-        'free_length_mm': _edge_free_span_mm(x0, x1, x_intervals),
+        'free_length_mm': _max_free_span_mm(x0, x1, x_intervals),
         'free_side_mm': _edge_free_span_mm(y0, y1, y_intervals),
     }
 
@@ -1884,20 +1965,23 @@ def _support_metrics_for_candidate(state: Dict[str, Any], x: float, y: float, z:
 def can_place_stable(state: Dict[str, Any], unit: pd.Series, x: float, y: float, z: float, length: float, width: float, height: float, weight: float) -> bool:
     if not can_place(state, x, y, z, length, width, height, weight):
         return False
-    if not bool(state.get('prevent_wide_on_narrow', True)):
-        return True
-    base_z = float(state.get('base_wood_height', 0.0))
-    if float(z) <= base_z + 0.1:
-        return True
-
-    # V116: Auflage kann selektiv nicht nur als Prozentfläche bewertet werden. Optional
-    # werden zusätzlich freie Überhänge in Länge und Breite begrenzt.
-    min_ratio = max(0.0, min(1.0, float(state.get('min_support_width_ratio', 0.80))))
+    prevent_support = bool(state.get('prevent_wide_on_narrow', True))
     max_free_length = max(0.0, float(state.get('max_unsupported_length_mm', 0.0) or 0.0))
     max_free_side = max(0.0, float(state.get('max_unsupported_side_mm', 0.0) or 0.0))
+    if not prevent_support and max_free_length <= 0 and max_free_side <= 0:
+        return True
+
+    base_z = float(state.get('base_wood_height', 0.0))
     metrics = _support_metrics_for_candidate(state, x, y, z, length, width)
-    if metrics.get('area_ratio', 0.0) + 1e-6 < min_ratio:
-        return False
+
+    # Erste Lage: früher wurde sie immer freigegeben. V127 prüft zumindest den
+    # maximal freien Abstand ab letzter echter/geplanter Auflage. Die
+    # Prozent-Auflage bleibt für obere Lagen reserviert.
+    first_layer = float(z) <= base_z + 0.1
+    if prevent_support and not first_layer:
+        min_ratio = max(0.0, min(1.0, float(state.get('min_support_width_ratio', 0.80))))
+        if metrics.get('area_ratio', 0.0) + 1e-6 < min_ratio:
+            return False
     if max_free_length > 0 and metrics.get('free_length_mm', 0.0) > max_free_length + 1e-6:
         return False
     if max_free_side > 0 and metrics.get('free_side_mm', 0.0) > max_free_side + 1e-6:
@@ -2912,6 +2996,8 @@ def create_loading_plan(
     max_unsupported_length_mm: float = 0.0,
     max_unsupported_side_mm: float = 0.0,
     prefer_length_before_stack: bool = False,
+    manual_overhang_support_enabled: bool = False,
+    manual_support_spacing_mm: float = 0.0,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """V17: ruhiger Lagen-Verladevorschlag für eine einzelne Fuhre.
 
@@ -2934,6 +3020,9 @@ def create_loading_plan(
         state['max_unsupported_length_mm'] = max(0.0, float(max_unsupported_length_mm or 0.0))
         state['max_unsupported_side_mm'] = max(0.0, float(max_unsupported_side_mm or 0.0))
         state['prefer_length_before_stack'] = bool(prefer_length_before_stack)
+        state['manual_overhang_support_enabled'] = bool(manual_overhang_support_enabled)
+        state['manual_support_spacing_mm'] = max(0.0, float(manual_support_spacing_mm or 0.0))
+        state['manual_support_width_mm'] = max(40.0, float(state.get('base_wood_height', 80.0) or 80.0))
         _clean_init_runtime_state(state)
 
     not_loaded: List[Dict[str, Any]] = []
@@ -3747,6 +3836,8 @@ def create_variant_a_loading_plan(
     max_unsupported_length_mm: float = 0.0,
     max_unsupported_side_mm: float = 0.0,
     prefer_length_before_stack: bool = False,
+    manual_overhang_support_enabled: bool = False,
+    manual_support_spacing_mm: float = 0.0,
     fuhre_split_attr: str = '',
     fill_remainder_next_group: bool = False,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -9638,13 +9729,31 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
     )
     min_support_ratio = ucol3.number_input('Mindestauflagefläche Kontrolle %', min_value=0, max_value=100, value=65, step=5) / 100.0
     min_underbau_height = ucol4.number_input('Unterbau melden ab mm', min_value=0.0, max_value=500.0, value=20.0, step=5.0)
+    v127_col1, v127_col2 = st.columns(2)
+    max_free_support_span_mm = v127_col1.number_input(
+        'Max. freier Überstand ab letzter Auflage mm',
+        min_value=0.0,
+        max_value=5000.0,
+        value=1400.0,
+        step=50.0,
+        help='V127: 0 = aus. Bei >0 prüft die Verladung den freien Abstand zwischen echter Pritsche / Element darunter / geplantem Auflager. Überhang ist nicht automatisch tragend.'
+    )
+    manual_overhang_support_enabled = v127_col2.checkbox(
+        'Geplante Auflager im Überhang berücksichtigen',
+        value=True,
+        help='V127: Wenn aktiv, werden händisch eingelegte Auflager im Überhang als tragende Linien gerechnet. Wenn aus, muss der Überhang ohne Zusatzauflager innerhalb des Maximalwerts bleiben.'
+    )
     if not bool(underbau_enabled) and bool(draw_underbau_rows):
         st.info('„Auflager im PDF/BSD einzeichnen“ wirkt nur, wenn „Unterbau / Auflage prüfen“ aktiv ist.')
         draw_underbau_rows = False
+    if float(max_free_support_span_mm) > 0:
+        st.caption('V127: Freier Überstand wird in der Verladung geprüft. Pritsche trägt nur physisch; geplante Auflager im Überhang zählen nur als Auflagerlinien, nicht als volle Ladefläche.')
 
     project_meta['Unterbau_Auflage_pruefen'] = bool(underbau_enabled)
     project_meta['Auflager_im_PDF_BSD_einzeichnen'] = bool(draw_underbau_rows)
     project_meta['Mindestauflagefläche_Kontrolle_%'] = int(round(float(min_support_ratio) * 100.0))
+    project_meta['Max_freier_Überstand_ab_Auflage_mm'] = float(max_free_support_span_mm)
+    project_meta['Geplante_Auflager_im_Überhang_berücksichtigen'] = bool(manual_overhang_support_enabled)
 
     st.subheader('8. Verladung starten')
     st.caption('Die Verladung wird erst berechnet, wenn dieser Startknopf gedrückt wird.')
@@ -9688,6 +9797,9 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
             bundle_order_flex_percent=float(bundle_order_flex_percent),
             prevent_wide_on_narrow=bool(prevent_wide_on_narrow),
             min_support_width_ratio=float(min_support_width_percent) / 100.0,
+            max_unsupported_length_mm=float(max_free_support_span_mm),
+            manual_overhang_support_enabled=bool(manual_overhang_support_enabled),
+            manual_support_spacing_mm=float(max_free_support_span_mm),
             fuhre_split_attr=effective_fuhre_split_attr,
             fill_remainder_next_group=bool(fill_remainder_next_group),
         )
@@ -9940,6 +10052,8 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                                 max_unsupported_length_mm=float(recalc_max_free_length),
                                 max_unsupported_side_mm=float(recalc_max_free_side),
                                 prefer_length_before_stack=bool(recalc_prefer_length),
+                                manual_overhang_support_enabled=bool(recalc_max_free_length > 0),
+                                manual_support_spacing_mm=float(recalc_max_free_length),
                             )
                             # V124: selektive Neuberechnung benutzt jetzt dieselbe
                             # Nachlogik wie die Hauptverladung. Kein hinten-bündiges
