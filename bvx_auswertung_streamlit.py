@@ -2381,10 +2381,12 @@ def _clean_try_place_on_current_layer(
 ) -> Optional[Dict[str, Any]]:
     """Platziert eine Einheit mit unabhängigen Höhen links/rechts.
 
-    V28:
+    V126:
     - links und rechts dürfen eigene Lagenhöhen haben
     - breite Einheiten werden als gemeinsame mittige Lage behandelt
-    - die Ladung wird in X später als ganzer Block mittig auf die Pritsche zentriert
+    - für jede Grundposition werden echte X-Kandidaten geprüft
+    - die Schwerpunktbewertung entscheidet innerhalb gültiger Positionen stärker
+      als die alte kompakte/hintenliegende X-Vorgabe.
     """
     height = float(unit['Höhe_mm'])
     weight = float(unit['Gewicht_kg'])
@@ -2731,10 +2733,12 @@ def _clean_try_place_on_current_layer(
 ) -> Optional[Dict[str, Any]]:
     """Platziert eine Einheit mit unabhängigen Höhen links/rechts.
 
-    V28:
+    V126:
     - links und rechts dürfen eigene Lagenhöhen haben
     - breite Einheiten werden als gemeinsame mittige Lage behandelt
-    - die Ladung wird in X später als ganzer Block mittig auf die Pritsche zentriert
+    - für jede Grundposition werden echte X-Kandidaten geprüft
+    - die Schwerpunktbewertung entscheidet innerhalb gültiger Positionen stärker
+      als die alte kompakte/hintenliegende X-Vorgabe.
     """
     height = float(unit['Höhe_mm'])
     weight = float(unit['Gewicht_kg'])
@@ -2767,17 +2771,23 @@ def _clean_try_place_on_current_layer(
                     nx, nz = new_common
                     if can_place_stable(state, unit, nx, y, nz, use_length, use_width, use_height, weight):
                         candidates.append((nx, nz, True))
-            for x, z, new_layer in candidates:
-                sp_score = _state_sp_abs_delta_x(state, x, use_length, use_width, use_height, weight, unit.get('Typ', '')) * 1800.0
-                score = z * 1000000.0 + x * 150.0 + sp_score - use_width
-                candidate = {
-                    'x': x, 'y': y, 'z': z, 'length': use_length, 'width': use_width,
-                    'height': use_height, 'rotation': rotation, 'mode': 'breit/mittig',
-                    'new_layer': new_layer, 'wide': True
-                }
-                updates = {'left': (x + use_length + float(state['gap_length']), z, use_height), 'right': (x + use_length + float(state['gap_length']), z, use_height)}
-                if best is None or score < best[0]:
-                    best = (score, candidate, ('left', 'right'), x + use_length + float(state['gap_length']), updates)
+            for base_x, z, new_layer in candidates:
+                for x in _sp_candidate_x_values_for_unit(state, base_x, use_length):
+                    if not can_place_stable(state, unit, x, y, z, use_length, use_width, use_height, weight):
+                        continue
+                    # V126: nicht mehr blind kleine X-Werte bevorzugen.
+                    # Entscheidend ist: gültig + Schwerpunkt näher zur echten Pritschenmitte.
+                    sp_score = _state_sp_abs_delta_x(state, x, use_length, use_width, use_height, weight, unit.get('Typ', '')) * 6500.0
+                    compact_score = abs(float(x) - float(base_x)) * 18.0
+                    score = z * 1000000.0 + sp_score + compact_score - use_width
+                    candidate = {
+                        'x': x, 'y': y, 'z': z, 'length': use_length, 'width': use_width,
+                        'height': use_height, 'rotation': rotation, 'mode': 'breit/mittig / SP-X-Kandidaten',
+                        'new_layer': new_layer, 'wide': True
+                    }
+                    updates = {'left': (x + use_length + float(state['gap_length']), z, use_height), 'right': (x + use_length + float(state['gap_length']), z, use_height)}
+                    if best is None or score < best[0]:
+                        best = (score, candidate, ('left', 'right'), x + use_length + float(state['gap_length']), updates)
             continue
 
         sides = ['left']
@@ -2805,21 +2815,27 @@ def _clean_try_place_on_current_layer(
                     nx, nz = new_side
                     if can_place_stable(state, unit, nx, y, nz, use_length, use_width, use_height, weight):
                         candidates.append((nx, nz, True))
-            for x, z, new_layer in candidates:
-                other = 'right' if side == 'left' else 'left'
-                after_x = x + use_length + float(state['gap_length'])
-                balance = abs(after_x - float(state['_clean_lane_x'][other]))
-                # Niedrige Z zuerst, dann kompakte X-Position.
-                sp_score = _state_sp_abs_delta_x(state, x, use_length, use_width, use_height, weight, unit.get('Typ', '')) * 1800.0
-                score = z * 1000000.0 + x * 150.0 + balance + sp_score
-                candidate = {
-                    'x': x, 'y': y, 'z': z, 'length': use_length, 'width': use_width,
-                    'height': use_height, 'rotation': rotation, 'mode': f'{side} / unabhängige Stapelhöhe',
-                    'new_layer': new_layer, 'wide': False
-                }
-                updates = {side: (after_x, z, use_height)}
-                if best is None or score < best[0]:
-                    best = (score, candidate, (side,), after_x, updates)
+            for base_x, z, new_layer in candidates:
+                for x in _sp_candidate_x_values_for_unit(state, base_x, use_length):
+                    if not can_place_stable(state, unit, x, y, z, use_length, use_width, use_height, weight):
+                        continue
+                    other = 'right' if side == 'left' else 'left'
+                    after_x = x + use_length + float(state['gap_length'])
+                    balance = abs(after_x - float(state['_clean_lane_x'][other]))
+                    # V126: echte Alternativpositionen für kurze Elemente wie BE71.
+                    # Schwerpunkt wird stärker gewichtet, Roh-X nicht mehr als hinten/klein bevorzugt.
+                    sp_score = _state_sp_abs_delta_x(state, x, use_length, use_width, use_height, weight, unit.get('Typ', '')) * 6500.0
+                    compact_score = abs(float(x) - float(base_x)) * 18.0
+                    balance_score = balance * 0.35
+                    score = z * 1000000.0 + sp_score + compact_score + balance_score
+                    candidate = {
+                        'x': x, 'y': y, 'z': z, 'length': use_length, 'width': use_width,
+                        'height': use_height, 'rotation': rotation, 'mode': f'{side} / unabhängige Stapelhöhe / SP-X-Kandidaten',
+                        'new_layer': new_layer, 'wide': False
+                    }
+                    updates = {side: (after_x, z, use_height)}
+                    if best is None or score < best[0]:
+                        best = (score, candidate, (side,), after_x, updates)
 
     if best is None:
         return None
@@ -2979,15 +2995,14 @@ def create_loading_plan(
                 # für vorgezogene Bunde. Die Einheit selbst bleibt immer als Bund erhalten.
                 order_penalty = unit_idx * (100.0 - flex_percent) * 10000.0
                 z_score = safe_number(result.get('Z_mm'), 0.0) * 1000000.0
-                x_score = safe_number(result.get('X_mm'), 0.0) * 150.0
+                # V126: Roh-X nur noch schwach bewerten. Die frühere starke X-Strafe
+                # hat gültige, weiter vorne liegende Schwerpunkt-Positionen wieder benachteiligt.
+                x_score = safe_number(result.get('X_mm'), 0.0) * 15.0
                 # Bei gleicher Lage breite/lange Bunde eher unten nehmen.
                 footprint_bonus = safe_number(result.get('Breite_mm'), 0.0) * 100.0 + safe_number(result.get('Länge_mm'), 0.0) * 0.1
-                used_length_score = safe_number(trial_state.get('used_length'), 0.0)
-                # V124: Schwerpunkt schon während der Hauptverladung bewerten.
-                # Nicht erst am Schluss reparieren: bei gleich gültigen Kandidaten
-                # wird die Variante bevorzugt, die den Schwerpunkt der ganzen Fuhre
-                # näher zur echten Pritschenmitte bringt.
-                sp_score = _state_sp_abs_delta_x(trial_state) * 1800.0
+                used_length_score = safe_number(trial_state.get('used_length'), 0.0) * 0.25
+                # V126: Schwerpunkt als echtes Entscheidungskriterium, nicht nur Anzeige.
+                sp_score = _state_sp_abs_delta_x(trial_state) * 6500.0
                 score = order_penalty + z_score + x_score + used_length_score + sp_score - footprint_bonus
                 if best is None or score < best[0]:
                     best = (score, unit_idx, state_idx, result)
