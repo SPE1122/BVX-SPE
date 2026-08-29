@@ -1,0 +1,1 @@
+- [GitHub sync history](github-sync-history.md) — A new project can have an unrelated starter commit; align the local branch to the selected GitHub branch before using Remote Updates.
