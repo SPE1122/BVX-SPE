@@ -1757,7 +1757,7 @@ def _support_area_ratio_for_candidate(state: Dict[str, Any], x: float, y: float,
         supported = max(0.0, ox1 - ox0) * max(0.0, oy1 - oy0)
         return max(0.0, min(1.0, supported / footprint))
 
-    rows = _real_load_placement_rows(state)
+    rows = _support_surface_rows(state)
     if not rows or length <= 0 or width <= 0:
         return 0.0
 
@@ -1980,6 +1980,9 @@ def _planned_support_rows_for_candidate(
             'Drehung': 0,
             'Ebene': 'Auflager bei Verladeplanung',
             'Gewicht_kg': 0.0,
+            'Auflager_fuer': uid,
+            'Auflager_Offset_X_mm': round(support_x - float(x), 1),
+            'Auflager_Offset_Y_mm': round(float(y) - float(y), 1),
         })
         planned.append(row)
         current_area = new_area
@@ -1988,6 +1991,30 @@ def _planned_support_rows_for_candidate(
     if current_area + 1e-6 < target_area:
         return None
     return planned
+
+
+def _sync_planned_support_rows_to_load(placements_df: pd.DataFrame) -> pd.DataFrame:
+    """Hält berechnete Auflager nach einer Schwerpunkt-/Zentrierkorrektur fest."""
+    if placements_df is None or placements_df.empty or 'Typ' not in placements_df.columns:
+        return placements_df.copy() if placements_df is not None else pd.DataFrame()
+    result = placements_df.copy()
+    if 'Auflager_fuer' not in result.columns:
+        return result
+    real_by_id = {
+        str(row.get('Einheit_ID', '')): idx
+        for idx, row in result.iterrows()
+        if str(row.get('Typ', '')).strip() != 'Unterbau'
+    }
+    for idx, row in result[result['Typ'].astype(str).eq('Unterbau')].iterrows():
+        parent_idx = real_by_id.get(str(row.get('Auflager_fuer', '') or ''))
+        if parent_idx is None:
+            continue
+        parent = result.loc[parent_idx]
+        offset_x = safe_number(row.get('Auflager_Offset_X_mm'), 0.0)
+        offset_y = safe_number(row.get('Auflager_Offset_Y_mm'), 0.0)
+        result.loc[idx, 'X_mm'] = round(safe_number(parent.get('X_mm'), 0.0) + offset_x, 1)
+        result.loc[idx, 'Y_mm'] = round(safe_number(parent.get('Y_mm'), 0.0) + offset_y, 1)
+    return result
 
 
 def _edge_free_span_mm(total0: float, total1: float, intervals: List[Tuple[float, float]]) -> float:
@@ -2035,7 +2062,7 @@ def _support_metrics_for_candidate(state: Dict[str, Any], x: float, y: float, z:
             'free_side_mm': _edge_free_span_mm(y0, y1, y_intervals),
         }
 
-    rows = _real_load_placement_rows(state)
+    rows = _support_surface_rows(state)
     if not rows or length <= 0 or width <= 0:
         return {'area_ratio': 0.0, 'free_length_mm': max(0.0, length), 'free_side_mm': max(0.0, width)}
 
@@ -3823,6 +3850,7 @@ def apply_main_loading_postprocess(
         result = improve_longitudinal_weight_balance(result, platforms_local, gap_mm=gap_mm)
         result = resolve_x_collisions_by_layer(result, platforms_local, gap_mm=gap_mm)
         result = shift_x_to_use_front_overhang(result, platforms_local)
+        result = _sync_planned_support_rows_to_load(result)
     new_summary = recompute_summary_from_placements(result, platforms_local)
     return result, new_summary
 
@@ -5445,8 +5473,9 @@ def calculate_underbau_rows_for_platform(
         return pd.DataFrame(columns=columns), pd.DataFrame(columns=warning_cols)
 
     helper_types = {'Unterbau', 'Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz'}
-    rows = rows[~rows.get('Typ', pd.Series(dtype=str)).astype(str).isin(helper_types)].copy()
-    if rows.empty:
+    real_rows = rows[~rows.get('Typ', pd.Series(dtype=str)).astype(str).isin(helper_types)].copy()
+    planned_support_rows = rows[rows.get('Typ', pd.Series(dtype=str)).astype(str).eq('Unterbau')].copy()
+    if real_rows.empty:
         return pd.DataFrame(columns=columns), pd.DataFrame(columns=warning_cols)
 
     for col in ['X_mm', 'Y_mm', 'Z_mm', 'Länge_mm', 'Breite_mm', 'Höhe_mm']:
@@ -5463,7 +5492,8 @@ def calculate_underbau_rows_for_platform(
     existing_keys = set()
 
     # Nur Bauteile/Bunde oberhalb der ersten Ebene prüfen.
-    check_rows = rows[rows['Z_mm'] > base_height + tolerance].copy()
+    support_rows = pd.concat([real_rows, planned_support_rows], ignore_index=True, sort=False)
+    check_rows = real_rows[real_rows['Z_mm'] > base_height + tolerance].copy()
     for _, row in check_rows.sort_values(['Z_mm', 'X_mm', 'Y_mm'], kind='stable').iterrows():
         x = safe_number(row.get('X_mm'))
         y = safe_number(row.get('Y_mm'))
@@ -5474,7 +5504,7 @@ def calculate_underbau_rows_for_platform(
         row_typ = str(row.get('Typ', '') or '').strip()
         expected_spacer = bundle_spacer if row_typ == 'Bund' else general_spacer
 
-        below = rows[(rows['Z_mm'] + rows['Höhe_mm']) <= z - tolerance].copy()
+        below = support_rows[(support_rows['Z_mm'] + support_rows['Höhe_mm']) <= z - tolerance].copy()
         overlap_area = 0.0
         closest_top = base_height
         overlap_rows = []
@@ -6805,41 +6835,28 @@ def _pdf_add_visible_spacer_rows(rows: pd.DataFrame, platform: pd.Series, view: 
 
 
 def _pdf_draw_underbau_blocks(c, rx: float, ry: float, rw: float, rh: float, view: str, label: str) -> None:
-    """Zeichnet Unterbau als Hilfselement: in Draufsicht gestrichelt, in Ansichten als Klötze."""
+    """Zeichnet ein transparentes Auflager mit deutlich sichtbarem X."""
     from reportlab.lib import colors
     if rw <= 0 or rh <= 0:
         return
     c.saveState()
-    c.setStrokeColor(colors.HexColor('#555555'))
-    c.setFillColor(colors.HexColor('#d9d9d9'))
-    c.setLineWidth(0.45)
-
-    if view == 'top':
-        # Nur gestrichelte Kontur, damit Bauteilnummern nicht verdeckt werden.
-        c.setDash(3, 2)
-        c.rect(rx, ry, rw, rh, stroke=1, fill=0)
-        c.setDash()
-        if rw > 22 and rh > 8:
-            c.setFont('Helvetica', 3.8)
-            c.setFillColor(colors.HexColor('#555555'))
-            c.drawString(rx + 2, ry + 2, str(label).replace('Unterbau', 'UB')[:10])
-        c.restoreState()
-        return
-
-    # Seiten-/Front-/Rückansichten: nicht als durchgehender Balken, sondern als 2 Auflagerklötze.
-    # Die Klötze werden annähernd quadratisch, aber nie breiter als 25% der Projektion.
-    block_w = max(4.0, min(max(rh, 5.0), rw * 0.22, 38.0))
-    if rw <= block_w * 2.4:
-        # Wenn das Bauteil sehr schmal projiziert ist, nur einen mittigen Klotz zeichnen.
-        bx = rx + (rw - block_w) / 2
-        c.rect(bx, ry, block_w, rh, stroke=1, fill=1)
-    else:
-        c.rect(rx, ry, block_w, rh, stroke=1, fill=1)
-        c.rect(rx + rw - block_w, ry, block_w, rh, stroke=1, fill=1)
-    if rw > 35 and rh > 7:
-        c.setFont('Helvetica', 4.2)
-        c.setFillColor(colors.HexColor('#333333'))
-        c.drawCentredString(rx + rw / 2, ry + rh / 2 - 1.4, str(label).replace('Unterbau', 'UB')[:14])
+    c.setStrokeColor(colors.HexColor('#444444'))
+    c.setFillColor(colors.HexColor('#9ec5e8'))
+    c.setLineWidth(0.55)
+    try:
+        c.setFillAlpha(0.22)
+        c.setStrokeAlpha(0.90)
+    except Exception:
+        pass
+    c.rect(rx, ry, rw, rh, stroke=1, fill=1)
+    c.setLineWidth(max(0.7, min(1.2, 0.05 * max(rw, rh))))
+    c.line(rx, ry, rx + rw, ry + rh)
+    c.line(rx, ry + rh, rx + rw, ry)
+    try:
+        c.setFillAlpha(1.0)
+        c.setStrokeAlpha(1.0)
+    except Exception:
+        pass
     c.restoreState()
 
 def _pdf_draw_view_orientation_helpers(c, ox: float, oy: float, draw_w: float, draw_h: float, view: str, front_at_x_max: bool, left_at_y_max: bool) -> None:
