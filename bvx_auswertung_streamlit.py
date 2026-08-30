@@ -2343,7 +2343,14 @@ def _state_sp_abs_delta_y(state: Dict[str, Any], extra_y: Optional[float] = None
     return abs(weighted_y / total_w - platform_center_y)
 
 
-def _sp_candidate_x_values_for_unit(state: Dict[str, Any], base_x: float, length: float) -> List[float]:
+def _sp_candidate_x_values_for_unit(
+    state: Dict[str, Any],
+    base_x: float,
+    length: float,
+    y: Optional[float] = None,
+    width: Optional[float] = None,
+    z: Optional[float] = None,
+) -> List[float]:
     """V125: X-Kandidaten für dieselbe geplante Platzierung.
 
     Der Schwerpunkt wird nicht nur am Schluss korrigiert, sondern auch bei
@@ -2374,6 +2381,27 @@ def _sp_candidate_x_values_for_unit(state: Dict[str, Any], base_x: float, length
         values.append(base_x - step)
         values.append(centered_x + step)
         values.append(centered_x - step)
+
+    # Bei gestapelten Einzelteilen zusätzlich exakt über vorhandenen tragenden
+    # Flächen suchen. Die frühere Raster-Suche konnte eine gültige 35-%-Auflage
+    # knapp verfehlen und eröffnete dann fälschlich eine neue Pritsche.
+    if y is not None and width is not None and z is not None:
+        y0, y1 = float(y), float(y) + float(width)
+        target_z = float(z)
+        for row in _support_surface_rows(state):
+            box = _row_box_values(row)
+            if box is None:
+                continue
+            rx0, rx1, ry0, ry1, _rz0, rz1 = box
+            if rz1 > target_z + 1.0:
+                continue
+            if min(y1, ry1) - max(y0, ry0) <= 1.0:
+                continue
+            values.extend([
+                rx0,
+                rx1 - length,
+                (rx0 + rx1 - length) / 2.0,
+            ])
 
     out: List[float] = []
     seen = set()
@@ -2688,15 +2716,12 @@ def _clean_try_place_on_current_layer(
             cur_x = max(float(state['_clean_lane_x']['left']), float(state['_clean_lane_x']['right']))
             cur_z = max(float(state['_clean_side_z']['left']), float(state['_clean_side_z']['right']))
             y = max(0.0, (platform_width - use_width) / 2.0)
-            candidates = []
-            if can_place_stable(state, unit, cur_x, y, cur_z, use_length, use_width, use_height, weight):
-                candidates.append((cur_x, cur_z, False))
+            candidates = [(cur_x, cur_z, False)]
             # Runge: breite/mittige Bunde dürfen erst oberhalb der Runge über die Mitte.
             # Dafür gezielt einen Kandidaten auf Runge-Höhe prüfen.
             if bool(state.get('Runge_aktiv', False)) and _crosses_runge_zone(state, y, use_width):
                 rz = max(float(state.get('Rungenhoehe_mm', 2500.0)), cur_z)
-                if can_place_stable(state, unit, cur_x, y, rz, use_length, use_width, use_height, weight):
-                    candidates.append((cur_x, rz, True))
+                candidates.append((cur_x, rz, True))
             if allow_stack:
                 new_common = _clean_start_new_common_layer(state, unit, use_height)
                 if new_common is not None:
@@ -3054,10 +3079,9 @@ def _clean_try_place_on_current_layer(
                 new_common = _clean_start_new_common_layer(state, unit, use_height)
                 if new_common is not None:
                     nx, nz = new_common
-                    if can_place_stable(state, unit, nx, y, nz, use_length, use_width, use_height, weight):
-                        candidates.append((nx, nz, True))
+                    candidates.append((nx, nz, True))
             for base_x, z, new_layer in candidates:
-                for x in _sp_candidate_x_values_for_unit(state, base_x, use_length):
+                for x in _sp_candidate_x_values_for_unit(state, base_x, use_length, y=y, width=use_width, z=z):
                     if not can_place_stable(state, unit, x, y, z, use_length, use_width, use_height, weight):
                         continue
                     # V126: nicht mehr blind kleine X-Werte bevorzugen.
@@ -3094,17 +3118,14 @@ def _clean_try_place_on_current_layer(
             y = _clean_y_for_side(platform_width, use_width, side, state)
             side_x = float(state['_clean_lane_x'][side])
             side_z = float(state['_clean_side_z'][side])
-            candidates = []
-            if can_place_stable(state, unit, side_x, y, side_z, use_length, use_width, use_height, weight):
-                candidates.append((side_x, side_z, False))
+            candidates = [(side_x, side_z, False)]
             if allow_stack:
                 new_side = _clean_start_new_side_layer(state, side, unit, use_height)
                 if new_side is not None:
                     nx, nz = new_side
-                    if can_place_stable(state, unit, nx, y, nz, use_length, use_width, use_height, weight):
-                        candidates.append((nx, nz, True))
+                    candidates.append((nx, nz, True))
             for base_x, z, new_layer in candidates:
-                for x in _sp_candidate_x_values_for_unit(state, base_x, use_length):
+                for x in _sp_candidate_x_values_for_unit(state, base_x, use_length, y=y, width=use_width, z=z):
                     if not can_place_stable(state, unit, x, y, z, use_length, use_width, use_height, weight):
                         continue
                     other = 'right' if side == 'left' else 'left'
@@ -9762,7 +9783,11 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
 
     with st.expander('4a. Bundbildung', expanded=True):
         bcol1, bcol2 = st.columns(2)
-        use_bundles = bcol1.checkbox('Bunde automatisch bilden', value=True)
+        use_bundles = bcol1.checkbox(
+            'Bunde automatisch bilden',
+            value=False,
+            help='Aus = jedes Element bleibt eine eigene Verlade- und Abladeeinheit. Ein = mehrere passende Elemente werden als unteilbares Bund geplant.'
+        )
         max_bundle_weight = bcol2.number_input('Max. Bundgewicht kg', min_value=100.0, max_value=5000.0, value=float(default_bundle_weight), step=50.0)
 
         bundle_match_default = [attr for attr in ['Höhe_mm'] if attr in sort_options]
@@ -9771,6 +9796,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
             sort_options,
             default=bundle_match_default,
             key='bundle_match_attrs_v88',
+            disabled=not use_bundles,
             help='Wie bei der Sortierung können mehrere Attribute ausgewählt werden. Ein Bund wird nur gebildet, wenn alle ausgewählten Attribute gleich sind.'
         )
         same_height = 'Höhe_mm' in bundle_match_attrs
@@ -9999,10 +10025,14 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
             'Bund-Reihenfolge lockern %',
             min_value=0,
             max_value=100,
-            value=20,
+            value=0,
             step=5,
-            help='20 % ist für die Referenzplanung ein guter Kompromiss und führt zu kompakteren Fuhren. 0 = streng nach Sortierung. Höher = die App darf ganze Bunde innerhalb eines grösseren Suchfensters vorziehen, um breitere/stabilere Bunde eher unten zu laden.'
+            disabled=not use_bundles,
+            help='Wirkt nur bei aktiver Bundbildung. Es werden ausschliesslich ganze Bunde verschoben; Einzelteile werden damit nicht umsortiert.'
         )
+        effective_bundle_order_flex_percent = float(bundle_order_flex_percent) if use_bundles else 0.0
+        if not use_bundles:
+            st.caption('Einzelteilmodus aktiv: Die Bund-Reihenfolge hat keinen Einfluss auf die Planung.')
         prevent_wide_on_narrow = scol2.checkbox(
             'Obere Bauteile/Bunde mit ungenügender Auflage verhindern',
             value=True,
@@ -10017,7 +10047,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
             help='Grenze für die echte Verladeprüfung. Beispiel 35 % = obere Einheit braucht mindestens ca. 35 % direkt tragende Auflagefläche.'
         )
 
-    project_meta['Bund_Reihenfolge_lockern_%'] = int(bundle_order_flex_percent)
+    project_meta['Bund_Reihenfolge_lockern_%'] = int(effective_bundle_order_flex_percent)
     project_meta['Obere_Bauteile_Bunde_auf_schmaler_Auflage_verhindern'] = bool(prevent_wide_on_narrow)
     project_meta['Breiten_Bund_auf_schmaler_Auflage_verhindern'] = bool(prevent_wide_on_narrow)
     project_meta['Mindestauflagefläche_beim_Verladen_%'] = int(min_support_width_percent)
@@ -10088,7 +10118,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
             'same_profile': bool(same_profile),
             'label_attr': str(display_label_attr),
             'bundle_match_attrs': tuple(bundle_match_attrs or []),
-            'bundle_order_flex_percent': float(bundle_order_flex_percent),
+            'bundle_order_flex_percent': float(effective_bundle_order_flex_percent),
             'prevent_wide_on_narrow': bool(prevent_wide_on_narrow),
             'min_support_width_percent': float(min_support_width_percent),
             'consider_generated_supports': bool(consider_generated_supports),
@@ -10145,7 +10175,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                 same_profile=same_profile,
                 label_attr=display_label_attr,
                 same_attrs=bundle_match_attrs,
-                bundle_order_flex_percent=float(bundle_order_flex_percent),
+                bundle_order_flex_percent=float(effective_bundle_order_flex_percent),
                 prevent_wide_on_narrow=bool(prevent_wide_on_narrow),
                 min_support_width_ratio=float(min_support_width_percent) / 100.0,
                 fuhre_split_attr=effective_fuhre_split_attr,
@@ -10415,7 +10445,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                                 allow_beside=bool(recalc_allow_beside),
                                 allow_stack=bool(recalc_allow_stack),
                                 allow_rotation=bool(allow_rotation),
-                                bundle_order_flex_percent=float(bundle_order_flex_percent),
+                                bundle_order_flex_percent=float(effective_bundle_order_flex_percent),
                                 prevent_wide_on_narrow=bool(recalc_prevent_support),
                                 min_support_width_ratio=float(recalc_min_support) / 100.0,
                                 max_unsupported_length_mm=float(recalc_max_free_length),
