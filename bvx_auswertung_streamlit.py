@@ -2113,9 +2113,6 @@ def can_place_stable(state: Dict[str, Any], unit: pd.Series, x: float, y: float,
     enforce_support = bool(state.get('prevent_wide_on_narrow', True)) or consider_supports
     if not enforce_support:
         return True
-    base_z = float(state.get('base_wood_height', 0.0))
-    if float(z) <= base_z + 0.1:
-        return True
 
     # V116: Auflage kann selektiv nicht nur als Prozentfläche bewertet werden. Optional
     # werden zusätzlich freie Überhänge in Länge und Breite begrenzt.
@@ -4112,6 +4109,10 @@ def create_variant_a_loading_plan(
     enabled_options = enabled_options.sort_values('Priorität', kind='stable').reset_index(drop=True)
 
     remaining_parts = sorted_parts.copy().reset_index(drop=True)
+    # Die Reihenfolgelockerung gehört fachlich ausschliesslich zur Bundlogik.
+    # Im Einzelteilmodus bleibt die BVX-/Sortierreihenfolge unverändert.
+    if not bool(use_bundles):
+        bundle_order_flex_percent = 0.0
 
     # V94: Optionale Pritschen-/Fuhren-Grenze nach Attribut.
     # Wir gruppieren vor der Verladung nur dann, wenn ein gültiges Attribut gewählt ist.
@@ -5542,7 +5543,10 @@ def calculate_underbau_rows_for_platform(
         row_typ = str(row.get('Typ', '') or '').strip()
         expected_spacer = bundle_spacer if row_typ == 'Bund' else general_spacer
 
-        below = support_rows[(support_rows['Z_mm'] + support_rows['Höhe_mm']) <= z - tolerance].copy()
+        # Direkter Kontakt endet genau bei Z des oberen Elements und muss als
+        # tragende Auflage zählen. Die frühere Grenze ``z - tolerance`` schloss
+        # diese echten Kontaktflächen aus und erzeugte falsche Unterbauwarnungen.
+        below = support_rows[(support_rows['Z_mm'] + support_rows['Höhe_mm']) <= z + tolerance].copy()
         overlap_area = 0.0
         closest_top = base_height
         overlap_rows = []
