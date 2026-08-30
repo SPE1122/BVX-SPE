@@ -5419,6 +5419,42 @@ def compute_loading_warnings(placements_df: pd.DataFrame, platforms_df: pd.DataF
             if total_weight > max_weight:
                 warnings.append({'Typ': 'Gewicht', 'Pritsche': name, 'Einheit_ID': '', 'Warnung': 'Max. Gesamtgewicht überschritten', 'Details': f'{total_weight:.0f} kg inkl. Eigengewicht > {max_weight:.0f} kg'})
 
+            platform_row = next(
+                (row for _, row in platforms_df.iterrows() if str(row.get('Pritsche', '')) == name),
+                None,
+            )
+            if platform_row is not None:
+                cog = _load_center_of_gravity_values_for_platform(placements_df, platform_row)
+                base_length = safe_number(platform_row.get('Länge_mm'), 0.0)
+                platform_width = safe_number(platform_row.get('Breite_mm'), 0.0)
+                delta_x_signed = safe_number(cog.get('Schwerpunkt_Abstand_X_mm'), 0.0)
+                delta_y_signed = safe_number(cog.get('Schwerpunkt_Abstand_Y_mm'), 0.0)
+                delta_x = abs(delta_x_signed)
+                delta_y = abs(delta_y_signed)
+                # Ohne Achslastdaten ist die physische Pritschenmitte die
+                # konservative Referenz. 10 % ist eine Warnschwelle, keine
+                # automatische Ablehnung.
+                limit_x = max(250.0, base_length * 0.10)
+                limit_y = max(100.0, platform_width * 0.10)
+                if delta_x > limit_x:
+                    direction = 'vorne' if delta_x_signed < 0 else 'hinten'
+                    warnings.append({
+                        'Typ': 'Schwerpunkt längs',
+                        'Pritsche': name,
+                        'Einheit_ID': '',
+                        'Warnung': 'Ladungsschwerpunkt deutlich ausserhalb der Pritschenmitte',
+                        'Details': f'{delta_x:.0f} mm {direction}; Warnschwelle {limit_x:.0f} mm. Ladung weiter ausrichten oder Achslast prüfen.',
+                    })
+                if delta_y > limit_y:
+                    direction = 'links' if delta_y_signed < 0 else 'rechts'
+                    warnings.append({
+                        'Typ': 'Schwerpunkt quer',
+                        'Pritsche': name,
+                        'Einheit_ID': '',
+                        'Warnung': 'Ladungsschwerpunkt deutlich ausserhalb der Pritschenmitte',
+                        'Details': f'{delta_y:.0f} mm nach {direction}; Warnschwelle {limit_y:.0f} mm. Queraufteilung prüfen.',
+                    })
+
     # V119: nach allen Ausrichtungen echte Geometrie-/Breitenkollisionen melden.
     collision_df = find_geometry_conflicts(placements_df, platforms_df)
     if collision_df is not None and not collision_df.empty:
@@ -7183,7 +7219,9 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
 
     def draw_projected_row(row: pd.Series, ghost: bool = False) -> None:
         px, py, pw, ph, _depth = _pdf_projection_values(row, view, eff_length, width, front_at_x_max, left_at_y_max)
-        draw_projected_fragment(row, px, py, pw, ph, ghost=ghost, draw_label=not ghost)
+        # Schraffierte/hintere Restflächen sind sichtbar und bekommen ebenfalls
+        # eine Beschriftung. Vollständig verdeckte Teile werden vorher entfernt.
+        draw_projected_fragment(row, px, py, pw, ph, ghost=ghost, draw_label=True)
 
     # V116: Stirnansicht mit echter Sichtlogik.
     # Nahe Rechtecke decken entfernte Rechtecke ab; komplett verdeckte Elemente
