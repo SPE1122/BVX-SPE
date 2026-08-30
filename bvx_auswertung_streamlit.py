@@ -8419,8 +8419,6 @@ def create_loading_pdf(
             f'Ladegewicht: {load_vals["Ladegewicht_kg"]:.0f} kg',
             f'Eigengewicht: {load_vals["Eigengewicht_kg"]:.0f} kg',
             f'Gesamtgewicht: {load_vals["Gesamtgewicht_kg"]:.0f} kg',
-            f'SP ab vorne: {load_vals.get("Schwerpunkt_X_ab_Vorne_mm", 0.0):.0f} mm / Mitte P: {load_vals.get("Pritschenmitte_ab_Vorne_mm", 0.0):.0f} mm',
-            _format_sp_deviation_from_front(load_vals.get("Schwerpunkt_Abstand_ab_Vorne_mm", 0.0)),
         ]
         for i, line in enumerate(info_lines):
             c.drawString(info_x, info_y - 16 - i * 13, line)
@@ -8439,6 +8437,36 @@ def create_loading_pdf(
         for i, line in enumerate(hints):
             c.drawString(hint_x, hint_y - 14 - i * 12, line)
 
+        # Schwerpunktangaben und QS-Freigabe zusammen in einem eigenen Rahmen.
+        # Dieser steht zwischen den Verladehinweisen und dem Bezug zur BSD-
+        # Draufsicht und überdeckt nicht mehr das rechte Infofeld.
+        quality_x = margin + 320
+        quality_y = page_h - 176
+        quality_w = 220
+        quality_h = 88
+        c.setStrokeColor(colors.black)
+        c.rect(quality_x, quality_y, quality_w, quality_h, stroke=1, fill=0)
+        c.setFont('Helvetica-Bold', 8)
+        c.drawString(quality_x + 8, quality_y + quality_h - 14, 'Qualitätssicherung')
+        c.setFont('Helvetica', 7.2)
+        c.drawString(
+            quality_x + 8,
+            quality_y + quality_h - 29,
+            f'SP ab vorne: {load_vals.get("Schwerpunkt_X_ab_Vorne_mm", 0.0):.0f} mm',
+        )
+        c.drawString(
+            quality_x + 8,
+            quality_y + quality_h - 42,
+            f'Mitte P: {load_vals.get("Pritschenmitte_ab_Vorne_mm", 0.0):.0f} mm',
+        )
+        c.drawString(
+            quality_x + 8,
+            quality_y + quality_h - 55,
+            _format_sp_deviation_from_front(load_vals.get("Schwerpunkt_Abstand_ab_Vorne_mm", 0.0)),
+        )
+        c.drawString(quality_x + 8, quality_y + 14, 'Datum: ______________')
+        c.drawString(quality_x + 118, quality_y + 14, 'Visum: _________')
+
         # V106: finale Ausgabe-/Darstellungs-Korrektur ohne Verladelogik.
         _pdf_draw_bsd_reference_sketch(c, margin + 545, page_h - 176, 230, 88, front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max)
 
@@ -8450,14 +8478,6 @@ def create_loading_pdf(
         _pdf_draw_view(c, placements_df, platform, margin + 780, 430, 220, 205, 'back', 'Stirnansicht hinten', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False, scale_context=pdf_scale_context)
         _pdf_draw_view(c, placements_df, platform, margin + 780, 125, 220, 205, 'front', 'Stirnansicht vorne', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False, scale_context=pdf_scale_context)
         _pdf_draw_view(c, placements_df, platform, margin + 1025, 165, 140, 435, 'top_rotated', 'Draufsicht', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True, scale_context=pdf_scale_context)
-
-        # Qualitätssicherung kompakt oben rechts, getrennt vom Infofeld.
-        c.setStrokeColor(colors.black)
-        c.rect(page_w - 245, page_h - 200, 210, 52, stroke=1, fill=0)
-        c.setFont('Helvetica', 8)
-        c.drawString(page_w - 235, page_h - 163, 'Qualitätssicherung')
-        c.drawString(page_w - 235, page_h - 180, 'Datum: ______________')
-        c.drawString(page_w - 125, page_h - 180, 'Visum: __________')
 
         c.showPage()
 
@@ -10774,6 +10794,48 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                                         f"Überhang hinten {center_metrics.get('Überhang_hinten_mm', 0):.0f} mm, "
                                         f"Überhang vorne {center_metrics.get('Überhang_vorne_mm', 0):.0f} mm."
                                     )
+                            if not loaded_preview.empty:
+                                st.markdown('**Visuelle Kontrolle: bisherige Verladung / neue Vorschau**')
+                                st.caption(
+                                    'Links steht die bisherige Position der gewählten Pritsche, '
+                                    'rechts die neu berechnete Position. Die übrigen Fuhren bleiben unverändert.'
+                                )
+                                preview_platform_df = pd.DataFrame([preview_platform_row])
+                                preview_platform_name = str(preview_platform_row.get('Pritsche', recalc_platform))
+                                original_platform_rows = edited_placements_df[
+                                    edited_placements_df.get('Pritsche', pd.Series(dtype=str)).astype(str).eq(str(recalc_platform))
+                                ].copy()
+                                for view_title, view_name in [
+                                    ('Seitenansicht', 'side'),
+                                    ('Rückansicht', 'back'),
+                                    ('Draufsicht', 'top'),
+                                    ('Vorderansicht', 'front'),
+                                ]:
+                                    view_left, view_right = st.columns(2)
+                                    with view_left:
+                                        st.caption(f'Bisherige Verladung – {view_title}')
+                                        st.plotly_chart(
+                                            draw_loading_view(
+                                                original_platform_rows,
+                                                platforms_used_df,
+                                                str(recalc_platform),
+                                                view_name,
+                                            ),
+                                            use_container_width=True,
+                                            key=f'v116_before_{view_name}_{recalc_platform}',
+                                        )
+                                    with view_right:
+                                        st.caption(f'Neue Vorschau – {view_title}')
+                                        st.plotly_chart(
+                                            draw_loading_view(
+                                                preview_placements,
+                                                preview_platform_df,
+                                                preview_platform_name,
+                                                view_name,
+                                            ),
+                                            use_container_width=True,
+                                            key=f'v116_after_{view_name}_{recalc_platform}',
+                                        )
                             if not rest_preview.empty:
                                 st.warning(f'{len(rest_preview)} Verladeeinheiten passen mit diesen Werten nicht auf {recalc_platform}. Es wird keine zusätzliche Fuhre automatisch erzeugt.')
                                 st.dataframe(rest_preview[['Einheit_ID', 'Bauteile', 'Länge_mm', 'Breite_mm', 'Höhe_mm', 'Gewicht_kg']], use_container_width=True, hide_index=True)
