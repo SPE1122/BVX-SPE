@@ -1316,6 +1316,8 @@ def init_platform_state(row: pd.Series, base_wood_height: float, layer_spacer_he
         'current_layer_has_bundle': False,
         'prevent_wide_on_narrow': yes_no_to_bool(row.get('Breite_Bund_auf_schmal_verhindern', True)),
         'min_support_width_ratio': max(0.0, min(1.0, safe_number(row.get('Mindest_Stützbreite_%', row.get('Mindest_Stuetzbreite_%')), 80.0) / 100.0)),
+        'consider_generated_supports': yes_no_to_bool(row.get('Auflager_bei_Verladeplanung_beruecksichtigen', False)),
+        'support_planning_mode': str(row.get('Auflager_Strenge', 'Nur notwendige Auflager') or 'Nur notwendige Auflager'),
         'placements': [],
     }
 
@@ -1664,7 +1666,7 @@ def _support_width_ratio_for_candidate(state: Dict[str, Any], x: float, y: float
     if float(z) <= base_z + 0.1:
         return 1.0
 
-    rows = _real_load_placement_rows(state)
+    rows = _support_surface_rows(state)
     if not rows or float(width) <= 0:
         return 0.0
 
@@ -1792,6 +1794,202 @@ def _support_area_ratio_for_candidate(state: Dict[str, Any], x: float, y: float,
     return max(0.0, min(1.0, supported_area / footprint))
 
 
+def _support_surface_rows(state: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Gibt reale Bauteile und bereits geplante Auflager als Tragflächen zurück."""
+    helper_types = {'Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz'}
+    rows: List[Dict[str, Any]] = []
+    for row in state.get('placements', []) or []:
+        typ = str(row.get('Typ', '') or '').strip()
+        if typ not in helper_types and typ != 'Unterbau':
+            rows.append(row)
+        elif typ == 'Unterbau':
+            rows.append(row)
+    return rows
+
+
+def _support_target_ratio(state: Dict[str, Any]) -> float:
+    """Gemeinsamer Zielwert für die tragende Auflage bei der Planung."""
+    minimum = max(0.0, min(1.0, float(state.get('min_support_width_ratio', 0.35))))
+    mode = str(state.get('support_planning_mode', '') or '').strip().lower()
+    if 'sicher' in mode:
+        return max(minimum, 0.50)
+    return minimum
+
+
+def _support_direct_overlap_rects(
+    state: Dict[str, Any],
+    x: float,
+    y: float,
+    z: float,
+    length: float,
+    width: float,
+) -> List[Tuple[float, float, float, float]]:
+    """Ermittelt die Rechtecke der obersten direkten Tragfläche."""
+    base_z = float(state.get('base_wood_height', 0.0))
+    if float(z) <= base_z + 0.1:
+        px0 = float(state.get('Überhang_hinten_mm', 0.0) or 0.0)
+        px1 = px0 + float(state.get('Länge_mm', 0.0) or 0.0)
+        py0, py1 = 0.0, float(state.get('Breite_mm', 0.0) or 0.0)
+        ox0, ox1 = max(float(x), px0), min(float(x) + float(length), px1)
+        oy0, oy1 = max(float(y), py0), min(float(y) + float(width), py1)
+        return [(ox0, ox1, oy0, oy1)] if ox1 > ox0 and oy1 > oy0 else []
+
+    rows = _support_surface_rows(state)
+    tops: List[float] = []
+    for row in rows:
+        rz = safe_number(row.get('Z_mm'), 0.0)
+        rh = safe_number(row.get('Höhe_mm'), 0.0)
+        top = rz + rh
+        if top <= float(z) + 1.0:
+            tops.append(top)
+    if not tops:
+        return []
+    top_z = max(tops)
+    x0, x1 = float(x), float(x) + float(length)
+    y0, y1 = float(y), float(y) + float(width)
+    overlaps: List[Tuple[float, float, float, float]] = []
+    for row in rows:
+        rz = safe_number(row.get('Z_mm'), 0.0)
+        rh = safe_number(row.get('Höhe_mm'), 0.0)
+        if abs((rz + rh) - top_z) > 2.0:
+            continue
+        rx0 = safe_number(row.get('X_mm'), 0.0)
+        rx1 = rx0 + safe_number(row.get('Länge_mm'), 0.0)
+        ry0 = safe_number(row.get('Y_mm'), 0.0)
+        ry1 = ry0 + safe_number(row.get('Breite_mm'), 0.0)
+        ox0, ox1 = max(x0, rx0), min(x1, rx1)
+        oy0, oy1 = max(y0, ry0), min(y1, ry1)
+        if ox1 > ox0 and oy1 > oy0:
+            overlaps.append((ox0, ox1, oy0, oy1))
+    return overlaps
+
+
+def _planned_support_rows_for_candidate(
+    state: Dict[str, Any],
+    unit: pd.Series,
+    x: float,
+    y: float,
+    z: float,
+    length: float,
+    width: float,
+) -> Optional[List[Dict[str, Any]]]:
+    """Plant bei Bedarf verankerte Auflager unter einer Kandidatenfläche.
+
+    Die Auflager stehen bewusst von der Pritsche/Kantholz-Oberkante bis zur
+    Unterkante der neuen Einheit. Bereiche, in denen bereits ein unteres
+    Bauteil steht, werden nicht überbrückt; dort ist nur die direkte Tragfläche
+    zulässig. So können Auflager vor/nach unteren Elementen entstehen, aber
+    niemals frei in der Luft.
+    """
+    if not bool(state.get('consider_generated_supports', False)):
+        return None
+    base_z = float(state.get('base_wood_height', 0.0))
+    if float(z) <= base_z + 0.1 or length <= 0 or width <= 0:
+        return []
+
+    target_ratio = _support_target_ratio(state)
+    footprint = max(1.0, float(length) * float(width))
+    direct_rects = _support_direct_overlap_rects(state, x, y, z, length, width)
+    current_area = _rect_union_area(direct_rects)
+    target_area = target_ratio * footprint
+    if current_area + 1e-6 >= target_area:
+        return []
+
+    # Ein verankertes Auflager darf nur auf der physischen Pritsche/Kantholz
+    # stehen, nicht im vorderen oder hinteren Überhang.
+    deck_x0 = float(state.get('Überhang_hinten_mm', 0.0) or 0.0)
+    deck_x1 = deck_x0 + float(state.get('Länge_mm', 0.0) or 0.0)
+    platform_width = float(state.get('Breite_mm', 0.0) or 0.0)
+    if y < -0.001 or y + width > platform_width + 0.001:
+        return None
+
+    rows = _support_surface_rows(state)
+    boundaries = {float(x), float(x) + float(length), deck_x0, deck_x1}
+    for row in rows:
+        rx0 = safe_number(row.get('X_mm'), 0.0)
+        rx1 = rx0 + safe_number(row.get('Länge_mm'), 0.0)
+        if rx1 > x and rx0 < x + length:
+            boundaries.update([rx0, rx1])
+    xs = sorted(v for v in boundaries if x - 0.001 <= v <= x + length + 0.001)
+    candidates: List[Tuple[float, float, float]] = []
+    for a, b in zip(xs, xs[1:]):
+        left, right = max(float(x), a), min(float(x) + float(length), b, deck_x1)
+        if right - left <= 1.0 or right <= deck_x0:
+            continue
+        support_box = (left, right, float(y), float(y) + float(width), base_z, float(z))
+        blocked = False
+        for row in rows:
+            box = _row_box_values(row)
+            if box is not None and _boxes_overlap_3d(support_box, box, tol=1.0):
+                blocked = True
+                break
+        if not blocked:
+            edge_distance = min(left - float(x), float(x) + float(length) - right)
+            candidates.append((left, right, edge_distance))
+
+    # Zuerst an den Enden des oberen Elements Auflager vor/nach dem Element
+    # nutzen; nur wenn dort kein Platz ist, werden innere freie Segmente genutzt.
+    candidates.sort(key=lambda item: (item[2], -(item[1] - item[0])))
+    planned: List[Dict[str, Any]] = []
+    covered_rects = list(direct_rects)
+    remaining_area = max(0.0, target_area - current_area)
+    for left, right, _distance in candidates:
+        if remaining_area <= 1e-6:
+            break
+        available_length = right - left
+        take_length = min(available_length, remaining_area / max(1.0, float(width)))
+        if take_length < 20.0:
+            continue
+        if left - float(x) <= float(x) + float(length) - right:
+            support_x = left
+        else:
+            support_x = right - take_length
+        support_rect = (support_x, support_x + take_length, float(y), float(y) + float(width))
+        covered_rects.append(support_rect)
+        new_area = _rect_union_area(covered_rects)
+        if new_area <= current_area + 1e-6:
+            continue
+        support_height = float(z) - base_z
+        uid = str(unit.get('Einheit_ID', 'Einheit') or 'Einheit')
+        row = {key: '' for key in [
+            'Fuhre_Nr', 'Fuhrenoption', 'Pritschenname', 'Pritsche', 'Einheit_ID',
+            'Typ', 'Anzahl_Bauteile', 'Bauteile', 'Bauteile_Liste', 'Ansicht_Attribut',
+            'Ansicht_Label', 'Ansicht_Liste', 'Bund_Attribute', 'Einzellängen_mm',
+            'Einzelbreiten_mm', 'Einzelhöhen_mm', 'Einlage_allgemein_mm',
+            'Bundeinlage_mm', 'X_mm', 'Y_mm', 'Z_mm', 'Länge_mm', 'Breite_mm',
+            'Höhe_mm', 'Drehung', 'Ebene', 'Gewicht_kg'
+        ]}
+        row.update({
+            'Fuhre_Nr': state.get('Fuhre_Nr'),
+            'Fuhrenoption': state.get('Fuhrenoption', ''),
+            'Pritschenname': state.get('Pritschenname', ''),
+            'Pritsche': state.get('Pritsche', ''),
+            'Einheit_ID': f'UBP_{uid}_{len(planned) + 1}',
+            'Typ': 'Unterbau',
+            'Anzahl_Bauteile': 0,
+            'Bauteile': 'X',
+            'Bauteile_Liste': 'X',
+            'Ansicht_Label': 'X',
+            'Ansicht_Liste': 'X',
+            'X_mm': round(support_x, 1),
+            'Y_mm': round(float(y), 1),
+            'Z_mm': round(base_z, 1),
+            'Länge_mm': round(take_length, 1),
+            'Breite_mm': round(float(width), 1),
+            'Höhe_mm': round(support_height, 1),
+            'Drehung': 0,
+            'Ebene': 'Auflager bei Verladeplanung',
+            'Gewicht_kg': 0.0,
+        })
+        planned.append(row)
+        current_area = new_area
+        remaining_area = max(0.0, target_area - current_area)
+
+    if current_area + 1e-6 < target_area:
+        return None
+    return planned
+
+
 def _edge_free_span_mm(total0: float, total1: float, intervals: List[Tuple[float, float]]) -> float:
     """Grösster freier Randüberhang vor/nach den tragenden Intervallen."""
     total0 = float(total0)
@@ -1884,7 +2082,9 @@ def _support_metrics_for_candidate(state: Dict[str, Any], x: float, y: float, z:
 def can_place_stable(state: Dict[str, Any], unit: pd.Series, x: float, y: float, z: float, length: float, width: float, height: float, weight: float) -> bool:
     if not can_place(state, x, y, z, length, width, height, weight):
         return False
-    if not bool(state.get('prevent_wide_on_narrow', True)):
+    consider_supports = bool(state.get('consider_generated_supports', False))
+    enforce_support = bool(state.get('prevent_wide_on_narrow', True)) or consider_supports
+    if not enforce_support:
         return True
     base_z = float(state.get('base_wood_height', 0.0))
     if float(z) <= base_z + 0.1:
@@ -1895,9 +2095,21 @@ def can_place_stable(state: Dict[str, Any], unit: pd.Series, x: float, y: float,
     max_free_length = max(0.0, float(state.get('max_unsupported_length_mm', 0.0) or 0.0))
     max_free_side = max(0.0, float(state.get('max_unsupported_side_mm', 0.0) or 0.0))
     metrics = _support_metrics_for_candidate(state, x, y, z, length, width)
-    min_ratio = max(0.0, min(1.0, float(state.get('min_support_width_ratio', 0.80))))
+    min_ratio = _support_target_ratio(state) if consider_supports else max(0.0, min(1.0, float(state.get('min_support_width_ratio', 0.80))))
     if metrics.get('area_ratio', 0.0) + 1e-6 < min_ratio:
-        return False
+        if not consider_supports:
+            return False
+        planned_supports = _planned_support_rows_for_candidate(state, unit, x, y, z, length, width)
+        if planned_supports is None:
+            return False
+        support_rects = [
+            (safe_number(row.get('X_mm')), safe_number(row.get('X_mm')) + safe_number(row.get('Länge_mm')),
+             safe_number(row.get('Y_mm')), safe_number(row.get('Y_mm')) + safe_number(row.get('Breite_mm')))
+            for row in planned_supports
+        ]
+        direct_rects = _support_direct_overlap_rects(state, x, y, z, length, width)
+        if _rect_union_area(direct_rects + support_rects) + 1e-6 < min_ratio * max(1.0, float(length) * float(width)):
+            return False
     if max_free_length > 0 and metrics.get('free_length_mm', 0.0) > max_free_length + 1e-6:
         return False
     if max_free_side > 0 and metrics.get('free_side_mm', 0.0) > max_free_side + 1e-6:
@@ -1917,6 +2129,12 @@ def commit_place(
     rotation: int,
     mode: str,
 ) -> Dict[str, Any]:
+    planned_supports = _planned_support_rows_for_candidate(
+        state, unit, x, y, z, length, width
+    )
+    if planned_supports:
+        state['placements'].extend(planned_supports)
+
     placement = {
         'Fuhre_Nr': state['Fuhre_Nr'],
         'Fuhrenoption': state['Fuhrenoption'],
