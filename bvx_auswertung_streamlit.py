@@ -9746,16 +9746,16 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
         )
         prevent_wide_on_narrow = scol2.checkbox(
             'Obere Bauteile/Bunde mit ungenügender Auflage verhindern',
-            value=False,
-            help='V113: Gilt auch ohne Bund. Die Prozentgrenze wirkt nur, wenn dieser Haken aktiv ist. Obere Einzelteile und Bunde werden nur gesetzt, wenn darunter genügend Auflagefläche vorhanden ist.'
+            value=True,
+            help='V113: Gilt auch ohne Bund. Obere Einzelteile und Bunde werden nur gesetzt, wenn darunter mindestens die eingestellte Auflagefläche vorhanden ist.'
         )
         min_support_width_percent = scol3.number_input(
             'Mindestauflagefläche beim Verladen %',
             min_value=0,
             max_value=100,
-            value=60,
+            value=35,
             step=5,
-            help='Grenze für die echte Verladeprüfung. Beispiel 60 % = obere Einheit braucht mindestens ca. 60 % Auflagefläche. 100 % ist sehr streng und erzeugt meist mehr Fuhren.'
+            help='Grenze für die echte Verladeprüfung. Beispiel 35 % = obere Einheit braucht mindestens ca. 35 % direkt tragende Auflagefläche.'
         )
 
     project_meta['Bund_Reihenfolge_lockern_%'] = int(bundle_order_flex_percent)
@@ -9771,13 +9771,13 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
     st.subheader('7. Auflage / Unterbau')
     st.caption('V113: Prüfung und Einzeichnen sind getrennt. Die App kann Auflage/Unterbau prüfen und warnen, ohne dass Auflager automatisch im PDF/BSD gezeichnet werden.')
     ucol1, ucol2, ucol3, ucol4 = st.columns(4)
-    underbau_enabled = ucol1.checkbox('Unterbau / Auflage prüfen', value=False)
+    underbau_enabled = ucol1.checkbox('Unterbau / Auflage prüfen', value=True)
     draw_underbau_rows = ucol2.checkbox(
         'Auflager im PDF/BSD einzeichnen',
         value=False,
         help='Nur aktivieren, wenn die automatisch ermittelten Unterbau-/Auflagerklötze wirklich in Ansichten, PDF und BSD erscheinen sollen.'
     )
-    min_support_ratio = ucol3.number_input('Mindestauflagefläche Kontrolle %', min_value=0, max_value=100, value=65, step=5) / 100.0
+    min_support_ratio = ucol3.number_input('Mindestauflagefläche Kontrolle %', min_value=0, max_value=100, value=35, step=5) / 100.0
     min_underbau_height = ucol4.number_input('Unterbau melden ab mm', min_value=0.0, max_value=500.0, value=20.0, step=5.0)
     if not bool(underbau_enabled) and bool(draw_underbau_rows):
         st.info('„Auflager im PDF/BSD einzeichnen“ wirkt nur, wenn „Unterbau / Auflage prüfen“ aktiv ist.')
