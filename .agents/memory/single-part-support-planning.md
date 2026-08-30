@@ -20,3 +20,9 @@ Prefer the position with the best real support before optimizing the total load 
 **Why:** A fixed default limit rejected physically unavoidable overhangs on long first-layer elements and multiplied the number of platforms, while support-quality scoring improved the arrangement without creating extra platforms.
 
 **How to apply:** Use minimum support presets as the normal modes, keep hard longitudinal/lateral overhang percentages at zero unless explicitly configured, and apply local overrides only to the selected platform during selective recalculation.
+
+Any centering or center-of-gravity post-processing must preserve or improve the direct support of upper layers. An upper layer must not be shifted independently from its lower bearing geometry merely to look centered.
+
+**Why:** Independent layer centering can undo a support-oriented placement and recreate a visible overhang even though a better shared position exists over the lower stack.
+
+**How to apply:** Compare direct support before and after an upper-layer shift, retain the better-supported position, and restrict unconstrained center-of-gravity swaps to the first layer.

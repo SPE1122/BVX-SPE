@@ -3088,6 +3088,8 @@ def _clean_try_place_on_current_layer(
                 if new_common is not None:
                     nx, nz = new_common
                     candidates.append((nx, nz, True))
+            if bool(state.get('prefer_length_before_stack', False)) and any(not item[2] for item in candidates):
+                candidates = [item for item in candidates if not item[2]]
             for base_x, z, new_layer in candidates:
                 for x in _sp_candidate_x_values_for_unit(state, base_x, use_length, y=y, width=use_width, z=z):
                     if not can_place_stable(state, unit, x, y, z, use_length, use_width, use_height, weight):
@@ -3134,12 +3136,22 @@ def _clean_try_place_on_current_layer(
             y = _clean_y_for_side(platform_width, use_width, side, state)
             side_x = float(state['_clean_lane_x'][side])
             side_z = float(state['_clean_side_z'][side])
-            candidates = [(side_x, side_z, False)]
+            candidates = []
+            current_layer_x_values = _sp_candidate_x_values_for_unit(
+                state, side_x, use_length, y=y, width=use_width, z=side_z
+            )
+            if any(
+                can_place_stable(state, unit, x, y, side_z, use_length, use_width, use_height, weight)
+                for x in current_layer_x_values
+            ):
+                candidates.append((side_x, side_z, False))
             if allow_stack:
                 new_side = _clean_start_new_side_layer(state, side, unit, use_height)
                 if new_side is not None:
                     nx, nz = new_side
                     candidates.append((nx, nz, True))
+            if bool(state.get('prefer_length_before_stack', False)) and any(not item[2] for item in candidates):
+                candidates = [item for item in candidates if not item[2]]
             for base_x, z, new_layer in candidates:
                 for x in _sp_candidate_x_values_for_unit(state, base_x, use_length, y=y, width=use_width, z=z):
                     if not can_place_stable(state, unit, x, y, z, use_length, use_width, use_height, weight):
@@ -3573,6 +3585,58 @@ def center_length_groups_from_platform_center(placements_df: pd.DataFrame, platf
     helper_types = {'Unterbau', 'Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz'}
     platform_lookup = {str(r.get('Pritsche', '')): r for _, r in platforms_df.iterrows()}
 
+    def _direct_support_ratios(df: pd.DataFrame, idxs: List[Any], prow: pd.Series) -> List[float]:
+        """Bewertet die jeweils höchste reale Tragfläche direkt unter den Zeilen."""
+        ratios: List[float] = []
+        pname_local = str(prow.get('Pritsche', ''))
+        base_height_local = safe_number(prow.get('Kantholz_erste_Lage_mm'), 0.0)
+        deck_x0 = safe_number(prow.get('Überhang_hinten_mm'), 0.0)
+        deck_x1 = deck_x0 + safe_number(prow.get('Länge_mm'), 0.0)
+        deck_y1 = safe_number(prow.get('Breite_mm'), 0.0)
+        support_rows = df[
+            df['Pritsche'].astype(str).eq(pname_local)
+            & df['X_mm'].notna()
+            & df['Y_mm'].notna()
+            & df['Z_mm'].notna()
+            & ~df.get('Typ', pd.Series(dtype=str)).astype(str).isin({'Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz'})
+        ].copy()
+        for idx in idxs:
+            row = df.loc[idx]
+            x0 = safe_number(row.get('X_mm'), 0.0)
+            y0 = safe_number(row.get('Y_mm'), 0.0)
+            z0 = safe_number(row.get('Z_mm'), 0.0)
+            length = safe_number(row.get('Länge_mm'), 0.0)
+            item_width = safe_number(row.get('Breite_mm'), 0.0)
+            footprint = max(1.0, length * item_width)
+            x1, y1 = x0 + length, y0 + item_width
+            if z0 <= base_height_local + 1.0:
+                area = max(0.0, min(x1, deck_x1) - max(x0, deck_x0)) * max(0.0, min(y1, deck_y1) - max(y0, 0.0))
+                ratios.append(max(0.0, min(1.0, area / footprint)))
+                continue
+
+            overlaps: List[Tuple[float, Tuple[float, float, float, float]]] = []
+            for support_idx, support in support_rows.iterrows():
+                if support_idx == idx:
+                    continue
+                support_top = safe_number(support.get('Z_mm'), 0.0) + safe_number(support.get('Höhe_mm'), 0.0)
+                if support_top > z0 + 1.0:
+                    continue
+                sx0 = safe_number(support.get('X_mm'), 0.0)
+                sy0 = safe_number(support.get('Y_mm'), 0.0)
+                sx1 = sx0 + safe_number(support.get('Länge_mm'), 0.0)
+                sy1 = sy0 + safe_number(support.get('Breite_mm'), 0.0)
+                ox0, ox1 = max(x0, sx0), min(x1, sx1)
+                oy0, oy1 = max(y0, sy0), min(y1, sy1)
+                if ox1 > ox0 and oy1 > oy0:
+                    overlaps.append((support_top, (ox0, ox1, oy0, oy1)))
+            if not overlaps:
+                ratios.append(0.0)
+                continue
+            top = max(item[0] for item in overlaps)
+            rects = [rect for support_top, rect in overlaps if abs(support_top - top) <= 2.0]
+            ratios.append(max(0.0, min(1.0, _rect_union_area(rects) / footprint)))
+        return ratios
+
     for pname, prow in platform_lookup.items():
         eff_length = (
             safe_number(prow.get('Länge_mm'))
@@ -3580,6 +3644,7 @@ def center_length_groups_from_platform_center(placements_df: pd.DataFrame, platf
             + safe_number(prow.get('Überhang_hinten_mm'))
         )
         width = safe_number(prow.get('Breite_mm'), 0.0)
+        base_height = safe_number(prow.get('Kantholz_erste_Lage_mm'), 0.0)
         if eff_length <= 0 or width <= 0:
             continue
 
@@ -3605,6 +3670,7 @@ def center_length_groups_from_platform_center(placements_df: pd.DataFrame, platf
         subset['_x_center_group'] = subset['Z_mm'].round(1).astype(str)
 
         for _group_key, grp in subset.groupby('_x_center_group', sort=False):
+            group_z = float(pd.to_numeric(grp['Z_mm'], errors='coerce').fillna(0.0).min())
             idxs = grp.index.tolist()
             x0 = float(result.loc[idxs, 'X_mm'].min())
             x1 = float((result.loc[idxs, 'X_mm'] + result.loc[idxs, 'Länge_mm']).max())
@@ -3620,6 +3686,22 @@ def center_length_groups_from_platform_center(placements_df: pd.DataFrame, platf
                 shift -= new_x0
             if new_x1 > eff_length:
                 shift -= (new_x1 - eff_length)
+
+            # Bei oberen Lagen darf die optische Zentrierung die reale Auflage
+            # nicht verschlechtern. Damit bleiben z. B. FE10/FE13 gemeinsam über
+            # der besseren hinteren Tragfläche, während eine nachweislich bessere
+            # Zentrierung weiterhin zulässig ist.
+            if group_z > base_height + 1.0 and abs(shift) >= 0.1:
+                before_ratios = _direct_support_ratios(result, idxs, prow)
+                candidate = result.copy()
+                candidate.loc[idxs, 'X_mm'] = (candidate.loc[idxs, 'X_mm'] + shift).round(1)
+                after_ratios = _direct_support_ratios(candidate, idxs, prow)
+                before_sum = sum(before_ratios)
+                after_sum = sum(after_ratios)
+                before_min = min(before_ratios) if before_ratios else 0.0
+                after_min = min(after_ratios) if after_ratios else 0.0
+                if after_sum + 1e-6 < before_sum or after_min + 1e-6 < before_min:
+                    continue
 
             result.loc[idxs, 'X_mm'] = (result.loc[idxs, 'X_mm'] + shift).round(1)
             if 'Ebene' in result.columns:
@@ -3797,6 +3879,7 @@ def improve_longitudinal_weight_balance(
             continue
         if safe_number(prow.get('Länge_mm'), 0.0) <= 0:
             continue
+        base_height = safe_number(prow.get('Kantholz_erste_Lage_mm'), 0.0)
 
         mask_real = (
             result['Pritsche'].astype(str).eq(pname)
@@ -3822,6 +3905,12 @@ def improve_longitudinal_weight_balance(
             best: Optional[Tuple[float, pd.DataFrame, Any, Any]] = None
 
             for _z_key, grp in sub.groupby(sub['Z_mm'].round(1), sort=False):
+                # Schwerpunkt-Tausche dürfen obere Bauteile nicht von ihrer
+                # tragenden unteren Geometrie lösen. Dort ist Auflage wichtiger
+                # als eine kleine Schwerpunktverbesserung.
+                group_z = float(pd.to_numeric(grp['Z_mm'], errors='coerce').fillna(0.0).min())
+                if group_z > base_height + 1.0:
+                    continue
                 idxs = grp.index.tolist()
                 if len(idxs) < 2:
                     continue
