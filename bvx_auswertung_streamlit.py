@@ -3669,6 +3669,16 @@ def center_length_groups_from_platform_center(placements_df: pd.DataFrame, platf
         # ausgerichtet. So bleiben die echten Längenabstände erhalten.
         subset['_x_center_group'] = subset['Z_mm'].round(1).astype(str)
 
+        ordered_layer_keys = sorted(
+            subset['_x_center_group'].dropna().unique().tolist(),
+            key=lambda value: float(value),
+        )
+        initial_weight_center_keys = set(ordered_layer_keys[:6])
+        platform_center_x = (
+            safe_number(prow.get('Überhang_hinten_mm'), 0.0)
+            + safe_number(prow.get('Länge_mm'), 0.0) / 2.0
+        )
+
         for _group_key, grp in subset.groupby('_x_center_group', sort=False):
             group_z = float(pd.to_numeric(grp['Z_mm'], errors='coerce').fillna(0.0).min())
             idxs = grp.index.tolist()
@@ -3677,8 +3687,41 @@ def center_length_groups_from_platform_center(placements_df: pd.DataFrame, platf
             span = x1 - x0
             if span <= 0 or span > eff_length:
                 continue
-            target_x0 = (eff_length - span) / 2.0
-            shift = target_x0 - x0
+
+            # Die untersten sechs echten Lagen werden nicht nur geometrisch,
+            # sondern nach ihrem tatsächlichen Gewichtsschwerpunkt ausgerichtet.
+            # So wirkt die X-Ausrichtung bereits im Fundament der Ladung und
+            # nicht erst bei den oberen Restlagen.
+            if _group_key in initial_weight_center_keys:
+                layer_weights = pd.to_numeric(
+                    grp.get('Gewicht_kg', pd.Series(index=grp.index, dtype=float)),
+                    errors='coerce',
+                ).fillna(0.0)
+                fallback_weights = (
+                    pd.to_numeric(grp['Länge_mm'], errors='coerce').fillna(0.0)
+                    * pd.to_numeric(grp['Breite_mm'], errors='coerce').fillna(0.0)
+                    * pd.to_numeric(grp['Höhe_mm'], errors='coerce').fillna(0.0)
+                    / 1_000_000.0
+                )
+                layer_weights = layer_weights.where(layer_weights > 0, fallback_weights)
+                weight_sum = float(layer_weights.sum())
+                if weight_sum > 0:
+                    centers = (
+                        pd.to_numeric(grp['X_mm'], errors='coerce').fillna(0.0)
+                        + pd.to_numeric(grp['Länge_mm'], errors='coerce').fillna(0.0) / 2.0
+                    )
+                    layer_center_x = float((centers * layer_weights).sum() / weight_sum)
+                    desired_shift = platform_center_x - layer_center_x
+                else:
+                    desired_shift = (eff_length - span) / 2.0 - x0
+            else:
+                desired_shift = (eff_length - span) / 2.0 - x0
+
+            # Auch bei einer gewichteten Ausrichtung bleibt die Lage vollständig
+            # innerhalb des erlaubten X-Bereichs.
+            shift = max(-x0, min(eff_length - x1, desired_shift))
+            if abs(shift) < 0.1:
+                continue
 
             new_x0 = x0 + shift
             new_x1 = x1 + shift
@@ -3687,6 +3730,20 @@ def center_length_groups_from_platform_center(placements_df: pd.DataFrame, platf
             if new_x1 > eff_length:
                 shift -= (new_x1 - eff_length)
 
+            # Bereits geplante, an ein Element gebundene Auflager werden mit der
+            # zugehörigen Lage verschoben. Dadurch prüft die nachfolgende
+            # Auflagebewertung die tatsächliche Tragkette und nicht die alte
+            # Position des Einlegeholzes.
+            shift_idxs = list(idxs)
+            if 'Auflager_fuer' in result.columns and 'Einheit_ID' in result.columns:
+                parent_ids = set(result.loc[idxs, 'Einheit_ID'].astype(str).tolist())
+                attached_support_mask = (
+                    result['Auflager_fuer'].astype(str).isin(parent_ids)
+                    & result['Pritsche'].astype(str).eq(pname)
+                )
+                shift_idxs.extend(result.index[attached_support_mask].tolist())
+                shift_idxs = list(dict.fromkeys(shift_idxs))
+
             # Bei oberen Lagen darf die optische Zentrierung die reale Auflage
             # nicht verschlechtern. Damit bleiben z. B. FE10/FE13 gemeinsam über
             # der besseren hinteren Tragfläche, während eine nachweislich bessere
@@ -3694,7 +3751,7 @@ def center_length_groups_from_platform_center(placements_df: pd.DataFrame, platf
             if group_z > base_height + 1.0 and abs(shift) >= 0.1:
                 before_ratios = _direct_support_ratios(result, idxs, prow)
                 candidate = result.copy()
-                candidate.loc[idxs, 'X_mm'] = (candidate.loc[idxs, 'X_mm'] + shift).round(1)
+                candidate.loc[shift_idxs, 'X_mm'] = (candidate.loc[shift_idxs, 'X_mm'] + shift).round(1)
                 after_ratios = _direct_support_ratios(candidate, idxs, prow)
                 before_sum = sum(before_ratios)
                 after_sum = sum(after_ratios)
@@ -3703,9 +3760,9 @@ def center_length_groups_from_platform_center(placements_df: pd.DataFrame, platf
                 if after_sum + 1e-6 < before_sum or after_min + 1e-6 < before_min:
                     continue
 
-            result.loc[idxs, 'X_mm'] = (result.loc[idxs, 'X_mm'] + shift).round(1)
+            result.loc[shift_idxs, 'X_mm'] = (result.loc[shift_idxs, 'X_mm'] + shift).round(1)
             if 'Ebene' in result.columns:
-                result.loc[idxs, 'Ebene'] = result.loc[idxs, 'Ebene'].astype(str).apply(
+                result.loc[shift_idxs, 'Ebene'] = result.loc[shift_idxs, 'Ebene'].astype(str).apply(
                     lambda v: v if 'X mittig je Stapel' in v else f'{v} / X mittig je Stapel'
                 )
 
