@@ -1,0 +1,192 @@
+Pritschenplan - F03 Auflieger
+Objekt / Datei: 12213 Saumacker - Brettstapel.bvx
+Erstellt: 30.08.2026
+Info Pritsche
+Transport: 
+Fuhrenoption: Auflieger
+Länge Ladung: 12000 mm
+Breite Ladung: 2436 mm
+Höhe Ladung: 1640 mm
+Ladegewicht: 10999 kg
+Eigengewicht: 1000 kg
+Gesamtgewicht: 11999 kg
+SP ab vorne: 4521 mm / Mitte P: 3800 mm
+SP Abw.: 721 mm nach hinten
+Infos zur Verladung
+- Unterleghölzer gemäss Einstellung einlegen
+- Bunde / Bauteile gemäss Plan laden
+- Sichtseite / Schutz gemäss Projektvorgabe beachten
+- Ladung sichern und Verladereihenfolge prüfen
+Bezug Draufsicht / BSD
+Hinten
+Vorne
+Links
+Rechts
+Blick: von hinten nach vorne
+HL
+VL
+HR
+VR
+Vorne = Fahrtrichtung / Zugfahrzeug
+Links / Rechts = von hinten nach vorne geschaut
+Linke Seitenansicht
+Hinten
+Vorne
+Mitte P
+SP
+Pritschenlänge 7600 mm
+Ladungslänge 12000 mm
+Überhang hinten 3000 mm
+Überhang vorne 1400 mm
+Ladehöhe 1640 mm
+BE 64
+BE 61
+BE 59
+BE 57
+BE 56
+BE 52
+BE 50
+BE 48
+BE 46
+BE 43
+BE 41
+BE 45
+BE 53
+Kantholz 80
+BE 63
+BE 62
+BE 60
+BE 58
+BE 55
+BE 54
+BE 51
+BE 49
+BE 47
+BE 44
+BE 42
+Rechte Seitenansicht
+Hinten
+Vorne
+Mitte P
+SP
+Pritschenlänge 7600 mm
+Ladungslänge 12000 mm
+Überhang hinten 3000 mm
+Überhang vorne 1400 mm
+Ladehöhe 1640 mm
+BE 63
+BE 62
+BE 60
+BE 58
+BE 55
+BE 54
+BE 51
+BE 49
+BE 45
+BE 47
+BE 44
+BE 42
+BE 53
+Kantholz 80
+BE 64
+BE 61
+BE 59
+BE 57
+BE 56
+BE 52
+BE 50
+BE 48
+BE 46
+BE 43
+BE 41
+Stirnansicht hinten
+Links
+Rechts
+Mittelachse
+BE 43
+BE 42
+BE 44
+BE 41
+BE 60
+BE 61
+BE 62
+BE 59
+BE 58
+BE 57
+BE 56
+BE 55
+Kantholz 80
+BE 49
+BE 50
+BE 54
+BE 51
+BE 48
+BE 45
+BE 46
+BE 64
+BE 52
+BE 63
+BE 53
+BE 47
+Stirnansicht vorne
+Rechts
+Links
+Mittelachse
+BE 43
+BE 42
+BE 44
+BE 41
+BE 47
+BE 61
+BE 62
+BE 59
+BE 58
+BE 60
+Kantholz 80
+BE 57
+BE 56
+BE 46
+BE 55
+BE 49
+BE 50
+BE 54
+BE 51
+BE 64
+BE 52
+BE 63
+BE 48
+BE 53
+Draufsicht
+Vorne
+Hinten
+Links
+Rechts
+Pritschenbreite 2450 mm
+Ladungsbreite 2436 mm
+Kantholz 80
+BE 64
+BE 63
+BE 61
+BE 62
+BE 60
+BE 59
+BE 58
+BE 57
+BE 56
+BE 55
+BE 54
+BE 53
+BE 51
+BE 52
+BE 49
+BE 50
+BE 48
+BE 47
+BE 44
+BE 46
+BE 43
+BE 42
+BE 41
+Qualitätssicherung
+Datum: ______________
+Visum: __________

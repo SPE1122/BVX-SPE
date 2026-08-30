@@ -1,0 +1,225 @@
+Pritschenplan - F05 Auflieger
+Objekt / Datei: 12213 Saumacker - Brettstapel.bvx
+Erstellt: 30.08.2026
+Info Pritsche
+Transport: 
+Fuhrenoption: Auflieger
+Länge Ladung: 8907 mm
+Breite Ladung: 2436 mm
+Höhe Ladung: 2180 mm
+Ladegewicht: 11371 kg
+Eigengewicht: 1000 kg
+Gesamtgewicht: 12371 kg
+SP ab vorne: 4173 mm / Mitte P: 3800 mm
+SP Abw.: 373 mm nach hinten
+Infos zur Verladung
+- Unterleghölzer gemäss Einstellung einlegen
+- Bunde / Bauteile gemäss Plan laden
+- Sichtseite / Schutz gemäss Projektvorgabe beachten
+- Ladung sichern und Verladereihenfolge prüfen
+Bezug Draufsicht / BSD
+Hinten
+Vorne
+Links
+Rechts
+Blick: von hinten nach vorne
+HL
+VL
+HR
+VR
+Vorne = Fahrtrichtung / Zugfahrzeug
+Links / Rechts = von hinten nach vorne geschaut
+Linke Seitenansicht
+Hinten
+Vorne
+Mitte P
+SP
+Pritschenlänge 7600 mm
+Ladungslänge 8907 mm
+Überhang vorne 1400 mm
+Ladehöhe 2180 mm
+FE 31
+FE 29
+FE 27
+FE 25
+FE 23
+FE 21
+FE 19
+FE 17
+FE 15
+FE 12
+FE 07
+FE 05
+FE 03
+FE 01
+FE 11
+FE 10
+FE 08
+FE 06
+FE 09
+FE 04
+FE 02
+FE 13
+Kantholz 80
+FE 30
+FE 28
+FE 26
+FE 24
+FE 22
+FE 20
+FE 18
+FE 16
+FE 14
+Rechte Seitenansicht
+Hinten
+Vorne
+Mitte P
+SP
+Pritschenlänge 7600 mm
+Ladungslänge 8907 mm
+Überhang vorne 1400 mm
+Ladehöhe 2180 mm
+FE 30
+FE 28
+FE 26
+FE 24
+FE 22
+FE 20
+FE 18
+FE 16
+FE 14
+FE 10
+FE 13
+FE 09
+FE 08
+FE 06
+FE 04
+FE 02
+FE 07
+FE 11
+FE 05
+FE 03
+FE 01
+FE 12
+Kantholz 80
+FE 31
+FE 29
+FE 27
+FE 25
+FE 23
+FE 21
+FE 19
+FE 17
+FE 15
+Stirnansicht hinten
+Links
+Rechts
+Mittelachse
+Kantholz 80
+FE 08
+FE 07
+FE 05
+FE 06
+FE 03
+FE 04
+FE 01
+FE 02
+FE 10
+FE 12
+FE 31
+FE 30
+FE 29
+FE 28
+FE 27
+FE 26
+FE 25
+FE 24
+FE 23
+FE 22
+FE 21
+FE 20
+FE 19
+FE 18
+FE 17
+FE 16
+FE 15
+FE 14
+FE 11
+FE 09
+FE 13
+Stirnansicht vorne
+Rechts
+Links
+Mittelachse
+FE 13
+Kantholz 80
+FE 08
+FE 07
+FE 05
+FE 06
+FE 03
+FE 04
+FE 01
+FE 02
+FE 14
+FE 31
+FE 30
+FE 29
+FE 28
+FE 27
+FE 26
+FE 25
+FE 24
+FE 23
+FE 22
+FE 21
+FE 20
+FE 19
+FE 18
+FE 17
+FE 16
+FE 15
+FE 11
+FE 12
+FE 09
+Draufsicht
+Vorne
+Hinten
+Links
+Rechts
+Pritschenbreite 2450 mm
+Ladungsbreite 2436 mm
+Kantholz 80
+FE 31
+FE 30
+FE 29
+FE 28
+FE 27
+FE 26
+FE 25
+FE 24
+FE 23
+FE 22
+FE 21
+FE 20
+FE 19
+FE 18
+FE 17
+FE 16
+FE 15
+FE 14
+FE 12
+FE 13
+FE 11
+FE 09
+FE 08
+FE 07
+FE 05
+FE 06
+FE 03
+FE 04
+FE 01
+FE 02
+Qualitätssicherung
+Datum: ______________
+Visum: __________

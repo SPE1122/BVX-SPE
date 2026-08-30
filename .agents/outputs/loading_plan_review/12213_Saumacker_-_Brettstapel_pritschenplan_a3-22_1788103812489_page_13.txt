@@ -1,0 +1,74 @@
+Pritschenplan - F07 Auflieger
+Objekt / Datei: 12213 Saumacker - Brettstapel.bvx
+Erstellt: 30.08.2026
+Info Pritsche
+Transport: 
+Fuhrenoption: Auflieger
+Länge Ladung: 4908 mm
+Breite Ladung: 1218 mm
+Höhe Ladung: 220 mm
+Ladegewicht: 377 kg
+Eigengewicht: 1000 kg
+Gesamtgewicht: 1377 kg
+SP ab vorne: 3800 mm / Mitte P: 3800 mm
+SP Abw.: 0 mm
+Infos zur Verladung
+- Unterleghölzer gemäss Einstellung einlegen
+- Bunde / Bauteile gemäss Plan laden
+- Sichtseite / Schutz gemäss Projektvorgabe beachten
+- Ladung sichern und Verladereihenfolge prüfen
+Bezug Draufsicht / BSD
+Hinten
+Vorne
+Links
+Rechts
+Blick: von hinten nach vorne
+HL
+VL
+HR
+VR
+Vorne = Fahrtrichtung / Zugfahrzeug
+Links / Rechts = von hinten nach vorne geschaut
+Linke Seitenansicht
+Hinten
+Vorne
+Mitte P
+SP
+Pritschenlänge 7600 mm
+Ladungslänge 4908 mm
+Ladehöhe 220 mm
+FE 31
+Rechte Seitenansicht
+Hinten
+Vorne
+Mitte P
+SP
+Pritschenlänge 7600 mm
+Ladungslänge 4908 mm
+Ladehöhe 220 mm
+Kantholz 80
+FE 31
+Stirnansicht hinten
+Links
+Rechts
+Mittelachse
+Kantholz 80
+FE 31
+Stirnansicht vorne
+Rechts
+Links
+Mittelachse
+Kantholz 80
+FE 31
+Draufsicht
+Vorne
+Hinten
+Links
+Rechts
+Pritschenbreite 2450 mm
+Ladungsbreite 1218 mm
+Kantholz 80
+FE 31
+Qualitätssicherung
+Datum: ______________
+Visum: __________

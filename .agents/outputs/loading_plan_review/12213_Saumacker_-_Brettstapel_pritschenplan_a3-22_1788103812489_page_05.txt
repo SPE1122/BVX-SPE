@@ -1,0 +1,131 @@
+Pritschenplan - F03 Auflieger
+Objekt / Datei: 12213 Saumacker - Brettstapel.bvx
+Erstellt: 30.08.2026
+Info Pritsche
+Transport: 
+Fuhrenoption: Auflieger
+Länge Ladung: 10794 mm
+Breite Ladung: 2436 mm
+Höhe Ladung: 800 mm
+Ladegewicht: 5671 kg
+Eigengewicht: 1000 kg
+Gesamtgewicht: 6671 kg
+SP ab vorne: 3996 mm / Mitte P: 3800 mm
+SP Abw.: 196 mm nach hinten
+Infos zur Verladung
+- Unterleghölzer gemäss Einstellung einlegen
+- Bunde / Bauteile gemäss Plan laden
+- Sichtseite / Schutz gemäss Projektvorgabe beachten
+- Ladung sichern und Verladereihenfolge prüfen
+Bezug Draufsicht / BSD
+Hinten
+Vorne
+Links
+Rechts
+Blick: von hinten nach vorne
+HL
+VL
+HR
+VR
+Vorne = Fahrtrichtung / Zugfahrzeug
+Links / Rechts = von hinten nach vorne geschaut
+Linke Seitenansicht
+Hinten
+Vorne
+Mitte P
+SP
+Pritschenlänge 7600 mm
+Ladungslänge 10794 mm
+Überhang hinten 1794 mm
+Überhang vorne 1400 mm
+Ladehöhe 800 mm
+BE 33
+BE 37
+BE 35
+BE 31
+BE 28
+BE 27
+BE 30
+BE 26
+BE 36
+BE 32
+Kantholz 80
+BE 34
+BE 29
+Rechte Seitenansicht
+Hinten
+Vorne
+Mitte P
+SP
+Pritschenlänge 7600 mm
+Ladungslänge 10794 mm
+Überhang hinten 1794 mm
+Überhang vorne 1400 mm
+Ladehöhe 800 mm
+BE 36
+BE 34
+BE 30
+BE 29
+BE 26
+BE 32
+BE 27
+BE 37
+BE 33
+Kantholz 80
+BE 35
+BE 31
+BE 28
+Stirnansicht hinten
+Links
+Rechts
+Mittelachse
+BE 35
+BE 34
+BE 30
+BE 37
+BE 36
+BE 33
+BE 32
+BE 29
+BE 31
+Kantholz 80
+BE 28
+BE 27
+BE 26
+Stirnansicht vorne
+Rechts
+Links
+Mittelachse
+BE 35
+BE 34
+BE 31
+BE 37
+BE 36
+BE 33
+BE 32
+BE 29
+BE 30
+Kantholz 80
+BE 28
+BE 27
+BE 26
+Draufsicht
+Vorne
+Hinten
+Links
+Rechts
+Pritschenbreite 2450 mm
+Ladungsbreite 2436 mm
+Kantholz 80
+BE 37
+BE 36
+BE 35
+BE 34
+BE 33
+BE 32
+BE 31
+BE 29
+BE 28
+Qualitätssicherung
+Datum: ______________
+Visum: __________

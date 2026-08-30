@@ -1,0 +1,172 @@
+Pritschenplan - F02 Auflieger
+Objekt / Datei: 12213 Saumacker - Brettstapel.bvx
+Erstellt: 30.08.2026
+Info Pritsche
+Transport: 
+Fuhrenoption: Auflieger
+Länge Ladung: 10803 mm
+Breite Ladung: 2436 mm
+Höhe Ladung: 1280 mm
+Ladegewicht: 7884 kg
+Eigengewicht: 1000 kg
+Gesamtgewicht: 8884 kg
+SP ab vorne: 4425 mm / Mitte P: 3800 mm
+SP Abw.: 625 mm nach hinten
+Infos zur Verladung
+- Unterleghölzer gemäss Einstellung einlegen
+- Bunde / Bauteile gemäss Plan laden
+- Sichtseite / Schutz gemäss Projektvorgabe beachten
+- Ladung sichern und Verladereihenfolge prüfen
+Bezug Draufsicht / BSD
+Hinten
+Vorne
+Links
+Rechts
+Blick: von hinten nach vorne
+HL
+VL
+HR
+VR
+Vorne = Fahrtrichtung / Zugfahrzeug
+Links / Rechts = von hinten nach vorne geschaut
+Linke Seitenansicht
+Hinten
+Vorne
+Mitte P
+SP
+Pritschenlänge 7600 mm
+Ladungslänge 10803 mm
+Überhang hinten 1803 mm
+Überhang vorne 1400 mm
+Ladehöhe 1280 mm
+BE 25
+BE 22
+BE 20
+BE 18
+BE 14
+BE 15
+BE 12
+BE 10
+BE 06
+BE 08
+BE 23
+BE 17
+BE 16
+BE 07
+BE 09
+Kantholz 80
+BE 24
+BE 21
+BE 19
+BE 13
+BE 11
+Rechte Seitenansicht
+Hinten
+Vorne
+Mitte P
+SP
+Pritschenlänge 7600 mm
+Ladungslänge 10803 mm
+Überhang hinten 1803 mm
+Überhang vorne 1400 mm
+Ladehöhe 1280 mm
+BE 09
+BE 24
+BE 21
+BE 19
+BE 17
+BE 16
+BE 13
+BE 11
+BE 07
+BE 14
+BE 23
+BE 15
+BE 08
+Kantholz 80
+BE 25
+BE 22
+BE 20
+BE 18
+BE 12
+BE 10
+BE 06
+Stirnansicht hinten
+Links
+Rechts
+Mittelachse
+BE 21
+BE 19
+BE 23
+BE 22
+BE 20
+BE 18
+BE 16
+BE 17
+BE 10
+Kantholz 80
+BE 09
+BE 11
+BE 13
+BE 12
+BE 06
+BE 08
+BE 07
+BE 14
+BE 24
+BE 25
+BE 15
+Stirnansicht vorne
+Rechts
+Links
+Mittelachse
+BE 15
+BE 23
+BE 22
+BE 20
+BE 21
+BE 19
+BE 18
+Kantholz 80
+BE 17
+BE 10
+BE 09
+BE 11
+BE 12
+BE 16
+BE 06
+BE 07
+BE 08
+BE 24
+BE 25
+BE 13
+Draufsicht
+Vorne
+Hinten
+Links
+Rechts
+Pritschenbreite 2450 mm
+Ladungsbreite 2436 mm
+Kantholz 80
+BE 24
+BE 25
+BE 23
+BE 21
+BE 22
+BE 19
+BE 20
+BE 18
+BE 17
+BE 16
+BE 15
+BE 13
+BE 12
+BE 10
+BE 11
+BE 09
+BE 08
+BE 06
+BE 07
+Qualitätssicherung
+Datum: ______________
+Visum: __________
