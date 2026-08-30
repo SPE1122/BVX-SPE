@@ -3014,6 +3014,10 @@ def create_loading_plan(
     pending: List[pd.Series] = [row for _, row in units.iterrows()]
     flex_percent = max(0.0, min(100.0, float(bundle_order_flex_percent or 0.0)))
     lookahead_max = 1 if flex_percent <= 0.001 else max(1, int(round(1 + (flex_percent / 100.0) * 20)))
+    # Kurze Vorschau: Eine Position wird nicht nur danach bewertet, ob sie
+    # jetzt passt, sondern auch danach, ob die nächsten Einheiten noch sinnvoll
+    # auf derselben Pritsche/Lage platziert werden können.
+    lookahead_units = min(3, max(0, lookahead_max))
 
     while pending:
         placed = False
@@ -3034,6 +3038,21 @@ def create_loading_plan(
                 )
                 if result is None:
                     continue
+                future_state = copy.deepcopy(trial_state)
+                future_placed = 0
+                for future_unit in pending[unit_idx + 1:unit_idx + 1 + lookahead_units]:
+                    future_trial = copy.deepcopy(future_state)
+                    future_result = _clean_place_unit(
+                        future_trial,
+                        future_unit,
+                        allow_beside=allow_beside,
+                        allow_stack=allow_stack,
+                        allow_rotation=allow_rotation,
+                    )
+                    if future_result is None:
+                        break
+                    future_state = future_trial
+                    future_placed += 1
                 # Je weniger strikt die Reihenfolge ist, desto kleiner wird die Strafung
                 # für vorgezogene Bunde. Die Einheit selbst bleibt immer als Bund erhalten.
                 order_penalty = unit_idx * (100.0 - flex_percent) * 10000.0
@@ -3045,8 +3064,22 @@ def create_loading_plan(
                 footprint_bonus = safe_number(result.get('Breite_mm'), 0.0) * 100.0 + safe_number(result.get('Länge_mm'), 0.0) * 0.1
                 used_length_score = safe_number(trial_state.get('used_length'), 0.0) * 0.25
                 # V126: Schwerpunkt als echtes Entscheidungskriterium, nicht nur Anzeige.
-                sp_score = _state_sp_abs_delta_x(trial_state) * 6500.0
-                score = order_penalty + z_score + x_score + used_length_score + sp_score - footprint_bonus
+                sp_score = (
+                    _state_sp_abs_delta_x(trial_state) * 6500.0
+                    + _state_sp_abs_delta_y(trial_state) * 4200.0
+                )
+                # Ein Kandidat, der die nächsten Einheiten blockiert, wird
+                # gegenüber einer gleich niedrigen und tragfähigen Alternative
+                # zurückgestellt. Die Vorschau bleibt bewusst kurz.
+                future_penalty = (lookahead_units - future_placed) * 180000.0
+                future_sp_score = (
+                    _state_sp_abs_delta_x(future_state) * 1200.0
+                    + _state_sp_abs_delta_y(future_state) * 900.0
+                ) if future_placed else 0.0
+                score = (
+                    order_penalty + z_score + x_score + used_length_score
+                    + sp_score + future_penalty + future_sp_score - footprint_bonus
+                )
                 if best is None or score < best[0]:
                     best = (score, unit_idx, state_idx, result)
                     best_state = trial_state
@@ -8339,6 +8372,33 @@ def _manual_plan_signature(placements_df: pd.DataFrame) -> str:
         return str(len(placements_df))
 
 
+def _loading_dataframe_signature(df: Optional[pd.DataFrame]) -> str:
+    """Kompakte, robuste Signatur für Eingabedaten der Automatik."""
+    if df is None or df.empty:
+        return 'empty'
+    try:
+        normalized = df.copy().fillna('').astype(str)
+        return f"{','.join(map(str, normalized.columns))}:{pd.util.hash_pandas_object(normalized, index=True).sum()}"
+    except Exception:
+        return f"{len(df)}:{','.join(map(str, df.columns))}"
+
+
+def _loading_plan_input_signature(
+    parts_df: pd.DataFrame,
+    options_df: pd.DataFrame,
+    platforms_df: pd.DataFrame,
+    settings: Dict[str, Any],
+) -> str:
+    """Signatur der automatischen Planparameter, ohne einen Plan neu zu rechnen."""
+    settings_text = '|'.join(f'{key}={settings.get(key)!r}' for key in sorted(settings))
+    return '||'.join([
+        _loading_dataframe_signature(parts_df),
+        _loading_dataframe_signature(options_df),
+        _loading_dataframe_signature(platforms_df),
+        settings_text,
+    ])
+
+
 
 def _manual_platform_signature(platforms_df: pd.DataFrame) -> str:
     """Signatur für verwendete Pritschen, damit manuelle Pritschenwerte stabil bleiben."""
@@ -9689,17 +9749,48 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
     project_meta['Auflager_im_PDF_BSD_einzeichnen'] = bool(draw_underbau_rows)
     project_meta['Mindestauflagefläche_Kontrolle_%'] = int(round(float(min_support_ratio) * 100.0))
 
+    automatic_input_signature = _loading_plan_input_signature(
+        sorted_parts_for_loading,
+        options_edit,
+        pritschen_edit,
+        {
+            'allow_beside': bool(allow_beside),
+            'allow_stack': bool(allow_stack),
+            'allow_rotation': bool(allow_rotation),
+            'max_fuhren': int(max_fuhren),
+            'use_bundles': bool(use_bundles),
+            'max_bundle_weight': float(max_bundle_weight),
+            'bundle_spacer_height': float(bundle_spacer_height),
+            'general_spacer_height': float(general_spacer_height),
+            'same_height': bool(same_height),
+            'same_width': bool(same_width),
+            'same_quality': bool(same_quality),
+            'same_profile': bool(same_profile),
+            'label_attr': str(display_label_attr),
+            'bundle_match_attrs': tuple(bundle_match_attrs or []),
+            'bundle_order_flex_percent': float(bundle_order_flex_percent),
+            'prevent_wide_on_narrow': bool(prevent_wide_on_narrow),
+            'min_support_width_percent': float(min_support_width_percent),
+            'effective_fuhre_split_attr': str(effective_fuhre_split_attr),
+            'fill_remainder_next_group': bool(fill_remainder_next_group),
+            'base_wood_height': float(base_wood_height),
+            'gap_length': float(gap_length),
+        },
+    )
+
     st.subheader('8. Verladung starten')
     st.caption('Die Verladung wird erst berechnet, wenn dieser Startknopf gedrückt wird.')
     start_col1, start_col2 = st.columns([0.8, 0.8])
+    recalculate_requested = False
     if start_col1.button('Verladung starten / neu berechnen', type='primary', key='start_loading_plan_v84'):
         st.session_state['loading_plan_started_v84'] = True
+        recalculate_requested = True
         # alter manueller/automatischer Planstand wird neu aufgebaut
-        for k in ['manual_plan_signature', 'manual_platform_signature', 'manual_placements_df', 'manual_platforms_df']:
+        for k in ['manual_plan_signature', 'manual_platform_signature', 'manual_placements_df', 'manual_platforms_df', 'automatic_loading_plan_v84']:
             st.session_state.pop(k, None)
     if start_col2.button('Verladung zurücksetzen', key='reset_loading_plan_v84'):
         st.session_state['loading_plan_started_v84'] = False
-        for k in ['manual_plan_signature', 'manual_platform_signature', 'manual_placements_df', 'manual_platforms_df']:
+        for k in ['manual_plan_signature', 'manual_platform_signature', 'manual_placements_df', 'manual_platforms_df', 'automatic_loading_plan_v84']:
             st.session_state.pop(k, None)
         st.rerun()
 
@@ -9707,33 +9798,51 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
         st.info('Einstellungen prüfen und dann „Verladung starten / neu berechnen“ drücken.')
         return
 
+    plan_is_stale = False
     if verladeart == 'Automatisch':
-        placements_df, summary_df, platforms_used_df, fuhren_log_df, plan_units_df = create_variant_a_loading_plan(
-            sorted_parts_for_loading,
-            options_edit,
-            pritschen_edit,
-            standards=standards,
-            allow_beside=allow_beside,
-            allow_stack=allow_stack,
-            allow_rotation=allow_rotation,
-            center_geometric=center_geometric,
-            max_fuhren=int(max_fuhren),
-            use_bundles=use_bundles,
-            max_bundle_weight=max_bundle_weight,
-            bundle_spacer_height=bundle_spacer_height,
-            general_spacer_height=general_spacer_height,
-            same_height=same_height,
-            same_width=same_width,
-            same_quality=same_quality,
-            same_profile=same_profile,
-            label_attr=display_label_attr,
-            same_attrs=bundle_match_attrs,
-            bundle_order_flex_percent=float(bundle_order_flex_percent),
-            prevent_wide_on_narrow=bool(prevent_wide_on_narrow),
-            min_support_width_ratio=float(min_support_width_percent) / 100.0,
-            fuhre_split_attr=effective_fuhre_split_attr,
-            fill_remainder_next_group=bool(fill_remainder_next_group),
-        )
+        stored_plan = st.session_state.get('automatic_loading_plan_v84')
+        if recalculate_requested or not isinstance(stored_plan, dict):
+            placements_df, summary_df, platforms_used_df, fuhren_log_df, plan_units_df = create_variant_a_loading_plan(
+                sorted_parts_for_loading,
+                options_edit,
+                pritschen_edit,
+                standards=standards,
+                allow_beside=allow_beside,
+                allow_stack=allow_stack,
+                allow_rotation=allow_rotation,
+                center_geometric=center_geometric,
+                max_fuhren=int(max_fuhren),
+                use_bundles=use_bundles,
+                max_bundle_weight=max_bundle_weight,
+                bundle_spacer_height=bundle_spacer_height,
+                general_spacer_height=general_spacer_height,
+                same_height=same_height,
+                same_width=same_width,
+                same_quality=same_quality,
+                same_profile=same_profile,
+                label_attr=display_label_attr,
+                same_attrs=bundle_match_attrs,
+                bundle_order_flex_percent=float(bundle_order_flex_percent),
+                prevent_wide_on_narrow=bool(prevent_wide_on_narrow),
+                min_support_width_ratio=float(min_support_width_percent) / 100.0,
+                fuhre_split_attr=effective_fuhre_split_attr,
+                fill_remainder_next_group=bool(fill_remainder_next_group),
+            )
+            st.session_state['automatic_loading_plan_v84'] = {
+                'signature': automatic_input_signature,
+                'placements': placements_df,
+                'summary': summary_df,
+                'platforms': platforms_used_df,
+                'fuhren_log': fuhren_log_df,
+                'units': plan_units_df,
+            }
+        else:
+            plan_is_stale = str(stored_plan.get('signature', '')) != automatic_input_signature
+            placements_df = stored_plan.get('placements', pd.DataFrame()).copy()
+            summary_df = stored_plan.get('summary', pd.DataFrame()).copy()
+            platforms_used_df = stored_plan.get('platforms', pd.DataFrame()).copy()
+            fuhren_log_df = stored_plan.get('fuhren_log', pd.DataFrame()).copy()
+            plan_units_df = stored_plan.get('units', pd.DataFrame()).copy()
         # Ab hier arbeitet die App mit den tatsächlich je Pritschenblock gebildeten Verladeeinheiten.
         if plan_units_df is not None and not plan_units_df.empty:
             units_df = plan_units_df.copy()
@@ -9752,6 +9861,9 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
             'Bauteile Anzahl': 0,
             'Status': 'Manuell',
         }])
+
+    if plan_is_stale:
+        st.warning('Eingaben wurden geändert. Der angezeigte automatische Plan bleibt unverändert. Für eine neue Berechnung bitte „Verladung starten / neu berechnen“ drücken.')
 
     # Manueller Planstand:
     # Die Automatik erzeugt den Vorschlag. Danach arbeiten Tabelle, Ansichten und Export
