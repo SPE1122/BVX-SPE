@@ -10031,7 +10031,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
     st.caption('Auflager werden bei der automatischen Planung als echte, verankerte Traggeometrie berücksichtigt. Prüfung und Einzeichnen bleiben getrennt.')
     ucol1, ucol2, ucol3, ucol4, ucol5 = st.columns(5)
     consider_generated_supports = ucol1.checkbox(
-        'Auflager bei Planung berücksichtigen',
+        'Auflager in automatische Planung einbeziehen',
         value=True,
         key='consider_generated_supports_v127',
         help='Erzeugt nur dann Auflager, wenn die eingestellte Mindestauflage sonst nicht erreicht wird. Jedes Auflager steht bis zur physischen Pritsche oder einem tragenden unteren Element.'
@@ -10043,7 +10043,11 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
         key='support_planning_mode_v127',
         help='Standardmässig werden keine unnötigen Auflager ergänzt. Sicherheitsorientiert erhöht das Ziel auf mindestens 50 % Auflagefläche.'
     )
-    underbau_enabled = ucol3.checkbox('Unterbau / Auflage prüfen', value=True)
+    underbau_enabled = ucol3.checkbox(
+        'Fertigen Plan auf Auflage prüfen',
+        value=True,
+        help='Kontrolliert nach der Platzierung Auflage, Überhang und Unterbau und zeigt Warnungen. Dieser Schalter verändert die automatische Platzierung nicht.'
+    )
     draw_underbau_rows = ucol4.checkbox(
         'Auflager im PDF/BSD einzeichnen',
         value=False,
