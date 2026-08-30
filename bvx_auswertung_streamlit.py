@@ -2059,6 +2059,45 @@ def _state_sp_abs_delta_x(
     return abs(sp_x - platform_center_x)
 
 
+def _state_sp_abs_delta_y(state: Dict[str, Any], extra_y: Optional[float] = None, extra_width: float = 0.0, extra_weight: float = 0.0, extra_height: float = 0.0, extra_length: float = 0.0, extra_typ: str = '') -> float:
+    """Bewertet den Quer-Schwerpunkt einer laufenden Fuhre.
+
+    Die Querposition wird genauso früh wie die Längsposition bewertet. Dadurch
+    bleibt links/rechts eine echte Alternative; ein festes Wechselmuster ist
+    kein Planungsziel.
+    """
+    helper_types = {'Unterbau', 'Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz'}
+    total_w = 0.0
+    weighted_y = 0.0
+    for r in state.get('placements', []) or []:
+        if str(r.get('Typ', '')).strip() in helper_types:
+            continue
+        width = safe_number(r.get('Breite_mm'), 0.0)
+        if width <= 0:
+            continue
+        weight = safe_number(r.get('Gewicht_kg'), 0.0)
+        if weight <= 0:
+            weight = max(0.0, safe_number(r.get('Länge_mm'), 0.0) * width * safe_number(r.get('Höhe_mm'), 0.0) / 1_000_000.0)
+        if weight <= 0:
+            continue
+        total_w += weight
+        weighted_y += (safe_number(r.get('Y_mm'), 0.0) + width / 2.0) * weight
+
+    if extra_y is not None and str(extra_typ or '').strip() not in helper_types:
+        width = safe_number(extra_width, 0.0)
+        weight = safe_number(extra_weight, 0.0)
+        if weight <= 0:
+            weight = max(0.0, safe_number(extra_length, 0.0) * width * safe_number(extra_height, 0.0) / 1_000_000.0)
+        if width > 0 and weight > 0:
+            total_w += weight
+            weighted_y += (safe_number(extra_y, 0.0) + width / 2.0) * weight
+
+    if total_w <= 0:
+        return 0.0
+    platform_center_y = safe_number(state.get('Breite_mm'), 0.0) / 2.0
+    return abs(weighted_y / total_w - platform_center_y)
+
+
 def _sp_candidate_x_values_for_unit(state: Dict[str, Any], base_x: float, length: float) -> List[float]:
     """V125: X-Kandidaten für dieselbe geplante Platzierung.
 
@@ -2442,8 +2481,9 @@ def _clean_try_place_on_current_layer(
             lx = float(state['_clean_lane_x']['left'])
             rx = float(state['_clean_lane_x']['right'])
             if abs(lx - rx) < 1.0:
-                first = str(state.get('_clean_side_toggle', 'left'))
-                sides = [first, 'right' if first == 'left' else 'left']
+                # Beide Seiten werden gleichwertig geprüft. Die frühere
+                # Wechselregel konnte eine fachlich schlechtere Seite erzwingen.
+                sides = ['left', 'right']
             elif lx < rx:
                 sides = ['left', 'right']
             else:
@@ -2777,7 +2817,10 @@ def _clean_try_place_on_current_layer(
                         continue
                     # V126: nicht mehr blind kleine X-Werte bevorzugen.
                     # Entscheidend ist: gültig + Schwerpunkt näher zur echten Pritschenmitte.
-                    sp_score = _state_sp_abs_delta_x(state, x, use_length, use_width, use_height, weight, unit.get('Typ', '')) * 6500.0
+                    sp_score = (
+                        _state_sp_abs_delta_x(state, x, use_length, use_width, use_height, weight, unit.get('Typ', '')) * 6500.0
+                        + _state_sp_abs_delta_y(state, y, use_width, weight, use_height, use_length, unit.get('Typ', '')) * 4200.0
+                    )
                     compact_score = abs(float(x) - float(base_x)) * 18.0
                     score = z * 1000000.0 + sp_score + compact_score - use_width
                     candidate = {
@@ -2824,7 +2867,10 @@ def _clean_try_place_on_current_layer(
                     balance = abs(after_x - float(state['_clean_lane_x'][other]))
                     # V126: echte Alternativpositionen für kurze Elemente wie BE71.
                     # Schwerpunkt wird stärker gewichtet, Roh-X nicht mehr als hinten/klein bevorzugt.
-                    sp_score = _state_sp_abs_delta_x(state, x, use_length, use_width, use_height, weight, unit.get('Typ', '')) * 6500.0
+                    sp_score = (
+                        _state_sp_abs_delta_x(state, x, use_length, use_width, use_height, weight, unit.get('Typ', '')) * 6500.0
+                        + _state_sp_abs_delta_y(state, y, use_width, weight, use_height, use_length, unit.get('Typ', '')) * 4200.0
+                    )
                     compact_score = abs(float(x) - float(base_x)) * 18.0
                     balance_score = balance * 0.35
                     score = z * 1000000.0 + sp_score + compact_score + balance_score
@@ -2867,9 +2913,6 @@ def _clean_try_place_on_current_layer(
             state['_clean_side_layer_height'][side] = max(float(state['_clean_side_layer_height'][side]), h)
             state['_clean_side_layer_has_bundle'][side] = bool(state['_clean_side_layer_has_bundle'][side] or is_bundle)
             # side_z bleibt auf derselben Lage
-
-    if len(affected_sides) == 1:
-        state['_clean_side_toggle'] = 'right' if affected_sides[0] == 'left' else 'left'
 
     state['_clean_layer_units'] = int(state.get('_clean_layer_units', 0)) + 1
     _clean_sync_global_layer_fields(state)
