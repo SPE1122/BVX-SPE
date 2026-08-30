@@ -3,3 +3,4 @@
 - [Overhang support chain](support-chain-overhang.md) — Overhangs are valid when inserts/supports transfer load down to the physical platform footprint.
 - [Center-of-gravity acceptance](center-of-gravity-acceptance.md) — A geometrically valid load is not sufficient; simple platforms should keep the load center near the platform center.
 - [Single-part support planning](single-part-support-planning.md) — Bundle-order flexibility must never reorder individual parts; exact contact and support-aligned positions govern 35% support.
+- [Loading block search](loading-block-search.md) — Prefix validity is non-monotonic when logical loading order is physically reversed; optimize exact maximum search from the upper bound downward.

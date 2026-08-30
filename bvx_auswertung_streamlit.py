@@ -3316,6 +3316,24 @@ def create_loading_plan(
     lookahead_units = min(3, max(0, lookahead_max))
 
     while pending:
+        if lookahead_max == 1 and len(states) == 1:
+            # Schneller, aber ergebnisgleicher Pfad für die Pritschenblockprüfung:
+            # Bei genau einer Pritsche und strikt vorgegebener Reihenfolge gibt es
+            # weder eine Einheit noch eine Zielpritsche auszuwählen. Deepcopy,
+            # Bewertung und Zukunftssimulation hatten daher keinen Einfluss auf
+            # das Ergebnis und verdoppelten nur einen grossen Teil der Arbeit.
+            unit = pending.pop(0)
+            result = _clean_place_unit(
+                states[0],
+                unit,
+                allow_beside=allow_beside,
+                allow_stack=allow_stack,
+                allow_rotation=allow_rotation,
+            )
+            if result is None:
+                append_not_loaded(unit)
+            continue
+
         placed = False
         best: Optional[Tuple[float, int, int, Dict[str, Any]]] = None
         best_state: Optional[Dict[str, Any]] = None
@@ -4315,17 +4333,14 @@ def create_variant_a_loading_plan(
         tests_done = 0
         failed_candidates = 0
 
-        # Streng fortlaufend: nur der nächste Bauteilblock wird getestet.
-        # Aber: nicht beim ersten geometrischen Fehler abbrechen.
-        for n in range(1, max_n + 1):
+        def _test_part_count(n: int) -> bool:
+            nonlocal best_n, best_units, best_loaded, best_summary
+            nonlocal tests_done, failed_candidates
             part_block = parts_df.iloc[:n].copy().reset_index(drop=True)
-            raw_weight = float(part_block['Gewicht_kg'].sum()) + tare if 'Gewicht_kg' in part_block.columns else 0.0
-            if max_weight > 0 and raw_weight > max_weight + 0.001:
-                break
-
             block_units = _build_units_for_part_block(part_block, unit_start, platform_label)
             if block_units.empty:
-                break
+                failed_candidates += 1
+                return False
 
             tests_done += 1
             ok, loaded, summary = _pack_block_units_on_platform(block_units, platform_row)
@@ -4336,9 +4351,24 @@ def create_variant_a_loading_plan(
                 best_summary = summary
             else:
                 failed_candidates += 1
-                # weiter testen: ein späterer Bauteil kann die Bundgrenze verändern
-                # und damit wieder einen gültigen Block ergeben.
-                continue
+            return ok
+
+        # Das Gewicht liefert unabhängig von der Geometrie eine harte Obergrenze.
+        weight_limit_n = max_n
+        if max_weight > 0 and 'Gewicht_kg' in parts_df.columns:
+            cumulative_weight = pd.to_numeric(parts_df['Gewicht_kg'], errors='coerce').fillna(0.0).cumsum() + tare
+            over_limit = cumulative_weight > max_weight + 0.001
+            if bool(over_limit.any()):
+                weight_limit_n = int(over_limit.to_numpy().argmax())
+
+        # Gesucht ist ausschliesslich der grösste gültige Block. Deshalb wird
+        # von der gewichtsbedingten Obergrenze abwärts geprüft und beim ersten
+        # Treffer beendet. Das bleibt auch bei nicht-monotoner Bundbildung und
+        # umgedrehter physischer Reihenfolge exakt, spart aber sämtliche Tests
+        # für kleinere Blöcke nach dem bereits gefundenen Maximum.
+        for n in range(weight_limit_n, 0, -1):
+            if _test_part_count(n):
+                break
 
         if best_n > 0:
             if 'Bundbildung' in best_units.columns:
