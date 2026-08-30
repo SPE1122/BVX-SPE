@@ -1315,7 +1315,7 @@ def init_platform_state(row: pd.Series, base_wood_height: float, layer_spacer_he
         'total_weight': 0.0,
         'current_layer_has_bundle': False,
         'prevent_wide_on_narrow': yes_no_to_bool(row.get('Breite_Bund_auf_schmal_verhindern', True)),
-        'min_support_width_ratio': max(0.0, min(1.0, safe_number(row.get('Mindest_Stützbreite_%', row.get('Mindest_Stuetzbreite_%')), 80.0) / 100.0)),
+        'min_support_width_ratio': max(0.0, min(1.0, safe_number(row.get('Mindest_Stützbreite_%', row.get('Mindest_Stuetzbreite_%')), 35.0) / 100.0)),
         'consider_generated_supports': yes_no_to_bool(row.get('Auflager_bei_Verladeplanung_beruecksichtigen', False)),
         'support_planning_mode': str(row.get('Auflager_Strenge', 'Nur notwendige Auflager') or 'Nur notwendige Auflager'),
         'placements': [],
@@ -10004,23 +10004,42 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
         pritschen_edit['Mindest_Stützbreite_%'] = float(min_support_width_percent)
 
     st.subheader('7. Auflage / Unterbau')
-    st.caption('V113: Prüfung und Einzeichnen sind getrennt. Die App kann Auflage/Unterbau prüfen und warnen, ohne dass Auflager automatisch im PDF/BSD gezeichnet werden.')
-    ucol1, ucol2, ucol3, ucol4 = st.columns(4)
-    underbau_enabled = ucol1.checkbox('Unterbau / Auflage prüfen', value=True)
-    draw_underbau_rows = ucol2.checkbox(
+    st.caption('Auflager werden bei der automatischen Planung als echte, verankerte Traggeometrie berücksichtigt. Prüfung und Einzeichnen bleiben getrennt.')
+    ucol1, ucol2, ucol3, ucol4, ucol5 = st.columns(5)
+    consider_generated_supports = ucol1.checkbox(
+        'Auflager bei Planung berücksichtigen',
+        value=True,
+        key='consider_generated_supports_v127',
+        help='Erzeugt nur dann Auflager, wenn die eingestellte Mindestauflage sonst nicht erreicht wird. Jedes Auflager steht bis zur physischen Pritsche oder einem tragenden unteren Element.'
+    )
+    support_planning_mode = ucol2.selectbox(
+        'Strenge der Auflager',
+        ['Nur notwendige Auflager', 'Sicherheitsorientiert (mind. 50 %)'],
+        index=0,
+        key='support_planning_mode_v127',
+        help='Standardmässig werden keine unnötigen Auflager ergänzt. Sicherheitsorientiert erhöht das Ziel auf mindestens 50 % Auflagefläche.'
+    )
+    underbau_enabled = ucol3.checkbox('Unterbau / Auflage prüfen', value=True)
+    draw_underbau_rows = ucol4.checkbox(
         'Auflager im PDF/BSD einzeichnen',
         value=False,
         help='Nur aktivieren, wenn die automatisch ermittelten Unterbau-/Auflagerklötze wirklich in Ansichten, PDF und BSD erscheinen sollen.'
     )
-    min_support_ratio = ucol3.number_input('Mindestauflagefläche Kontrolle %', min_value=0, max_value=100, value=35, step=5) / 100.0
-    min_underbau_height = ucol4.number_input('Unterbau melden ab mm', min_value=0.0, max_value=500.0, value=20.0, step=5.0)
+    min_support_ratio = ucol5.number_input('Mindestauflagefläche Kontrolle %', min_value=0, max_value=100, value=35, step=5) / 100.0
+    min_underbau_height = st.number_input('Unterbau melden ab mm', min_value=0.0, max_value=500.0, value=20.0, step=5.0)
     if not bool(underbau_enabled) and bool(draw_underbau_rows):
         st.info('„Auflager im PDF/BSD einzeichnen“ wirkt nur, wenn „Unterbau / Auflage prüfen“ aktiv ist.')
         draw_underbau_rows = False
 
     project_meta['Unterbau_Auflage_pruefen'] = bool(underbau_enabled)
     project_meta['Auflager_im_PDF_BSD_einzeichnen'] = bool(draw_underbau_rows)
+    project_meta['Auflager_bei_Verladeplanung_beruecksichtigen'] = bool(consider_generated_supports)
+    project_meta['Auflager_Strenge'] = str(support_planning_mode)
     project_meta['Mindestauflagefläche_Kontrolle_%'] = int(round(float(min_support_ratio) * 100.0))
+    if not pritschen_edit.empty:
+        pritschen_edit = pritschen_edit.copy()
+        pritschen_edit['Auflager_bei_Verladeplanung_beruecksichtigen'] = bool(consider_generated_supports)
+        pritschen_edit['Auflager_Strenge'] = str(support_planning_mode)
 
     automatic_input_signature = _loading_plan_input_signature(
         sorted_parts_for_loading,
@@ -10044,6 +10063,8 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
             'bundle_order_flex_percent': float(bundle_order_flex_percent),
             'prevent_wide_on_narrow': bool(prevent_wide_on_narrow),
             'min_support_width_percent': float(min_support_width_percent),
+            'consider_generated_supports': bool(consider_generated_supports),
+            'support_planning_mode': str(support_planning_mode),
             'effective_fuhre_split_attr': str(effective_fuhre_split_attr),
             'fill_remainder_next_group': bool(fill_remainder_next_group),
             'base_wood_height': float(base_wood_height),
@@ -10352,6 +10373,8 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                             local_platform['Max_Höhe_mm'] = float(recalc_max_height)
                             local_platform['Breite_Bund_auf_schmal_verhindern'] = bool(recalc_prevent_support)
                             local_platform['Mindest_Stützbreite_%'] = float(recalc_min_support)
+                            local_platform['Auflager_bei_Verladeplanung_beruecksichtigen'] = bool(consider_generated_supports)
+                            local_platform['Auflager_Strenge'] = str(support_planning_mode)
                             local_platform_df = pd.DataFrame([local_platform])
                             preview_placements_raw, preview_summary_raw = create_loading_plan(
                                 local_units.reset_index(drop=True),
