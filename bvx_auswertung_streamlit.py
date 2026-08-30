@@ -9999,9 +9999,9 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
             'Bund-Reihenfolge lockern %',
             min_value=0,
             max_value=100,
-            value=0,
+            value=20,
             step=5,
-            help='0 = streng nach Sortierung. Höher = die App darf ganze Bunde innerhalb eines kleinen Suchfensters vorziehen, um breitere/stabilere Bunde eher unten zu laden.'
+            help='20 % ist für die Referenzplanung ein guter Kompromiss und führt zu kompakteren Fuhren. 0 = streng nach Sortierung. Höher = die App darf ganze Bunde innerhalb eines grösseren Suchfensters vorziehen, um breitere/stabilere Bunde eher unten zu laden.'
         )
         prevent_wide_on_narrow = scol2.checkbox(
             'Obere Bauteile/Bunde mit ungenügender Auflage verhindern',
