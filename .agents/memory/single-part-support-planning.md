@@ -14,3 +14,9 @@ Direct contact at the underside of an upper element counts as support. Candidate
 **Why:** Excluding contact at exactly the same Z elevation or testing only coarse X positions caused valid 35% support placements to be rejected and multiplied the number of platforms.
 
 **How to apply:** Use the same contact tolerance in planning and post-checking, include support-surface edges and centers as X candidates, and re-run both support and collision checks after post-processing.
+
+Prefer the position with the best real support before optimizing the total load center or compactness. Hard free-overhang limits should be optional custom controls and proportional to element size, not fixed default millimeter limits.
+
+**Why:** A fixed default limit rejected physically unavoidable overhangs on long first-layer elements and multiplied the number of platforms, while support-quality scoring improved the arrangement without creating extra platforms.
+
+**How to apply:** Use minimum support presets as the normal modes, keep hard longitudinal/lateral overhang percentages at zero unless explicitly configured, and apply local overrides only to the selected platform during selective recalculation.
