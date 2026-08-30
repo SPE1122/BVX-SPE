@@ -4071,6 +4071,7 @@ def create_variant_a_loading_plan(
     prefer_length_before_stack: bool = False,
     fuhre_split_attr: str = '',
     fill_remainder_next_group: bool = False,
+    prefer_stable_option: bool = True,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """V22: geprüfte Block-Suche pro Pritsche mit getrennter Sortier- und Anzeige-/Stapelrichtung.
 
@@ -4387,18 +4388,33 @@ def create_variant_a_loading_plan(
 
     fuhre_nr = 1
     unit_counter_global = 1
+    last_option_name = ''
     while not remaining_parts.empty and fuhre_nr <= max_fuhren:
         allowed_parts_for_fuhre, active_split_group = _current_split_block(remaining_parts)
         if allowed_parts_for_fuhre.empty:
             break
 
         best_try = None
+        attempts: List[Dict[str, Any]] = []
         for _, option_row in enabled_options.iterrows():
             attempt = _simulate_option_by_parts(option_row, allowed_parts_for_fuhre, fuhre_nr, unit_counter_global)
             if attempt is None:
                 continue
+            attempts.append(attempt)
             if best_try is None or attempt['score'] > best_try['score']:
                 best_try = attempt
+
+        if bool(prefer_stable_option) and last_option_name and attempts:
+            stable_attempts = [a for a in attempts if str(a.get('option_name', '')) == last_option_name]
+            if stable_attempts:
+                stable_try = max(stable_attempts, key=lambda a: a.get('parts_loaded_count', 0))
+                best_parts = max(int(a.get('parts_loaded_count', 0)) for a in attempts)
+                stable_parts = int(stable_try.get('parts_loaded_count', 0))
+                # Ein Wechsel lohnt sich erst, wenn die bisherige Kombination
+                # deutlich schlechter ausnutzt. Kleine Differenzen rechtfertigen
+                # keine zusätzliche Pritschenart und kein unruhiges Fuhrenbild.
+                if stable_parts > 0 and stable_parts >= max(1, int(best_parts * 0.70)):
+                    best_try = stable_try
 
         if best_try is None or int(best_try.get('parts_loaded_count', 0)) <= 0:
             break
@@ -4408,6 +4424,7 @@ def create_variant_a_loading_plan(
         all_platforms.append(best_try['trip_platforms'])
         all_units.append(best_try['units_used'])
         unit_counter_global = int(best_try.get('next_unit_counter', unit_counter_global + len(best_try['units_used'])))
+        last_option_name = str(best_try.get('option_name', '') or '')
 
         fuhren_log.append({
             'Fuhre_Nr': fuhre_nr,
@@ -9840,6 +9857,13 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
             key='pritschen_editor_excel',
         )
 
+    compact_transport_strategy = st.checkbox(
+        'Kompakte Fuhrenplanung bevorzugen',
+        value=True,
+        key='compact_transport_strategy_v127',
+        help='Die zuletzt gewählte Fuhrenoption wird weiterverwendet, solange sie noch mindestens 70 % der besten Alternative lädt. Erst bei einem deutlichen Vorteil wird gewechselt. So entstehen weniger unnötige Pritschen.'
+    )
+
     # Aktuelle Unterlegholz-Einstellungen global auf alle Pritschen anwenden.
     # Damit überschreiben die Eingabefelder veraltete Werte aus der Excel-Stammdatendatei.
     if not pritschen_edit.empty:
@@ -10065,6 +10089,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
             'min_support_width_percent': float(min_support_width_percent),
             'consider_generated_supports': bool(consider_generated_supports),
             'support_planning_mode': str(support_planning_mode),
+            'compact_transport_strategy': bool(compact_transport_strategy),
             'effective_fuhre_split_attr': str(effective_fuhre_split_attr),
             'fill_remainder_next_group': bool(fill_remainder_next_group),
             'base_wood_height': float(base_wood_height),
@@ -10121,6 +10146,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                 min_support_width_ratio=float(min_support_width_percent) / 100.0,
                 fuhre_split_attr=effective_fuhre_split_attr,
                 fill_remainder_next_group=bool(fill_remainder_next_group),
+                prefer_stable_option=bool(compact_transport_strategy),
             )
             st.session_state['automatic_loading_plan_v84'] = {
                 'signature': automatic_input_signature,
