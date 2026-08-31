@@ -1,0 +1,56 @@
+Ladeplan BSD - F02 Auflieger
+Objekt / Datei: 12213 Saumacker - Brettstapel.bvx
+Erstellt: 31.08.2026
+Pritsche:
+Pritschen- / Frachtdaten
+Fuhre: 2
+Fuhrenoption: Auflieger
+Pritschenname: Auflieger
+Sachbearbeiter: 
+Datum: 31.08.2026
+Pritschenhöhe: 0 mm
+Pritschenbreite: 2450 mm
+Frachthöhe: 2000 mm
+Höhe gesamt: 2000 mm
+Länge gesamt: 10511 mm
+Breite gesamt: 2436 mm
+Ladegewicht: 9642 kg
+Eigengewicht Pritsche: 1000 kg
+Gesamtgewicht: 10642 kg
+Bezug: vorne = Fahrtrichtung; links/rechts = Blick von hinten nach vorne
+Darstellung: BSD-Matrix. Mittige / breite Elemente werden zusammengefasst.
+Hinten links
+Mitte links
+Vorne links
+Hinten rechts
+Mitte rechts
+Vorne rechts
+B13:BE 18
+B13:BE 18
+Einlage 40
+B14:BE 19
+B14:BE 19
+Einlage 40
+B15:BE 19
+B15:BE 19
+Einlage 40
+B16:BE 20
+B16:BE 20
+Einlage 40
+B17:BE 21
+B20:BE 24
+B17:BE 21
+Einlage 40
+B20:BE 24
+B18:BE 22
+B20:BE 25
+B18:BE 22
+B20:BE 25
+Einlage 40
+Einlage 40
+B19:BE 23 ↔
+B19:BE 23 ↔
+Kantholz 80
+Kantholz 80
+Hinweis: Einlage 40 / Lagenholz gemäss Einstellung zwischen den Bunden einlegen.
+BSD ist eine Darstellungs-Matrix. Mittige / breite Elemente werden nicht doppelt links/rechts geführt.

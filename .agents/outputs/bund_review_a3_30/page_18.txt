@@ -1,0 +1,67 @@
+Ladeplan BSD - F08 LKW
+Objekt / Datei: 12213 Saumacker - Brettstapel.bvx
+Erstellt: 31.08.2026
+Pritsche:
+Pritschen- / Frachtdaten
+Fuhre: 8
+Fuhrenoption: Anhängerzug
+Pritschenname: LKW
+Sachbearbeiter: 
+Datum: 31.08.2026
+Pritschenhöhe: 0 mm
+Pritschenbreite: 2450 mm
+Frachthöhe: 2340 mm
+Höhe gesamt: 2340 mm
+Länge gesamt: 7600 mm
+Breite gesamt: 2436 mm
+Ladegewicht: 10924 kg
+Eigengewicht Pritsche: 1000 kg
+Gesamtgewicht: 11924 kg
+Bezug: vorne = Fahrtrichtung; links/rechts = Blick von hinten nach vorne
+Darstellung: BSD-Matrix. Mittige / breite Elemente werden zusammengefasst.
+Hinten links
+Mitte links
+Vorne links
+Hinten rechts
+Mitte rechts
+Vorne rechts
+B71:FE 16
+B71:FE 16
+B72:FE 17
+B71:FE 17
+Einlage 40
+B72:FE 18
+B73:FE 19
+B72:FE 18
+Einlage 40
+B73:FE 19
+B74:FE 20
+B73:FE 20
+Einlage 40
+B74:FE 21
+B75:FE 22
+B74:FE 21
+Einlage 40
+B75:FE 22
+B76:FE 23
+B75:FE 23
+Einlage 40
+B76:FE 24
+B77:FE 25
+B76:FE 24
+Einlage 40
+B77:FE 25
+B79:FE 28
+B77:FE 26
+Einlage 40
+B79:FE 28
+B78:FE 26
+B79:FE 29
+B78:FE 27
+B79:FE 29
+B78:FE 27
+B79:FE 30
+Kantholz 80
+Kantholz 80
+Hinweis: Einlage 40 / Lagenholz gemäss Einstellung zwischen den Bunden einlegen.
+BSD ist eine Darstellungs-Matrix. Mittige / breite Elemente werden nicht doppelt links/rechts geführt.

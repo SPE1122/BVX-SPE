@@ -1,0 +1,186 @@
+Pritschenplan - F03 Auflieger
+Objekt / Datei: 12213 Saumacker - Brettstapel.bvx
+Erstellt: 31.08.2026
+Info Pritsche
+Transport: 
+Fuhrenoption: Auflieger
+Länge Ladung: 10962 mm
+Breite Ladung: 2436 mm
+Höhe Ladung: 1840 mm
+Ladegewicht: 11342 kg
+Eigengewicht: 1000 kg
+Gesamtgewicht: 12342 kg
+Infos zur Verladung
+- Unterleghölzer gemäss Einstellung einlegen
+- Bunde / Bauteile gemäss Plan laden
+- Sichtseite / Schutz gemäss Projektvorgabe beachten
+- Ladung sichern und Verladereihenfolge prüfen
+Qualitätssicherung
+SP ab vorne: 4062 mm
+Mitte P: 3800 mm
+SP Abw.: 262 mm nach hinten
+Datum: ______________
+Visum: _________
+Bezug Draufsicht / BSD
+Hinten
+Vorne
+Links
+Rechts
+Blick: von hinten nach vorne
+HL
+VL
+HR
+VR
+Vorne = Fahrtrichtung / Zugfahrzeug
+Links / Rechts = von hinten nach vorne geschaut
+Linke Seitenansicht
+Hinten
+Vorne
+Mitte P
+SP
+Pritschenlänge 7600 mm
+Ladungslänge 10962 mm
+Überhang hinten 1962 mm
+Überhang vorne 1400 mm
+Ladehöhe 1840 mm
+BE 37
+BE 37
+BE 36
+BE 36
+BE 33
+BE 32
+BE 31
+BE 30
+BE 29
+BE 28
+BE 28
+BE 27
+BE 27
+BE 26
+BE 26
+Kantholz 80
+BE 35
+BE 35
+BE 34
+BE 34
+BE 33
+BE 32
+BE 31
+BE 30
+BE 29
+Rechte Seitenansicht
+Hinten
+Vorne
+Mitte P
+SP
+Pritschenlänge 7600 mm
+Ladungslänge 10962 mm
+Überhang hinten 1962 mm
+Überhang vorne 1400 mm
+Ladehöhe 1840 mm
+BE 35
+BE 35
+BE 34
+BE 34
+BE 33
+BE 32
+BE 31
+BE 30
+BE 29
+BE 27
+BE 27
+BE 26
+BE 26
+BE 37
+BE 37
+BE 36
+BE 36
+Kantholz 80
+BE 33
+BE 32
+BE 31
+BE 30
+BE 29
+BE 28
+BE 28
+Stirnansicht hinten
+Links
+Rechts
+Mittelachse
+BE 30
+BE 29
+BE 29
+BE 28
+BE 28
+BE 35
+BE 35
+BE 34
+BE 34
+BE 33
+BE 33
+BE 32
+BE 32
+BE 31
+BE 31
+BE 30
+BE 37
+BE 37
+BE 36
+BE 36
+Kantholz 80
+BE 27
+BE 27
+BE 26
+BE 26
+Stirnansicht vorne
+Rechts
+Links
+Mittelachse
+BE 35
+BE 35
+BE 34
+BE 34
+BE 33
+BE 37
+BE 37
+BE 36
+BE 36
+BE 33
+BE 32
+BE 32
+BE 31
+BE 31
+BE 30
+BE 30
+BE 29
+BE 29
+BE 28
+BE 28
+Kantholz 80
+BE 27
+BE 27
+BE 26
+BE 26
+Draufsicht
+Vorne
+Hinten
+Links
+Rechts
+Pritschenbreite 2450 mm
+Ladungsbreite 2436 mm
+Kantholz 80
+BE 35
+BE 34
+Einlage 40
+BE 37
+Einlage 40
+BE 34
+Einlage 40
+BE 33
+Einlage 40
+BE 32
+Einlage 40
+BE 31
+Einlage 40
+BE 30
+BE 29

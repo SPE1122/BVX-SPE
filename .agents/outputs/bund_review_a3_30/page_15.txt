@@ -1,0 +1,208 @@
+Pritschenplan - F08 Anhänger
+Objekt / Datei: 12213 Saumacker - Brettstapel.bvx
+Erstellt: 31.08.2026
+Info Pritsche
+Transport: 
+Fuhrenoption: Anhängerzug
+Länge Ladung: 6510 mm
+Breite Ladung: 2436 mm
+Höhe Ladung: 2340 mm
+Ladegewicht: 10688 kg
+Eigengewicht: 1000 kg
+Gesamtgewicht: 11688 kg
+Infos zur Verladung
+- Unterleghölzer gemäss Einstellung einlegen
+- Bunde / Bauteile gemäss Plan laden
+- Sichtseite / Schutz gemäss Projektvorgabe beachten
+- Ladung sichern und Verladereihenfolge prüfen
+Qualitätssicherung
+SP ab vorne: 3800 mm
+Mitte P: 3800 mm
+SP Abw.: 0 mm
+Datum: ______________
+Visum: _________
+Bezug Draufsicht / BSD
+Hinten
+Vorne
+Links
+Rechts
+Blick: von hinten nach vorne
+HL
+VL
+HR
+VR
+Vorne = Fahrtrichtung / Zugfahrzeug
+Links / Rechts = von hinten nach vorne geschaut
+Linke Seitenansicht
+Hinten
+Vorne
+Mitte P
+SP
+Pritschenlänge 7600 mm
+Ladungslänge 6510 mm
+Ladehöhe 2340 mm
+FE 09
+FE 08
+FE 08
+FE 07
+FE 07
+FE 06
+FE 06
+FE 03
+FE 03
+FE 01
+FE 01
+FE 15
+FE 15
+FE 14
+FE 14
+FE 05
+FE 05
+FE 04
+FE 04
+FE 02
+FE 02
+FE 11
+FE 11
+FE 10
+FE 10
+FE 09
+Kantholz 80
+FE 13
+FE 13
+FE 12
+FE 12
+Rechte Seitenansicht
+Hinten
+Vorne
+Mitte P
+SP
+Pritschenlänge 7600 mm
+Ladungslänge 6510 mm
+Ladehöhe 2340 mm
+FE 13
+FE 13
+FE 12
+FE 12
+FE 11
+FE 11
+FE 10
+FE 10
+FE 09
+FE 05
+FE 05
+FE 04
+FE 04
+FE 02
+FE 02
+FE 07
+FE 06
+FE 06
+FE 09
+FE 08
+FE 08
+FE 07
+FE 03
+FE 03
+FE 01
+FE 01
+Kantholz 80
+FE 15
+FE 15
+FE 14
+FE 14
+Stirnansicht hinten
+Links
+Rechts
+Mittelachse
+Kantholz 80
+FE 09
+FE 08
+FE 08
+FE 07
+FE 07
+FE 06
+FE 06
+FE 05
+FE 05
+FE 03
+FE 03
+FE 04
+FE 04
+FE 01
+FE 01
+FE 02
+FE 02
+FE 15
+FE 15
+FE 14
+FE 14
+FE 13
+FE 13
+FE 12
+FE 12
+FE 11
+FE 11
+FE 10
+FE 10
+FE 09
+Stirnansicht vorne
+Rechts
+Links
+Mittelachse
+Kantholz 80
+FE 09
+FE 08
+FE 08
+FE 07
+FE 07
+FE 06
+FE 06
+FE 05
+FE 05
+FE 03
+FE 03
+FE 04
+FE 04
+FE 01
+FE 01
+FE 02
+FE 02
+FE 15
+FE 15
+FE 14
+FE 14
+FE 13
+FE 13
+FE 12
+FE 12
+FE 11
+FE 11
+FE 10
+FE 10
+FE 09
+Draufsicht
+Vorne
+Hinten
+Links
+Rechts
+Pritschenbreite 2450 mm
+Ladungsbreite 2436 mm
+Kantholz 80 FE 15
+FE 13
+Einlage 40
+Einlage 40
+FE 09
+Einlage 40
+FE 11
+Einlage 40
+FE 07
+FE 05
+Einlage 40
+Einlage 40
+FE 03
+FE 04
+Einlage 40
+Einlage 40
+FE 01
+FE 02

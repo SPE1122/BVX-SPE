@@ -1,0 +1,33 @@
+Ladeplan BSD - F09 Anhänger
+Objekt / Datei: 12213 Saumacker - Brettstapel.bvx
+Erstellt: 31.08.2026
+Pritsche:
+Pritschen- / Frachtdaten
+Fuhre: 9
+Fuhrenoption: Anhängerzug
+Pritschenname: Anhänger
+Sachbearbeiter: 
+Datum: 31.08.2026
+Pritschenhöhe: 0 mm
+Pritschenbreite: 2450 mm
+Frachthöhe: 500 mm
+Höhe gesamt: 500 mm
+Länge gesamt: 7600 mm
+Breite gesamt: 1218 mm
+Ladegewicht: 1130 kg
+Eigengewicht Pritsche: 1000 kg
+Gesamtgewicht: 2130 kg
+Bezug: vorne = Fahrtrichtung; links/rechts = Blick von hinten nach vorne
+Darstellung: BSD-Matrix. Mittige / breite Elemente werden zusammengefasst.
+Hinten links
+Mitte links
+Vorne links
+Hinten rechts
+Mitte rechts
+Vorne rechts
+B80:FE 30
+B80:FE 31
+B80:FE 31
+Kantholz 80
+Hinweis: Einlage 40 / Lagenholz gemäss Einstellung zwischen den Bunden einlegen.
+BSD ist eine Darstellungs-Matrix. Mittige / breite Elemente werden nicht doppelt links/rechts geführt.
