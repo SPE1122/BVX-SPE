@@ -35,3 +35,7 @@ outputType = "webview"
 task = "shell.exec"
 args = "streamlit run bvx_auswertung_streamlit.py --server.port 5000 --server.address 0.0.0.0 --server.headless true --server.enableCORS false --server.enableXsrfProtection false"
 waitForPort = 5000
+
+[postMerge]
+path = "scripts/post-merge.sh"
+timeoutMs = 120000
