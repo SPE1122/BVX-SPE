@@ -7632,7 +7632,9 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
             c.setDash()
             c.setFont('Helvetica', 5.0)
             c.setFillColor(colors.HexColor('#555555'))
-            c.drawCentredString(tx(sx_mid0), oy + draw_h - 13, 'Mitte P')
+            # Oberhalb der Zeichnung beschriften. Bei hohen Ladungen wurde
+            # "Mitte P" bisher von den obersten Bauteilen überdeckt.
+            c.drawCentredString(tx(sx_mid0), oy + draw_h + 5.0, 'Mitte P')
             c.restoreState()
 
         sp_x = safe_number(cog_vals_for_view.get('Schwerpunkt_X_mm'), 0.0)
@@ -7646,7 +7648,8 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
             c.setDash()
             c.setFont('Helvetica-Bold', 5.4)
             c.setFillColor(colors.black)
-            c.drawCentredString(tx(sx_sp0), oy + draw_h - 7, 'SP')
+            # Schwerpunktbezeichnung ebenfalls oberhalb der Ladegeometrie.
+            c.drawCentredString(tx(sx_sp0), oy + draw_h + 10.5, 'SP')
             c.restoreState()
 
     if show_dimensions and used_len > 0 and view in ('side', 'side_left', 'side_right'):
@@ -7667,10 +7670,11 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
         _pdf_dim_line_v(c, ox + draw_w + 10, oy, oy + width * scale, f'Pritschenbreite {width:.0f} mm')
         _pdf_dim_line_v(c, ox + draw_w + 27, oy + load_y0 * scale, oy + load_y1 * scale, f'Ladungsbreite {used_wid:.0f} mm')
     if show_dimensions and used_wid > 0 and view == 'top_rotated':
-        _pdf_dim_line_h(c, ox, ox + draw_w, oy - 12, f'Pritschenbreite {width:.0f} mm')
+        # Unter der Richtungsangabe "Hinten" zusätzlichen Abstand lassen.
+        _pdf_dim_line_h(c, ox, ox + draw_w, oy - 20, f'Pritschenbreite {width:.0f} mm')
         left_px = ox + ((width - load_y1) if left_at_y_max else load_y0) * scale_x
         right_px = ox + ((width - load_y0) if left_at_y_max else load_y1) * scale_x
-        _pdf_dim_line_h(c, left_px, right_px, oy - 24, f'Ladungsbreite {used_wid:.0f} mm')
+        _pdf_dim_line_h(c, left_px, right_px, oy - 32, f'Ladungsbreite {used_wid:.0f} mm')
 
     priority_label_items: List[Tuple[float, float, float, float, List[str], str, bool]] = []
     helper_label_types = {'Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz', 'Unterbau'}
