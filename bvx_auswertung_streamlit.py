@@ -4606,15 +4606,28 @@ def compact_placements_conservatively(
         if initial.empty:
             continue
         fixed_parent_ids = set()
+        generated_only_parent_ids = set()
         if 'Auflager_fuer' in result.columns and 'Typ' in result.columns:
-            fixed_parent_ids = set(
-                result.loc[
-                    result['Pritsche'].astype(str).eq(pname)
-                    & result['Typ'].astype(str).isin(helper_types)
-                    & result['Auflager_fuer'].notna(),
-                    'Auflager_fuer',
-                ].astype(str)
-            )
+            bound_supports = result.loc[
+                result['Pritsche'].astype(str).eq(pname)
+                & result['Typ'].astype(str).isin(helper_types)
+                & result['Auflager_fuer'].notna()
+            ].copy()
+            fixed_parent_ids = set(bound_supports['Auflager_fuer'].astype(str))
+            if not bound_supports.empty:
+                generated_support = (
+                    bound_supports.get('Einheit_ID', pd.Series('', index=bound_supports.index))
+                    .astype(str).str.startswith('UBP_')
+                    | bound_supports.get('Ebene', pd.Series('', index=bound_supports.index))
+                    .astype(str).str.contains('Auflager bei Verladeplanung', na=False)
+                )
+                generated_only_parent_ids = {
+                    str(parent_id)
+                    for parent_id, group in bound_supports.assign(_generated=generated_support).groupby(
+                        bound_supports['Auflager_fuer'].astype(str), sort=False
+                    )
+                    if bool(group['_generated'].all())
+                }
         base_z = safe_number(prow.get('Kantholz_erste_Lage_mm'), 0.0)
         minimum = max(0.0, min(1.0, safe_number(
             prow.get('Mindest_Stützbreite_%', prow.get('Mindest_Stuetzbreite_%')), 35.0) / 100.0))
@@ -4715,6 +4728,7 @@ def compact_placements_conservatively(
             eff_len: float,
             platform_width: float,
             target_center_x: float,
+            anchor_rows: Optional[pd.DataFrame] = None,
         ) -> List[Dict[Any, Tuple[float, float]]]:
             """Return order-preserving one/two-row shelf layouts for ``group``.
 
@@ -4748,21 +4762,140 @@ def compact_placements_conservatively(
                 span = max(shelf_lengths)
                 if span > eff_len + 0.1:
                     continue
-                # Um die physische Pritschenmitte zentrieren, nicht um das
-                # gesamte Ladefenster inklusive asymmetrischer Überhänge.
-                # Andernfalls verwirft die Schwerpunktprüfung gerade die
-                # gewünschte Verdichtung nach der vorherigen Ausrichtung.
-                x0 = max(0.0, min(eff_len - span, target_center_x - span / 2.0))
-                layout: Dict[Any, Tuple[float, float]] = {}
-                y0 = 0.0
-                for shelf_no, shelf in enumerate(shelves):
-                    cursor = x0
-                    for idx, row in shelf:
-                        layout[idx] = (round(cursor, 1), round(y0, 1))
-                        cursor += safe_number(row.get('Länge_mm'))
-                    y0 += shelf_widths[shelf_no]
-                layouts.append(layout)
-            return layouts
+                # Jede Reihe darf unabhängig an vorhandenen Tragkanten
+                # ausgerichtet werden. Bei unterschiedlich langen Reihen ist
+                # ein gemeinsamer X-Start unnötig restriktiv und kann die
+                # Auflage eines darüberliegenden Teils verkleinern.
+                anchors = anchor_rows if anchor_rows is not None else group
+                shelf_start_options: List[List[float]] = []
+                for shelf_no, shelf_len in enumerate(shelf_lengths):
+                    if not shelves[shelf_no]:
+                        shelf_start_options.append([0.0])
+                        continue
+                    max_start = max(0.0, eff_len - shelf_len)
+                    base_candidates = {
+                        0.0,
+                        max_start,
+                        target_center_x - shelf_len / 2.0,
+                    }
+                    candidates = set(base_candidates)
+                    for _, row in anchors.iterrows():
+                        row_x0 = safe_number(row.get('X_mm'), 0.0)
+                        row_x1 = row_x0 + safe_number(row.get('Länge_mm'), 0.0)
+                        candidates.update([row_x0, row_x1 - shelf_len])
+                    normalized = {
+                        round(max(0.0, min(max_start, value)), 1)
+                        for value in candidates
+                    }
+                    normalized_base = {
+                        round(max(0.0, min(max_start, value)), 1)
+                        for value in base_candidates
+                    }
+                    # Das kartesische Produkt zweier Reihen darf nicht mit
+                    # jeder Kante des gesamten Stapels explodieren. Mitte und
+                    # Grenzen bleiben immer erhalten; ergänzt werden die
+                    # nächstliegenden realen Tragkanten.
+                    center_start = round(
+                        max(0.0, min(max_start, target_center_x - shelf_len / 2.0)),
+                        1,
+                    )
+                    nearest = sorted(
+                        normalized - normalized_base,
+                        key=lambda value: (abs(value - center_start), value),
+                    )
+                    shelf_start_options.append(sorted(
+                        normalized_base | set(nearest[:max(0, 10 - len(normalized_base))])
+                    ))
+                for shelf_starts in itertools.product(*shelf_start_options):
+                    shelf_orders = [(0, 1)]
+                    if shelves[0] and shelves[1]:
+                        # Links/rechts ist bei asymmetrischer Gesamtladung
+                        # keine bedeutungslose Spiegelung: beide Varianten
+                        # können unterschiedliche Schwerpunktwerte ergeben.
+                        shelf_orders.append((1, 0))
+                    for shelf_order in shelf_orders:
+                        layout: Dict[Any, Tuple[float, float]] = {}
+                        # Zwei 1200-mm-Reihen liegen auf einer 2450-mm-Pritsche
+                        # mit je 25 mm Rand. Ein Start bei Y=0 verschlechterte die
+                        # bestehende Auflage langer oberer Teile minimal und ließ
+                        # die strenge Tragflächenprüfung den ganzen Kaskadenzug
+                        # verwerfen.
+                        y0 = max(0.0, (platform_width - sum(shelf_widths)) / 2.0)
+                        for shelf_no in shelf_order:
+                            cursor = shelf_starts[shelf_no]
+                            for idx, row in shelves[shelf_no]:
+                                layout[idx] = (round(cursor, 1), round(y0, 1))
+                                cursor += safe_number(row.get('Länge_mm'))
+                            y0 += shelf_widths[shelf_no]
+                        if layout not in layouts:
+                            layouts.append(layout)
+            def _layout_priority(layout: Dict[Any, Tuple[float, float]]) -> Tuple[float, float, float, float]:
+                x0 = min(x for x, _ in layout.values())
+                x1 = max(
+                    x + safe_number(group.loc[idx].get('Länge_mm'))
+                    for idx, (x, _) in layout.items()
+                )
+                weights = {
+                    idx: max(
+                        safe_number(group.loc[idx].get('Gewicht_kg'), 0.0),
+                        safe_number(group.loc[idx].get('Länge_mm'))
+                        * safe_number(group.loc[idx].get('Breite_mm')),
+                    )
+                    for idx in layout
+                }
+                total_weight = sum(weights.values()) or 1.0
+                old_y_center = sum(
+                    weights[idx] * (
+                        safe_number(group.loc[idx].get('Y_mm'))
+                        + safe_number(group.loc[idx].get('Breite_mm')) / 2.0
+                    )
+                    for idx in layout
+                ) / total_weight
+                new_y_center = sum(
+                    weights[idx] * (
+                        y + safe_number(group.loc[idx].get('Breite_mm')) / 2.0
+                    )
+                    for idx, (_, y) in layout.items()
+                ) / total_weight
+                target_z_guess = float(group['Z_mm'].min())
+                anchor_overlap = 0.0
+                for _, anchor in anchors.iterrows():
+                    if anchor.name in layout:
+                        continue
+                    ax0 = safe_number(anchor.get('X_mm'))
+                    ay0 = safe_number(anchor.get('Y_mm'))
+                    ax1 = ax0 + safe_number(anchor.get('Länge_mm'))
+                    ay1 = ay0 + safe_number(anchor.get('Breite_mm'))
+                    for idx, (x, y) in layout.items():
+                        item = group.loc[idx]
+                        if abs(
+                            safe_number(anchor.get('Z_mm'))
+                            - (target_z_guess + safe_number(item.get('Höhe_mm')))
+                        ) > 1.0:
+                            continue
+                        anchor_overlap += max(
+                            0.0,
+                            min(ax1, x + safe_number(item.get('Länge_mm'))) - max(ax0, x),
+                        ) * max(
+                            0.0,
+                            min(ay1, y + safe_number(item.get('Breite_mm'))) - max(ay0, y),
+                        )
+                displacement = sum(
+                    abs(x - safe_number(group.loc[idx].get('X_mm')))
+                    + abs(y - safe_number(group.loc[idx].get('Y_mm')))
+                    for idx, (x, y) in layout.items()
+                )
+                return (
+                    x1 - x0,
+                    abs(new_y_center - old_y_center),
+                    -anchor_overlap,
+                    displacement,
+                )
+
+            # Vor der teuren vollständigen Tragkettenvalidierung redundante
+            # Kantenkombinationen begrenzen. Kompakte, bewegungsarme Varianten
+            # bleiben bevorzugt erhalten.
+            return sorted(layouts, key=_layout_priority)[:64]
 
         # A one-at-a-time move cannot release the interlocking parts of two
         # neighbouring layers.  Before greedy compaction, try a bounded atomic
@@ -4809,8 +4942,9 @@ def compact_placements_conservatively(
                     # entscheidend: 47/48 bilden bereits die unterste Lage und
                     # ihre Auflager können in X/Y sicher mitgeführt werden.
                     supported_parent = movable['Einheit_ID'].astype(str).isin(fixed_parent_ids)
+                    generated_only_parent = movable['Einheit_ID'].astype(str).isin(generated_only_parent_ids)
                     already_on_target = (movable['Z_mm'] - target_z).abs() <= 1.0
-                    movable = movable[~supported_parent | already_on_target]
+                    movable = movable[~supported_parent | already_on_target | generated_only_parent]
                 # Repack the parts already on the target height together with
                 # the adjacent upper levels.  Excluding these target-level
                 # parts was precisely what prevented the F02 43--48 group
@@ -4818,7 +4952,12 @@ def compact_placements_conservatively(
                 # arrangement.
                 on_target = movable[(movable['Z_mm'] - target_z).abs() <= 1.0]
                 above = movable[movable['Z_mm'] > target_z + 1.0]
-                if len(above) < 2:
+                # Auch ein einziges verbliebenes oberes Teil muss gemeinsam
+                # mit der bereits verdichteten Ziellage neu gepackt werden.
+                # Im realen F02 blieben nach der ersten Stufe nur 43 oben und
+                # 44--47 unten; die frühere Mindestzahl 2 übersprang genau
+                # diesen letzten Kaskadenschritt.
+                if len(above) < 1:
                     continue
                 # Only the first two occupied levels above the target are
                 # considered adjacent.  This bounds the search and avoids
@@ -4837,13 +4976,28 @@ def compact_placements_conservatively(
                 pool = pool.head(8)  # 2^7 row assignments remain inexpensive.
                 group_sets: List[Tuple[Any, ...]] = []
                 pool_indices = list(pool.index)
+                # Den typischen letzten Kaskadenschritt zuerst prüfen:
+                # bestehende Ziellage plus genau ein Teil der nächsthöheren
+                # Lage. Spätere logische Teile zuerst, damit bei F02 Teil 43
+                # vor dem wesentlich längeren Teil 42 geprüft wird.
+                on_target_indices = list(on_target.index.intersection(pool.index))
+                nearest_above = above[
+                    (above['Z_mm'] - above['Z_mm'].min()).abs() <= 1.0
+                ]
+                if 'Logische_Reihenfolge_im_Block' in nearest_above.columns:
+                    nearest_above = nearest_above.sort_values(
+                        'Logische_Reihenfolge_im_Block', ascending=False, kind='stable'
+                    )
+                for upper_idx in nearest_above.index:
+                    if upper_idx in pool.index:
+                        group_sets.append(tuple(on_target_indices + [upper_idx]))
                 # Full adjacent layers are the useful normal case (e.g. 3x2).
                 group_sets.append(tuple(pool_indices))
                 # When the complete local pool cannot fit, use bounded true
                 # subsets (not merely contiguous dataframe rows).  This
                 # allows an unrelated part to stay where it is while retaining
                 # exhaustive validation for the selected atomic group.
-                if not _atomic_shelf_layouts(pool, eff_len, platform_width, platform_center_x):
+                if not _atomic_shelf_layouts(pool, eff_len, platform_width, platform_center_x, current):
                     for size in range(min(6, len(pool_indices)), 1, -1):
                         for group_indices in itertools.combinations(pool_indices, size):
                             group_sets.append(group_indices)
@@ -4859,10 +5013,34 @@ def compact_placements_conservatively(
                     group = pool.loc[list(group_indices)]
                     if not (group['Z_mm'] >= target_z - 1.0).all() or not (group['Z_mm'] > target_z + 1.0).any():
                         continue
-                    for layout in _atomic_shelf_layouts(group, eff_len, platform_width, platform_center_x):
+                    for layout in _atomic_shelf_layouts(group, eff_len, platform_width, platform_center_x, current):
                         candidate = result.copy()
                         for idx, (x, y) in layout.items():
                             candidate.loc[idx, ['X_mm', 'Y_mm', 'Z_mm']] = [x, y, round(target_z, 1)]
+                        # Automatisch erzeugte Auflager gehören zur alten
+                        # Position. Wird ihr Elternelement wirklich abgesenkt,
+                        # werden sie entfernt und die neue Lage anschließend
+                        # über die normale Mindestauflage-/Tragkettenprüfung
+                        # validiert. Manuelle Auflager werden nie entfernt.
+                        moved_parent_ids = {
+                            str(result.loc[idx].get('Einheit_ID', ''))
+                            for idx in group_indices
+                            if safe_number(result.loc[idx].get('Z_mm'), target_z) > target_z + 1.0
+                            and str(result.loc[idx].get('Einheit_ID', '')) in generated_only_parent_ids
+                        }
+                        if moved_parent_ids and 'Auflager_fuer' in candidate.columns:
+                            generated_support = (
+                                candidate.get('Einheit_ID', pd.Series('', index=candidate.index))
+                                .astype(str).str.startswith('UBP_')
+                                | candidate.get('Ebene', pd.Series('', index=candidate.index))
+                                .astype(str).str.contains('Auflager bei Verladeplanung', na=False)
+                            )
+                            candidate = candidate.loc[
+                                ~(
+                                    candidate['Auflager_fuer'].astype(str).isin(moved_parent_ids)
+                                    & generated_support
+                                )
+                            ].copy()
                         candidate = _sync_planned_support_rows_to_load(candidate)
                         if not _valid(candidate, ratios, group_indices):
                             continue
@@ -4872,12 +5050,29 @@ def compact_placements_conservatively(
                         if new_top > current_top + 0.1 or new_z_sum >= current_z_sum - 1.0:
                             continue
                         new_cog = _load_center_of_gravity_values_for_platform(candidate, prow)
-                        if (abs(safe_number(new_cog.get('Schwerpunkt_Abstand_X_mm'), 0.0)) > accepted_cog_limit[0] + 0.1
-                                or abs(safe_number(new_cog.get('Schwerpunkt_Abstand_Y_mm'), 0.0)) > accepted_cog_limit[1] + 0.1):
+                        if (abs(safe_number(new_cog.get('Schwerpunkt_Abstand_X_mm'), 0.0)) > accepted_cog_limit[0] + 1.0
+                                or abs(safe_number(new_cog.get('Schwerpunkt_Abstand_Y_mm'), 0.0)) > accepted_cog_limit[1] + 1.0):
                             continue
-                        score = (new_top, new_z_sum, len(group_indices))
+                        candidate_group = candidate.loc[list(group_indices)]
+                        group_x_span = float(
+                            (candidate_group['X_mm'] + candidate_group['Länge_mm']).max()
+                            - candidate_group['X_mm'].min()
+                        )
+                        # Bei gleicher Höhenverbesserung echte 2D-Belegung
+                        # bevorzugen: zwei seitliche Reihen mit kürzerer
+                        # Längsausdehnung statt alle Teile hintereinander.
+                        score = (new_top, new_z_sum, group_x_span, len(group_indices))
                         if atomic_best is None or score < atomic_best[0]:
                             atomic_best = (score, candidate, group_indices)
+                            # Jede harte Geometrie-, Tragketten-, Auflage-,
+                            # Reihenfolge- und Schwerpunktprüfung ist erfüllt.
+                            # Weitere tausende Layoutvarianten ändern die
+                            # Sicherheit nicht und verzögern nur die Planung.
+                            break
+                    if atomic_best is not None:
+                        break
+                if atomic_best is not None:
+                    break
             if atomic_best is None:
                 break
             _, result, moved_group = atomic_best

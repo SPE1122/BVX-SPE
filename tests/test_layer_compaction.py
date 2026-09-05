@@ -136,6 +136,36 @@ def atomic_group_with_supported_upper_load() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def atomic_group_with_generated_support_on_upper_member() -> pd.DataFrame:
+    rows = atomic_six_part_group().to_dict('records')
+    parent = next(row for row in rows if row['Einheit_ID'] == 'BE43')
+    rows.append({
+        **parent,
+        'Einheit_ID': 'UBP_BE43_1',
+        'Typ': 'Unterbau',
+        'Auflager_fuer': 'BE43',
+        'Auflager_Offset_X_mm': 0.0,
+        'Auflager_Offset_Y_mm': 0.0,
+        'X_mm': parent['X_mm'],
+        'Y_mm': parent['Y_mm'],
+        'Z_mm': 0.0,
+        'Höhe_mm': parent['Z_mm'],
+        'Gewicht_kg': 0.0,
+        'Ebene': 'Auflager bei Verladeplanung',
+    })
+    return pd.DataFrame(rows)
+
+
+def one_upper_member_after_first_compaction_stage() -> pd.DataFrame:
+    rows = atomic_six_part_group()
+    rows = rows[
+        rows['Einheit_ID'].isin([f'BE{i}' for i in range(43, 48)])
+    ].copy().reset_index(drop=True)
+    rows.loc[rows['Typ'].eq('Bund'), 'Z_mm'] = 80.0
+    rows.loc[rows['Einheit_ID'].eq('BE43'), 'Z_mm'] = 240.0
+    return rows
+
+
 def f02_side_by_side_release_group() -> pd.DataFrame:
     rows = []
     for number, y, z in [(39, 0.0, 80.0), (42, 1200.0, 80.0), (38, 600.0, 280.0)]:
@@ -232,6 +262,34 @@ class LayerCompactionTest(unittest.TestCase):
             for _, lower in compacted.iterrows()
         ))
 
+    def test_lowering_removes_obsolete_generated_support_but_keeps_new_position_safe(self):
+        platform = f02_platform()
+        platform.loc[0, ['Länge_mm', 'Überhang_vorne_mm', 'Überhang_hinten_mm']] = [
+            7500.0, 1500.0, 2961.0,
+        ]
+        before = atomic_group_with_generated_support_on_upper_member()
+
+        after = app.compact_placements_conservatively(before, platform)
+        compacted = after[after['Einheit_ID'].isin([f'BE{i}' for i in range(43, 49)])]
+
+        self.assertTrue((compacted['Z_mm'] == 80.0).all())
+        self.assertFalse(after['Einheit_ID'].astype(str).eq('UBP_BE43_1').any())
+        self.assertEqual(0, len(app.find_geometry_conflicts(compacted, platform)))
+
+    def test_last_single_upper_member_is_included_in_cascade(self):
+        platform = f02_platform()
+        platform.loc[0, ['Länge_mm', 'Überhang_vorne_mm', 'Überhang_hinten_mm']] = [
+            7500.0, 1500.0, 2961.0,
+        ]
+        before = one_upper_member_after_first_compaction_stage()
+
+        after = app.compact_placements_conservatively(before, platform)
+
+        self.assertTrue((after.loc[after['Typ'].eq('Bund'), 'Z_mm'] == 80.0).all())
+        self.assertEqual(0, len(app.find_geometry_conflicts(
+            after[after['Typ'].eq('Bund')], platform
+        )))
+
     def test_f02_side_by_side_release_keeps_attached_support_and_lowers_38(self):
         platform = f02_platform()
         before = f02_side_by_side_release_group()
@@ -246,7 +304,10 @@ class LayerCompactionTest(unittest.TestCase):
 
         self.assertEqual(80.0, float(row_38['Z_mm']))
         self.assertEqual(float(row_39['Z_mm']), float(row_42['Z_mm']))
-        self.assertLessEqual(float(row_39['Y_mm']) + float(row_39['Breite_mm']), float(row_42['Y_mm']))
+        self.assertTrue(
+            float(row_39['Y_mm']) + float(row_39['Breite_mm']) <= float(row_42['Y_mm'])
+            or float(row_42['Y_mm']) + float(row_42['Breite_mm']) <= float(row_39['Y_mm'])
+        )
         self.assertFalse(app._boxes_overlap_3d(app._row_box_values(row_39), app._row_box_values(support), tol=1.0))
         self.assertEqual(0, len(app.find_geometry_conflicts(
             after[after['Typ'].eq('Bund')], platform
