@@ -42,7 +42,6 @@ def get_embedded_default_logo() -> Optional[bytes]:
         return None
 
 
-
 # =============================================================================
 # Datenmodelle
 # =============================================================================
@@ -539,7 +538,6 @@ def parts_to_dataframe(parts: List[Part], density_kg_m3: float = 500.0) -> pd.Da
     return pd.DataFrame(rows)
 
 
-
 def read_parts_excel_to_dataframe(uploaded_excel, density_kg_m3: float = 500.0) -> Tuple[pd.DataFrame, List[str]]:
     """Liest eine Bauteile-Excel als Ersatz für BVX ein.
 
@@ -665,7 +663,6 @@ def read_parts_excel_to_dataframe(uploaded_excel, density_kg_m3: float = 500.0) 
     df = df[required_order + extra_cols]
     messages.append('Bauteile wurden aus Excel geladen.')
     return df, messages
-
 
 
 def swap_part_width_height(parts_df: pd.DataFrame, density_kg_m3: float = 500.0) -> pd.DataFrame:
@@ -809,7 +806,6 @@ def yes_no_to_bool(value: Any) -> bool:
         return value != 0
     text = str(value).strip().lower()
     return text in {'ja', 'j', 'yes', 'y', 'true', 'wahr', '1', 'x'}
-
 
 
 def _now_europe_zurich() -> datetime:
@@ -1109,7 +1105,6 @@ def _unique_options(values: List[str]) -> List[str]:
     return out
 
 
-
 def build_loading_units(
     sorted_parts: pd.DataFrame,
     max_bundle_weight: float,
@@ -1380,8 +1375,6 @@ def _real_load_placement_rows(state: Dict[str, Any]) -> List[Dict[str, Any]]:
     return rows
 
 
-
-
 # V119/V120: Geometrische Grundprüfung für echte Bauteile.
 # Ziel: Bauteile dürfen sich in X/Y/Z nicht überschneiden. Damit werden Fälle wie
 # BE 51/52/53 verhindert: gleiche Lage + überlappende Länge + gemeinsame Breite
@@ -1495,8 +1488,6 @@ def find_geometry_conflicts(placements_df: pd.DataFrame, platforms_df: Optional[
                     'Details': f'X-Überlappung {bx_overlap:.0f} mm{width_hint}; gleiche Raumlage prüfen',
                 })
     return pd.DataFrame(warnings, columns=cols)
-
-
 
 
 def resolve_x_collisions_by_layer(placements_df: pd.DataFrame, platforms_df: pd.DataFrame, gap_mm: float = 0.0) -> pd.DataFrame:
@@ -2186,6 +2177,7 @@ def commit_place(
         'Einzelhöhen_mm': unit.get('Einzelhöhen_mm', ''),
         'Einlage_allgemein_mm': safe_number(unit.get('Einlage_allgemein_mm'), 0.0),
         'Bundeinlage_mm': safe_number(unit.get('Bundeinlage_mm'), 0.0),
+        'Logische_Reihenfolge_im_Block': unit.get('Logische_Reihenfolge_im_Block'),
         'X_mm': round(x, 1),
         'Y_mm': round(y, 1),
         'Z_mm': round(z, 1),
@@ -2253,8 +2245,6 @@ def _gap_candidate_score(state: Dict[str, Any], fit: Tuple[float, float, float, 
     fill_w = min(1.0, width / rest_w)
     area = length * width
     return fill_l * 1000000.0 + fill_w * 10000.0 + area / 1000.0 + height
-
-
 
 
 def _state_sp_abs_delta_x(
@@ -2516,15 +2506,33 @@ def create_loading_plan(
     prefer_length_before_stack: bool = False,
     prefer_support_quality: bool = True,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Greedy-Verladevorschlag für eine einzelne Fuhre."""
+    """V17: ruhiger Lagen-Verladevorschlag für eine einzelne Fuhre.
+
+    Diese Version ersetzt die alte Cursor-Logik bewusst:
+    - keine aggressive Lochfüllung,
+    - keine nachträgliche Z-Spiegelung,
+    - keine Einzelteile aus Bund herauslösen,
+    - normale 1200er von der Y-Mitte links/rechts,
+    - Restbunde nicht automatisch mittig, sondern links/rechts auf Stapel,
+    - Pritschen werden fortlaufend und kompakt gefüllt.
+    """
     if units.empty or platforms.empty:
         return pd.DataFrame(), pd.DataFrame()
 
     active_platforms = platforms[platforms['Freigabe'] == True].copy()
     states = [init_platform_state(row, base_wood_height, layer_spacer_height, gap_length) for _, row in active_platforms.iterrows()]
-    not_loaded: List[Dict[str, Any]] = []
+    for state in states:
+        state['prevent_wide_on_narrow'] = bool(prevent_wide_on_narrow)
+        state['min_support_width_ratio'] = max(0.0, min(1.0, float(min_support_width_ratio)))
+        state['max_unsupported_length_mm'] = max(0.0, float(max_unsupported_length_mm or 0.0))
+        state['max_unsupported_side_mm'] = max(0.0, float(max_unsupported_side_mm or 0.0))
+        state['max_unsupported_length_percent'] = max(0.0, min(100.0, float(max_unsupported_length_percent or 0.0)))
+        state['max_unsupported_side_percent'] = max(0.0, min(100.0, float(max_unsupported_side_percent or 0.0)))
+        state['prefer_length_before_stack'] = bool(prefer_length_before_stack)
+        state['prefer_support_quality'] = bool(prefer_support_quality)
+        _clean_init_runtime_state(state)
 
-    pending: List[pd.Series] = [row for _, row in units.iterrows()]
+    not_loaded: List[Dict[str, Any]] = []
 
     def append_not_loaded(unit: pd.Series) -> None:
         not_loaded.append({
@@ -2556,30 +2564,109 @@ def create_loading_plan(
             'Gewicht_kg': round(float(unit['Gewicht_kg']), 2),
         })
 
-    while pending:
-        placed = False
+    pending: List[pd.Series] = [row for _, row in units.iterrows()]
+    flex_percent = max(0.0, min(100.0, float(bundle_order_flex_percent or 0.0)))
+    lookahead_max = 1 if flex_percent <= 0.001 else max(1, int(round(1 + (flex_percent / 100.0) * 20)))
+    # Kurze Vorschau: Eine Position wird nicht nur danach bewertet, ob sie
+    # jetzt passt, sondern auch danach, ob die nächsten Einheiten noch sinnvoll
+    # auf derselben Pritsche/Lage platziert werden können.
+    lookahead_units = min(3, max(0, lookahead_max))
 
-        # Ruhige Praxislogik:
-        # Keine aggressive Lückenfüllung mit späteren Einzelteilen/Bunden.
-        # Die Reihenfolge bleibt stabil; dadurch entstehen weniger chaotische Stapel
-        # und deutlich weniger künstlicher Unterbau.
-        unit = pending.pop(0)
-        for state in states:
-            result = try_place_unit(
-                state,
+    while pending:
+        if lookahead_max == 1 and len(states) == 1:
+            # Schneller, aber ergebnisgleicher Pfad für die Pritschenblockprüfung:
+            # Bei genau einer Pritsche und strikt vorgegebener Reihenfolge gibt es
+            # weder eine Einheit noch eine Zielpritsche auszuwählen. Deepcopy,
+            # Bewertung und Zukunftssimulation hatten daher keinen Einfluss auf
+            # das Ergebnis und verdoppelten nur einen grossen Teil der Arbeit.
+            unit = pending.pop(0)
+            result = _clean_place_unit(
+                states[0],
                 unit,
                 allow_beside=allow_beside,
                 allow_stack=allow_stack,
                 allow_rotation=allow_rotation,
             )
-            if result is not None:
-                placed = True
-                break
+            if result is None:
+                append_not_loaded(unit)
+            continue
+
+        placed = False
+        best: Optional[Tuple[float, int, int, Dict[str, Any]]] = None
+        best_state: Optional[Dict[str, Any]] = None
+
+        search_count = min(len(pending), lookahead_max)
+        for unit_idx in range(search_count):
+            unit = pending[unit_idx]
+            for state_idx, state in enumerate(states):
+                trial_state = copy.deepcopy(state)
+                result = _clean_place_unit(
+                    trial_state,
+                    unit,
+                    allow_beside=allow_beside,
+                    allow_stack=allow_stack,
+                    allow_rotation=allow_rotation,
+                )
+                if result is None:
+                    continue
+                future_state = copy.deepcopy(trial_state)
+                future_placed = 0
+                for future_unit in pending[unit_idx + 1:unit_idx + 1 + lookahead_units]:
+                    future_trial = copy.deepcopy(future_state)
+                    future_result = _clean_place_unit(
+                        future_trial,
+                        future_unit,
+                        allow_beside=allow_beside,
+                        allow_stack=allow_stack,
+                        allow_rotation=allow_rotation,
+                    )
+                    if future_result is None:
+                        break
+                    future_state = future_trial
+                    future_placed += 1
+                # Je weniger strikt die Reihenfolge ist, desto kleiner wird die Strafung
+                # für vorgezogene Bunde. Die Einheit selbst bleibt immer als Bund erhalten.
+                order_penalty = unit_idx * (100.0 - flex_percent) * 10000.0
+                z_score = safe_number(result.get('Z_mm'), 0.0) * 1000000.0
+                # V126: Roh-X nur noch schwach bewerten. Die frühere starke X-Strafe
+                # hat gültige, weiter vorne liegende Schwerpunkt-Positionen wieder benachteiligt.
+                x_score = safe_number(result.get('X_mm'), 0.0) * 15.0
+                # Bei gleicher Lage breite/lange Bunde eher unten nehmen.
+                footprint_bonus = safe_number(result.get('Breite_mm'), 0.0) * 100.0 + safe_number(result.get('Länge_mm'), 0.0) * 0.1
+                used_length_score = safe_number(trial_state.get('used_length'), 0.0) * 0.25
+                # V126: Schwerpunkt als echtes Entscheidungskriterium, nicht nur Anzeige.
+                sp_score = (
+                    _state_sp_abs_delta_x(trial_state) * 6500.0
+                    + _state_sp_abs_delta_y(trial_state) * 4200.0
+                )
+                # Ein Kandidat, der die nächsten Einheiten blockiert, wird
+                # gegenüber einer gleich niedrigen und tragfähigen Alternative
+                # zurückgestellt. Die Vorschau bleibt bewusst kurz.
+                future_penalty = (lookahead_units - future_placed) * 180000.0
+                future_sp_score = (
+                    _state_sp_abs_delta_x(future_state) * 1200.0
+                    + _state_sp_abs_delta_y(future_state) * 900.0
+                ) if future_placed else 0.0
+                score = (
+                    order_penalty + z_score + x_score + used_length_score
+                    + sp_score + future_penalty + future_sp_score - footprint_bonus
+                )
+                if best is None or score < best[0]:
+                    best = (score, unit_idx, state_idx, result)
+                    best_state = trial_state
+
+        if best is not None and best_state is not None:
+            _, unit_idx, state_idx, _result = best
+            states[state_idx] = best_state
+            pending.pop(unit_idx)
+            placed = True
+
         if not placed:
+            unit = pending.pop(0)
             append_not_loaded(unit)
 
-    placements = []
-    summary = []
+    placements: List[Dict[str, Any]] = []
+    summary: List[Dict[str, Any]] = []
     for state in states:
         placements.extend(state['placements'])
         summary.append({
@@ -2601,7 +2688,6 @@ def create_loading_plan(
 
     placements.extend(not_loaded)
     return pd.DataFrame(placements), pd.DataFrame(summary)
-
 
 
 # -----------------------------------------------------------------------------
@@ -2724,29 +2810,45 @@ def _clean_try_place_on_current_layer(
             cur_x = max(float(state['_clean_lane_x']['left']), float(state['_clean_lane_x']['right']))
             cur_z = max(float(state['_clean_side_z']['left']), float(state['_clean_side_z']['right']))
             y = max(0.0, (platform_width - use_width) / 2.0)
-            candidates = [(cur_x, cur_z, False)]
+            candidates = []
+            if can_place_stable(state, unit, cur_x, y, cur_z, use_length, use_width, use_height, weight):
+                candidates.append((cur_x, cur_z, False))
             # Runge: breite/mittige Bunde dürfen erst oberhalb der Runge über die Mitte.
             # Dafür gezielt einen Kandidaten auf Runge-Höhe prüfen.
             if bool(state.get('Runge_aktiv', False)) and _crosses_runge_zone(state, y, use_width):
                 rz = max(float(state.get('Rungenhoehe_mm', 2500.0)), cur_z)
-                candidates.append((cur_x, rz, True))
+                if can_place_stable(state, unit, cur_x, y, rz, use_length, use_width, use_height, weight):
+                    candidates.append((cur_x, rz, True))
             if allow_stack:
                 new_common = _clean_start_new_common_layer(state, unit, use_height)
                 if new_common is not None:
                     nx, nz = new_common
-                    if can_place_stable(state, unit, nx, y, nz, use_length, use_width, use_height, weight):
-                        candidates.append((nx, nz, True))
+                    candidates.append((nx, nz, True))
             if bool(state.get('prefer_length_before_stack', False)) and any(not item[2] for item in candidates):
                 candidates = [item for item in candidates if not item[2]]
             for base_x, z, new_layer in candidates:
-                for x in _sp_candidate_x_values_for_unit(state, base_x, use_length):
+                for x in _sp_candidate_x_values_for_unit(state, base_x, use_length, y=y, width=use_width, z=z):
                     if not can_place_stable(state, unit, x, y, z, use_length, use_width, use_height, weight):
                         continue
-                    sp_score = _state_sp_abs_delta_x(state, x, use_length, use_width, use_height, weight, unit.get('Typ', '')) * 4500.0
-                    score = z * 1000000.0 + x * 35.0 + sp_score - use_width
+                    # V126: nicht mehr blind kleine X-Werte bevorzugen.
+                    # Entscheidend ist: gültig + Schwerpunkt näher zur echten Pritschenmitte.
+                    sp_score = (
+                        _state_sp_abs_delta_x(state, x, use_length, use_width, use_height, weight, unit.get('Typ', '')) * 6500.0
+                        + _state_sp_abs_delta_y(state, y, use_width, weight, use_height, use_length, unit.get('Typ', '')) * 4200.0
+                    )
+                    support_metrics = _support_metrics_for_candidate(state, x, y, z, use_length, use_width)
+                    support_score = 0.0
+                    if bool(state.get('prefer_support_quality', True)):
+                        support_score = (
+                            (1.0 - support_metrics.get('area_ratio', 0.0)) * 8000000.0
+                            + support_metrics.get('free_length_mm', 0.0) * 1800.0
+                            + support_metrics.get('free_side_mm', 0.0) * 1800.0
+                        )
+                    compact_score = abs(float(x) - float(base_x)) * 18.0
+                    score = z * 1000000.0 + support_score + sp_score + compact_score - use_width
                     candidate = {
                         'x': x, 'y': y, 'z': z, 'length': use_length, 'width': use_width,
-                        'height': use_height, 'rotation': rotation, 'mode': 'breit/mittig / SP bewertet',
+                        'height': use_height, 'rotation': rotation, 'mode': 'breit/mittig / SP-X-Kandidaten',
                         'new_layer': new_layer, 'wide': True
                     }
                     updates = {'left': (x + use_length + float(state['gap_length']), z, use_height), 'right': (x + use_length + float(state['gap_length']), z, use_height)}
@@ -2759,9 +2861,8 @@ def _clean_try_place_on_current_layer(
             lx = float(state['_clean_lane_x']['left'])
             rx = float(state['_clean_lane_x']['right'])
             if abs(lx - rx) < 1.0:
-                # Beide Seiten werden gleichwertig geprüft. Die frühere
-                # Wechselregel konnte eine fachlich schlechtere Seite erzwingen.
-                sides = ['left', 'right']
+                first = str(state.get('_clean_side_toggle', 'left'))
+                sides = [first, 'right' if first == 'left' else 'left']
             elif lx < rx:
                 sides = ['left', 'right']
             else:
@@ -2772,28 +2873,48 @@ def _clean_try_place_on_current_layer(
             side_x = float(state['_clean_lane_x'][side])
             side_z = float(state['_clean_side_z'][side])
             candidates = []
-            if can_place_stable(state, unit, side_x, y, side_z, use_length, use_width, use_height, weight):
+            current_layer_x_values = _sp_candidate_x_values_for_unit(
+                state, side_x, use_length, y=y, width=use_width, z=side_z
+            )
+            if any(
+                can_place_stable(state, unit, x, y, side_z, use_length, use_width, use_height, weight)
+                for x in current_layer_x_values
+            ):
                 candidates.append((side_x, side_z, False))
             if allow_stack:
                 new_side = _clean_start_new_side_layer(state, side, unit, use_height)
                 if new_side is not None:
                     nx, nz = new_side
-                    if can_place_stable(state, unit, nx, y, nz, use_length, use_width, use_height, weight):
-                        candidates.append((nx, nz, True))
+                    candidates.append((nx, nz, True))
             if bool(state.get('prefer_length_before_stack', False)) and any(not item[2] for item in candidates):
                 candidates = [item for item in candidates if not item[2]]
             for base_x, z, new_layer in candidates:
-                for x in _sp_candidate_x_values_for_unit(state, base_x, use_length):
+                for x in _sp_candidate_x_values_for_unit(state, base_x, use_length, y=y, width=use_width, z=z):
                     if not can_place_stable(state, unit, x, y, z, use_length, use_width, use_height, weight):
                         continue
                     other = 'right' if side == 'left' else 'left'
                     after_x = x + use_length + float(state['gap_length'])
                     balance = abs(after_x - float(state['_clean_lane_x'][other]))
-                    sp_score = _state_sp_abs_delta_x(state, x, use_length, use_width, use_height, weight, unit.get('Typ', '')) * 4500.0
-                    score = z * 1000000.0 + x * 35.0 + balance * 0.7 + sp_score
+                    # V126: echte Alternativpositionen für kurze Elemente wie BE71.
+                    # Schwerpunkt wird stärker gewichtet, Roh-X nicht mehr als hinten/klein bevorzugt.
+                    sp_score = (
+                        _state_sp_abs_delta_x(state, x, use_length, use_width, use_height, weight, unit.get('Typ', '')) * 6500.0
+                        + _state_sp_abs_delta_y(state, y, use_width, weight, use_height, use_length, unit.get('Typ', '')) * 4200.0
+                    )
+                    support_metrics = _support_metrics_for_candidate(state, x, y, z, use_length, use_width)
+                    support_score = 0.0
+                    if bool(state.get('prefer_support_quality', True)):
+                        support_score = (
+                            (1.0 - support_metrics.get('area_ratio', 0.0)) * 8000000.0
+                            + support_metrics.get('free_length_mm', 0.0) * 1800.0
+                            + support_metrics.get('free_side_mm', 0.0) * 1800.0
+                        )
+                    compact_score = abs(float(x) - float(base_x)) * 18.0
+                    balance_score = balance * 0.35
+                    score = z * 1000000.0 + support_score + sp_score + compact_score + balance_score
                     candidate = {
                         'x': x, 'y': y, 'z': z, 'length': use_length, 'width': use_width,
-                        'height': use_height, 'rotation': rotation, 'mode': f'{side} / unabhängige Stapelhöhe / SP bewertet',
+                        'height': use_height, 'rotation': rotation, 'mode': f'{side} / unabhängige Stapelhöhe / SP-X-Kandidaten',
                         'new_layer': new_layer, 'wide': False
                     }
                     updates = {side: (after_x, z, use_height)}
@@ -2831,9 +2952,6 @@ def _clean_try_place_on_current_layer(
             state['_clean_side_layer_has_bundle'][side] = bool(state['_clean_side_layer_has_bundle'][side] or is_bundle)
             # side_z bleibt auf derselben Lage
 
-    if len(affected_sides) == 1:
-        state['_clean_side_toggle'] = 'right' if affected_sides[0] == 'left' else 'left'
-
     state['_clean_layer_units'] = int(state.get('_clean_layer_units', 0)) + 1
     _clean_sync_global_layer_fields(state)
     return placement
@@ -2846,8 +2964,18 @@ def _clean_place_unit(
     allow_stack: bool,
     allow_rotation: bool,
 ) -> Optional[Dict[str, Any]]:
-    """Platziert eine Einheit direkt mit der neuen Seiten-/Stapel-Logik."""
-    return _clean_try_place_on_current_layer(state, unit, allow_beside, allow_rotation, allow_stack=allow_stack)
+    """Platziert eine Einheit direkt mit der Seiten-/Stapel-Logik.
+
+    Wichtig: Es gibt keine gemeinsame _clean_new_layer-Funktion mehr,
+    weil links und rechts unabhängig in der Höhe aufgebaut werden dürfen.
+    """
+    return _clean_try_place_on_current_layer(
+        state,
+        unit,
+        allow_beside,
+        allow_rotation,
+        allow_stack=allow_stack,
+    )
 
 
 def create_loading_plan(
@@ -2864,17 +2992,38 @@ def create_loading_plan(
     min_support_width_ratio: float = 0.80,
     max_unsupported_length_mm: float = 0.0,
     max_unsupported_side_mm: float = 0.0,
+    max_unsupported_length_percent: float = 0.0,
+    max_unsupported_side_percent: float = 0.0,
     prefer_length_before_stack: bool = False,
+    prefer_support_quality: bool = True,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Greedy-Verladevorschlag für eine einzelne Fuhre."""
+    """V17: ruhiger Lagen-Verladevorschlag für eine einzelne Fuhre.
+
+    Diese Version ersetzt die alte Cursor-Logik bewusst:
+    - keine aggressive Lochfüllung,
+    - keine nachträgliche Z-Spiegelung,
+    - keine Einzelteile aus Bund herauslösen,
+    - normale 1200er von der Y-Mitte links/rechts,
+    - Restbunde nicht automatisch mittig, sondern links/rechts auf Stapel,
+    - Pritschen werden fortlaufend und kompakt gefüllt.
+    """
     if units.empty or platforms.empty:
         return pd.DataFrame(), pd.DataFrame()
 
     active_platforms = platforms[platforms['Freigabe'] == True].copy()
     states = [init_platform_state(row, base_wood_height, layer_spacer_height, gap_length) for _, row in active_platforms.iterrows()]
-    not_loaded: List[Dict[str, Any]] = []
+    for state in states:
+        state['prevent_wide_on_narrow'] = bool(prevent_wide_on_narrow)
+        state['min_support_width_ratio'] = max(0.0, min(1.0, float(min_support_width_ratio)))
+        state['max_unsupported_length_mm'] = max(0.0, float(max_unsupported_length_mm or 0.0))
+        state['max_unsupported_side_mm'] = max(0.0, float(max_unsupported_side_mm or 0.0))
+        state['max_unsupported_length_percent'] = max(0.0, min(100.0, float(max_unsupported_length_percent or 0.0)))
+        state['max_unsupported_side_percent'] = max(0.0, min(100.0, float(max_unsupported_side_percent or 0.0)))
+        state['prefer_length_before_stack'] = bool(prefer_length_before_stack)
+        state['prefer_support_quality'] = bool(prefer_support_quality)
+        _clean_init_runtime_state(state)
 
-    pending: List[pd.Series] = [row for _, row in units.iterrows()]
+    not_loaded: List[Dict[str, Any]] = []
 
     def append_not_loaded(unit: pd.Series) -> None:
         not_loaded.append({
@@ -2906,30 +3055,109 @@ def create_loading_plan(
             'Gewicht_kg': round(float(unit['Gewicht_kg']), 2),
         })
 
-    while pending:
-        placed = False
+    pending: List[pd.Series] = [row for _, row in units.iterrows()]
+    flex_percent = max(0.0, min(100.0, float(bundle_order_flex_percent or 0.0)))
+    lookahead_max = 1 if flex_percent <= 0.001 else max(1, int(round(1 + (flex_percent / 100.0) * 20)))
+    # Kurze Vorschau: Eine Position wird nicht nur danach bewertet, ob sie
+    # jetzt passt, sondern auch danach, ob die nächsten Einheiten noch sinnvoll
+    # auf derselben Pritsche/Lage platziert werden können.
+    lookahead_units = min(3, max(0, lookahead_max))
 
-        # Ruhige Praxislogik:
-        # Keine aggressive Lückenfüllung mit späteren Einzelteilen/Bunden.
-        # Die Reihenfolge bleibt stabil; dadurch entstehen weniger chaotische Stapel
-        # und deutlich weniger künstlicher Unterbau.
-        unit = pending.pop(0)
-        for state in states:
-            result = try_place_unit(
-                state,
+    while pending:
+        if lookahead_max == 1 and len(states) == 1:
+            # Schneller, aber ergebnisgleicher Pfad für die Pritschenblockprüfung:
+            # Bei genau einer Pritsche und strikt vorgegebener Reihenfolge gibt es
+            # weder eine Einheit noch eine Zielpritsche auszuwählen. Deepcopy,
+            # Bewertung und Zukunftssimulation hatten daher keinen Einfluss auf
+            # das Ergebnis und verdoppelten nur einen grossen Teil der Arbeit.
+            unit = pending.pop(0)
+            result = _clean_place_unit(
+                states[0],
                 unit,
                 allow_beside=allow_beside,
                 allow_stack=allow_stack,
                 allow_rotation=allow_rotation,
             )
-            if result is not None:
-                placed = True
-                break
+            if result is None:
+                append_not_loaded(unit)
+            continue
+
+        placed = False
+        best: Optional[Tuple[float, int, int, Dict[str, Any]]] = None
+        best_state: Optional[Dict[str, Any]] = None
+
+        search_count = min(len(pending), lookahead_max)
+        for unit_idx in range(search_count):
+            unit = pending[unit_idx]
+            for state_idx, state in enumerate(states):
+                trial_state = copy.deepcopy(state)
+                result = _clean_place_unit(
+                    trial_state,
+                    unit,
+                    allow_beside=allow_beside,
+                    allow_stack=allow_stack,
+                    allow_rotation=allow_rotation,
+                )
+                if result is None:
+                    continue
+                future_state = copy.deepcopy(trial_state)
+                future_placed = 0
+                for future_unit in pending[unit_idx + 1:unit_idx + 1 + lookahead_units]:
+                    future_trial = copy.deepcopy(future_state)
+                    future_result = _clean_place_unit(
+                        future_trial,
+                        future_unit,
+                        allow_beside=allow_beside,
+                        allow_stack=allow_stack,
+                        allow_rotation=allow_rotation,
+                    )
+                    if future_result is None:
+                        break
+                    future_state = future_trial
+                    future_placed += 1
+                # Je weniger strikt die Reihenfolge ist, desto kleiner wird die Strafung
+                # für vorgezogene Bunde. Die Einheit selbst bleibt immer als Bund erhalten.
+                order_penalty = unit_idx * (100.0 - flex_percent) * 10000.0
+                z_score = safe_number(result.get('Z_mm'), 0.0) * 1000000.0
+                # V126: Roh-X nur noch schwach bewerten. Die frühere starke X-Strafe
+                # hat gültige, weiter vorne liegende Schwerpunkt-Positionen wieder benachteiligt.
+                x_score = safe_number(result.get('X_mm'), 0.0) * 15.0
+                # Bei gleicher Lage breite/lange Bunde eher unten nehmen.
+                footprint_bonus = safe_number(result.get('Breite_mm'), 0.0) * 100.0 + safe_number(result.get('Länge_mm'), 0.0) * 0.1
+                used_length_score = safe_number(trial_state.get('used_length'), 0.0) * 0.25
+                # V126: Schwerpunkt als echtes Entscheidungskriterium, nicht nur Anzeige.
+                sp_score = (
+                    _state_sp_abs_delta_x(trial_state) * 6500.0
+                    + _state_sp_abs_delta_y(trial_state) * 4200.0
+                )
+                # Ein Kandidat, der die nächsten Einheiten blockiert, wird
+                # gegenüber einer gleich niedrigen und tragfähigen Alternative
+                # zurückgestellt. Die Vorschau bleibt bewusst kurz.
+                future_penalty = (lookahead_units - future_placed) * 180000.0
+                future_sp_score = (
+                    _state_sp_abs_delta_x(future_state) * 1200.0
+                    + _state_sp_abs_delta_y(future_state) * 900.0
+                ) if future_placed else 0.0
+                score = (
+                    order_penalty + z_score + x_score + used_length_score
+                    + sp_score + future_penalty + future_sp_score - footprint_bonus
+                )
+                if best is None or score < best[0]:
+                    best = (score, unit_idx, state_idx, result)
+                    best_state = trial_state
+
+        if best is not None and best_state is not None:
+            _, unit_idx, state_idx, _result = best
+            states[state_idx] = best_state
+            pending.pop(unit_idx)
+            placed = True
+
         if not placed:
+            unit = pending.pop(0)
             append_not_loaded(unit)
 
-    placements = []
-    summary = []
+    placements: List[Dict[str, Any]] = []
+    summary: List[Dict[str, Any]] = []
     for state in states:
         placements.extend(state['placements'])
         summary.append({
@@ -2951,7 +3179,6 @@ def create_loading_plan(
 
     placements.extend(not_loaded)
     return pd.DataFrame(placements), pd.DataFrame(summary)
-
 
 
 # -----------------------------------------------------------------------------
@@ -4033,6 +4260,316 @@ def improve_longitudinal_weight_balance(
 
     return result
 
+def compact_adjacent_loading_layers(
+    placements_df: pd.DataFrame,
+    platforms_df: pd.DataFrame,
+    gap_mm: float = 0.0,
+    max_moves_per_platform: int = 40,
+    max_candidate_checks_per_platform: int = 800,
+) -> pd.DataFrame:
+    """Verdichtet benachbarte Lagen mit vollständiger Sicherheitsprüfung.
+
+    Einheiten dürfen nur auf tiefere, bereits vorhandene Auflagehöhen wechseln.
+    Kandidaten nutzen Bauteilkanten in X und Y; Reihenfolge, Plattform, Drehung
+    und Abmessungen bleiben unverändert.
+    """
+    if placements_df is None or placements_df.empty or platforms_df is None or platforms_df.empty:
+        return placements_df.copy() if placements_df is not None else pd.DataFrame()
+
+    result = clean_placements_dataframe(placements_df)
+    helper_types = {'Unterbau', 'Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz'}
+    p_lookup = {str(row.get('Pritsche', '')): row for _, row in platforms_df.iterrows()}
+
+    def real_rows(df: pd.DataFrame, pname: str) -> pd.DataFrame:
+        return df[
+            df['Pritsche'].astype(str).eq(pname)
+            & df['X_mm'].notna() & df['Y_mm'].notna() & df['Z_mm'].notna()
+            & df['Länge_mm'].notna() & df['Breite_mm'].notna() & df['Höhe_mm'].notna()
+            & ~df.get('Typ', pd.Series(index=df.index, dtype=str)).astype(str).isin(helper_types)
+        ].copy()
+
+    def overlaps_xy(a: pd.Series, b: pd.Series) -> bool:
+        return (
+            _axis_overlap_mm(
+                safe_number(a.get('X_mm')), safe_number(a.get('X_mm')) + safe_number(a.get('Länge_mm')),
+                safe_number(b.get('X_mm')), safe_number(b.get('X_mm')) + safe_number(b.get('Länge_mm')),
+            ) > 0
+            and _axis_overlap_mm(
+                safe_number(a.get('Y_mm')), safe_number(a.get('Y_mm')) + safe_number(a.get('Breite_mm')),
+                safe_number(b.get('Y_mm')), safe_number(b.get('Y_mm')) + safe_number(b.get('Breite_mm')),
+            ) > 0
+        )
+
+    def blocking_relations(real: pd.DataFrame) -> set:
+        relations = set()
+        for i, upper in real.iterrows():
+            for j, lower in real.iterrows():
+                if i == j or not overlaps_xy(upper, lower):
+                    continue
+                if safe_number(upper.get('Z_mm')) >= (
+                    safe_number(lower.get('Z_mm')) + safe_number(lower.get('Höhe_mm')) - 1.0
+                ):
+                    relations.add((
+                        str(upper.get('Einheit_ID', i)),
+                        str(lower.get('Einheit_ID', j)),
+                    ))
+        return relations
+
+    def support_metrics(
+        real: pd.DataFrame,
+        row: pd.Series,
+        prow: pd.Series,
+        helpers: Optional[pd.DataFrame] = None,
+    ) -> Dict[str, float]:
+        x0, y0, z0 = safe_number(row.get('X_mm')), safe_number(row.get('Y_mm')), safe_number(row.get('Z_mm'))
+        length, width = safe_number(row.get('Länge_mm')), safe_number(row.get('Breite_mm'))
+        x1, y1 = x0 + length, y0 + width
+        base_z = safe_number(prow.get('Kantholz_erste_Lage_mm'), 0.0)
+        rects: List[Tuple[float, float, float, float]] = []
+        if z0 <= base_z + 1.0:
+            deck_x0 = safe_number(prow.get('Überhang_hinten_mm'), 0.0)
+            deck_x1 = deck_x0 + safe_number(prow.get('Länge_mm'), 0.0)
+            rect = (
+                max(x0, deck_x0), min(x1, deck_x1),
+                max(y0, 0.0), min(y1, safe_number(prow.get('Breite_mm'), 0.0)),
+            )
+            if rect[1] > rect[0] and rect[3] > rect[2]:
+                rects.append(rect)
+        else:
+            for idx, lower in real.iterrows():
+                if idx == row.name:
+                    continue
+                lower_top = safe_number(lower.get('Z_mm')) + safe_number(lower.get('Höhe_mm'))
+                if abs(lower_top - z0) > 2.0:
+                    continue
+                lx0, ly0 = safe_number(lower.get('X_mm')), safe_number(lower.get('Y_mm'))
+                rect = (
+                    max(x0, lx0), min(x1, lx0 + safe_number(lower.get('Länge_mm'))),
+                    max(y0, ly0), min(y1, ly0 + safe_number(lower.get('Breite_mm'))),
+                )
+                if rect[1] > rect[0] and rect[3] > rect[2]:
+                    rects.append(rect)
+            if helpers is not None and not helpers.empty:
+                for _, lower in helpers.iterrows():
+                    lower_top = safe_number(lower.get('Z_mm')) + safe_number(lower.get('Höhe_mm'))
+                    if abs(lower_top - z0) > 2.0:
+                        continue
+                    lx0, ly0 = safe_number(lower.get('X_mm')), safe_number(lower.get('Y_mm'))
+                    rect = (
+                        max(x0, lx0), min(x1, lx0 + safe_number(lower.get('Länge_mm'))),
+                        max(y0, ly0), min(y1, ly0 + safe_number(lower.get('Breite_mm'))),
+                    )
+                    if rect[1] > rect[0] and rect[3] > rect[2]:
+                        rects.append(rect)
+        return {
+            'area_ratio': _rect_union_area(rects) / max(1.0, length * width),
+            'free_length_mm': _edge_free_span_mm(x0, x1, [(r[0], r[1]) for r in rects]),
+            'free_side_mm': _edge_free_span_mm(y0, y1, [(r[2], r[3]) for r in rects]),
+        }
+
+    def variant_ok(
+        candidate: pd.DataFrame,
+        pname: str,
+        prow: pd.Series,
+        original_relations: set,
+        original_cog: Dict[str, float],
+        original_support: Dict[str, Dict[str, float]],
+    ) -> bool:
+        real = real_rows(candidate, pname)
+        eff_length = (
+            safe_number(prow.get('Länge_mm')) + safe_number(prow.get('Überhang_vorne_mm'))
+            + safe_number(prow.get('Überhang_hinten_mm'))
+        )
+        platform_width = safe_number(prow.get('Breite_mm'))
+        max_height = safe_number(prow.get('Max_Höhe_mm'))
+        state = init_platform_state(prow, safe_number(prow.get('Kantholz_erste_Lage_mm')), 0.0, gap_mm)
+        for _, row in real.iterrows():
+            x, y, z = safe_number(row.get('X_mm')), safe_number(row.get('Y_mm')), safe_number(row.get('Z_mm'))
+            length, width, height = (
+                safe_number(row.get('Länge_mm')), safe_number(row.get('Breite_mm')), safe_number(row.get('Höhe_mm'))
+            )
+            if x < -0.1 or y < -0.1 or z < -0.1 or x + length > eff_length + 0.1:
+                return False
+            if y + width > platform_width + 0.1 or z + height > max_height + 0.1:
+                return False
+            if _blocked_by_runge(state, y, z, width):
+                return False
+        conflicts = find_geometry_conflicts(real, pd.DataFrame([prow]))
+        if conflicts is not None and not conflicts.empty:
+            return False
+        # Geplante Unterbauten und Einlagen sind reale Körper. Ein anderes
+        # Bauteil darf nach der Verdichtung nicht in sie hinein verschoben werden.
+        helper_rows = candidate[
+            candidate['Pritsche'].astype(str).eq(pname)
+            & candidate.get('Typ', pd.Series(index=candidate.index, dtype=str)).astype(str).isin(helper_types)
+            & candidate['X_mm'].notna() & candidate['Y_mm'].notna() & candidate['Z_mm'].notna()
+        ]
+        for _, load_row in real.iterrows():
+            load_box = _row_box_values(load_row)
+            if load_box is None:
+                continue
+            for _, helper_row in helper_rows.iterrows():
+                helper_box = _row_box_values(helper_row)
+                if helper_box is not None and _boxes_overlap_3d(load_box, helper_box, tol=1.0):
+                    return False
+
+        min_ratio = max(0.0, min(1.0, safe_number(
+            prow.get('Mindest_Stützbreite_%', prow.get('Mindest_Stuetzbreite_%')), 35.0
+        ) / 100.0))
+        max_free_length_pct = max(0.0, safe_number(prow.get('Max_freier_Überhang_Länge_%'), 0.0))
+        max_free_side_pct = max(0.0, safe_number(
+            prow.get('Max_freier_Überhang_seitlich_%', prow.get('Max_freier_Überhang_Seite_%')),
+            0.0,
+        ))
+        for _, row in real.sort_values('Z_mm', kind='stable').iterrows():
+            metrics = support_metrics(real, row, prow, helper_rows)
+            if metrics['area_ratio'] + 1e-6 < min_ratio:
+                return False
+            if max_free_length_pct > 0 and metrics['free_length_mm'] > safe_number(row.get('Länge_mm')) * max_free_length_pct / 100.0 + 1e-6:
+                return False
+            if max_free_side_pct > 0 and metrics['free_side_mm'] > safe_number(row.get('Breite_mm')) * max_free_side_pct / 100.0 + 1e-6:
+                return False
+            before = original_support.get(str(row.get('Einheit_ID', row.name)))
+            if before is not None:
+                if metrics['area_ratio'] + 1e-6 < before['area_ratio']:
+                    return False
+                if metrics['free_length_mm'] > before['free_length_mm'] + 1e-6:
+                    return False
+                if metrics['free_side_mm'] > before['free_side_mm'] + 1e-6:
+                    return False
+
+        relations = blocking_relations(real)
+        if not relations.issubset(original_relations):
+            return False
+        if 'Logische_Reihenfolge_im_Block' in real.columns:
+            ranks = dict(zip(
+                real['Einheit_ID'].astype(str),
+                pd.to_numeric(real['Logische_Reihenfolge_im_Block'], errors='coerce'),
+            ))
+            for upper_id, lower_id in relations:
+                upper_rank, lower_rank = ranks.get(upper_id), ranks.get(lower_id)
+                if pd.notna(upper_rank) and pd.notna(lower_rank) and float(upper_rank) > float(lower_rank):
+                    return False
+
+        new_cog = _load_center_of_gravity_values_for_platform(candidate, prow)
+        for key in ('Schwerpunkt_Abstand_X_mm', 'Schwerpunkt_Abstand_Y_mm'):
+            if abs(safe_number(new_cog.get(key))) > abs(safe_number(original_cog.get(key))) + 1.0:
+                return False
+        return True
+
+    for pname, prow in p_lookup.items():
+        initial = real_rows(result, pname)
+        if len(initial) < 2:
+            continue
+        supported_parent_ids = set()
+        if 'Auflager_fuer' in result.columns:
+            supported_parent_ids = set(
+                result.loc[
+                    result['Pritsche'].astype(str).eq(pname)
+                    & result.get('Typ', pd.Series(index=result.index, dtype=str)).astype(str).isin(helper_types),
+                    'Auflager_fuer',
+                ].dropna().astype(str)
+            )
+        base_z = safe_number(prow.get('Kantholz_erste_Lage_mm'), 0.0)
+        candidate_checks = 0
+
+        move_limit = min(max(1, int(max_moves_per_platform)), max(1, len(initial)))
+        for _ in range(move_limit):
+            real = real_rows(result, pname)
+            current_helpers = result[
+                result['Pritsche'].astype(str).eq(pname)
+                & result.get('Typ', pd.Series(index=result.index, dtype=str)).astype(str).isin(helper_types)
+                & result['X_mm'].notna() & result['Y_mm'].notna() & result['Z_mm'].notna()
+            ]
+            current_relations = blocking_relations(real)
+            current_cog = _load_center_of_gravity_values_for_platform(result, prow)
+            current_support = {
+                str(row.get('Einheit_ID', idx)): support_metrics(real, row, prow, current_helpers)
+                for idx, row in real.iterrows()
+            }
+            current_top = float((real['Z_mm'] + real['Höhe_mm']).max())
+            current_z_sum = float(real['Z_mm'].sum())
+            best = None
+            for idx, row in real.sort_values('Z_mm', ascending=False, kind='stable').iterrows():
+                if str(row.get('Einheit_ID', idx)) in supported_parent_ids:
+                    continue
+                old_x, old_y, old_z = (
+                    safe_number(row.get('X_mm')), safe_number(row.get('Y_mm')), safe_number(row.get('Z_mm'))
+                )
+                if old_z <= base_z + 1.0:
+                    continue
+                length, width = safe_number(row.get('Länge_mm')), safe_number(row.get('Breite_mm'))
+                other = real.drop(index=idx)
+                all_target_zs = {base_z}
+                all_target_zs.update(
+                    safe_number(lower.get('Z_mm')) + safe_number(lower.get('Höhe_mm'))
+                    for _, lower in other.iterrows()
+                    if safe_number(lower.get('Z_mm')) + safe_number(lower.get('Höhe_mm')) < old_z - 1.0
+                )
+                # Benachbarte tiefere Ebenen zuerst; der Basisboden bleibt immer
+                # als Kandidat erhalten. Weitere Kaskadenschritte folgen iterativ.
+                adjacent_zs = sorted((z for z in all_target_zs if z > base_z + 1.0), reverse=True)[:3]
+                target_zs = {base_z, *adjacent_zs}
+                eff_length = safe_number(prow.get('Länge_mm')) + safe_number(prow.get('Überhang_vorne_mm')) + safe_number(prow.get('Überhang_hinten_mm'))
+                platform_width = safe_number(prow.get('Breite_mm'))
+                x_values = {old_x, 0.0, (eff_length - length) / 2.0, eff_length - length}
+                y_values = {old_y, 0.0, (platform_width - width) / 2.0, platform_width - width}
+                for _, lower in other.iterrows():
+                    lx, ly = safe_number(lower.get('X_mm')), safe_number(lower.get('Y_mm'))
+                    x_values.update({lx, lx + safe_number(lower.get('Länge_mm')) + gap_mm, lx - length - gap_mm})
+                    y_values.update({ly, ly + safe_number(lower.get('Breite_mm')), ly - width})
+
+                x_values = sorted(
+                    (x for x in x_values if -0.1 <= x <= eff_length - length + 0.1),
+                    key=lambda x: (abs(x - old_x), abs((x + length / 2.0) - eff_length / 2.0)),
+                )[:10]
+                y_values = sorted(
+                    (y for y in y_values if -0.1 <= y <= platform_width - width + 0.1),
+                    key=lambda y: (abs(y - old_y), abs((y + width / 2.0) - platform_width / 2.0)),
+                )[:10]
+                for z in sorted(target_zs):
+                    for x in x_values:
+                        for y in y_values:
+                            if z >= old_z - 1.0:
+                                continue
+                            if candidate_checks >= max(1, int(max_candidate_checks_per_platform)):
+                                break
+                            candidate_checks += 1
+                            candidate = result.copy()
+                            candidate.loc[idx, ['X_mm', 'Y_mm', 'Z_mm']] = [round(x, 1), round(y, 1), round(z, 1)]
+                            if not variant_ok(
+                                candidate, pname, prow, current_relations, current_cog, current_support
+                            ):
+                                continue
+                            candidate_real = real_rows(candidate, pname)
+                            new_top = float((candidate_real['Z_mm'] + candidate_real['Höhe_mm']).max())
+                            new_z_sum = float(candidate_real['Z_mm'].sum())
+                            if new_top > current_top + 0.1 or new_z_sum >= current_z_sum - 1.0:
+                                continue
+                            score = (new_top, new_z_sum, abs(x - old_x) + abs(y - old_y))
+                            best = (score, candidate, idx)
+                            break
+                        if best is not None:
+                            break
+                        if candidate_checks >= max(1, int(max_candidate_checks_per_platform)):
+                            break
+                    if best is not None:
+                        break
+                    if candidate_checks >= max(1, int(max_candidate_checks_per_platform)):
+                        break
+                if best is not None:
+                    break
+                if candidate_checks >= max(1, int(max_candidate_checks_per_platform)):
+                    break
+            if best is None:
+                break
+            _score, result, moved_idx = best
+            if 'Ebene' in result.columns:
+                value = str(result.loc[moved_idx, 'Ebene'])
+                if 'Lagen kaskadiert verdichtet' not in value:
+                    result.loc[moved_idx, 'Ebene'] = f'{value} / Lagen kaskadiert verdichtet'
+
+    return result
 
 
 def compact_placements_conservatively(
@@ -4225,11 +4762,7 @@ def apply_main_loading_postprocess(
         result = improve_longitudinal_weight_balance(result, platforms_local, gap_mm=gap_mm)
         result = resolve_x_collisions_by_layer(result, platforms_local, gap_mm=gap_mm)
         result = shift_x_to_use_front_overhang(result, platforms_local)
-        result = _sync_planned_support_rows_to_load(result)
-        # Nach der gemeinsamen Ausrichtung verbleibende, nachweislich sichere
-        # Leerstellen nutzen. Der Schritt ist auch für selektive Neuberechnungen
-        # identisch, weil beide durch diese zentrale Nachlogik laufen.
-        result = compact_placements_conservatively(result, platforms_local)
+        result = compact_adjacent_loading_layers(result, platforms_local, gap_mm=gap_mm)
         result = _sync_planned_support_rows_to_load(result)
     new_summary = recompute_summary_from_placements(result, platforms_local)
     return result, new_summary
@@ -4337,7 +4870,6 @@ def invert_vertical_order_by_platform(placements_df: pd.DataFrame, platforms_df:
                 lambda v: v if 'niedrigste oben' in v.lower() else f'{v} / niedrigste oben'
             )
     return result
-
 
 
 def repack_loaded_platforms_for_lowest_on_top(
@@ -5828,7 +6360,6 @@ def draw_loading_view(placements_df: pd.DataFrame, platforms_df: pd.DataFrame, p
     return fig
 
 
-
 def clean_placements_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """Konvertiert manuell bearbeitete Platzierungswerte wieder in saubere Zahlen."""
     result = df.copy()
@@ -5841,8 +6372,6 @@ def clean_placements_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     if 'Einheit_ID' in result.columns:
         result['Einheit_ID'] = result['Einheit_ID'].fillna('').astype(str)
     return result
-
-
 
 
 def _rect_overlap_area(ax: float, ay: float, aw: float, ah: float, bx: float, by: float, bw: float, bh: float) -> float:
@@ -6195,7 +6724,6 @@ def recompute_summary_from_placements(placements_df: pd.DataFrame, platforms_df:
     return pd.DataFrame(rows)
 
 
-
 def _format_bsd_cell(row: pd.Series) -> str:
     """Beschriftung für die Ladeplan-BSD-Matrix."""
     bauteile = str(row.get('Bauteile', '') or '').strip()
@@ -6309,7 +6837,6 @@ def _position_slots_for_bsd(
     x_is_middle = abs(x_mid - x_center) <= 50.0
     fb = 'Vorne' if x_is_middle or slot.startswith('Vorne') else 'Hinten'
     return [f'{fb} links', f'{fb} rechts']
-
 
 
 def _load_dimension_rows_for_platform(placements_df: pd.DataFrame, platform: pd.Series) -> pd.DataFrame:
@@ -6426,7 +6953,6 @@ def create_bsd_header_for_platform(
     }
 
 
-
 def _split_bsd_text_list(value: Any, fallback: str = '') -> List[str]:
     """Zerlegt Bauteillisten aus Verladeeinheiten robust."""
     text = str(value or '').strip()
@@ -6470,7 +6996,6 @@ def _fmt_bsd_mm_label(prefix: str, value: float) -> str:
     else:
         text = f'{v:.2f}'.rstrip('0').rstrip('.')
     return f'{prefix} {text}'.strip()
-
 
 
 def _bsd_position_cols() -> List[str]:
@@ -6936,7 +7461,6 @@ def create_all_bsd_matrices(
     return header_df, matrix_df
 
 
-
 def _pdf_projection_values(row: pd.Series, view: str, eff_length: float, width: float, front_at_x_max: bool = False, left_at_y_max: bool = False) -> Tuple[float, float, float, float, float]:
     """Gibt projiziertes Rechteck und Tiefenwert für eine Ansicht zurück."""
     x = safe_number(row.get('X_mm'))
@@ -7170,8 +7694,6 @@ def _pdf_draw_priority_label(c, rx: float, ry: float, rw: float, rh: float, line
     c.restoreState()
 
 
-
-
 def _pdf_add_visible_spacer_rows(rows: pd.DataFrame, platform: pd.Series, view: str) -> pd.DataFrame:
     """Ergänzt Kantholz und Einlagen als sichtbare Hilfszeilen für PDF-Ansichten.
 
@@ -7265,7 +7787,6 @@ def _pdf_add_visible_spacer_rows(rows: pd.DataFrame, platform: pd.Series, view: 
     if not helpers:
         return rows
     return pd.concat([rows, pd.DataFrame(helpers)], ignore_index=True, sort=False)
-
 
 
 def _pdf_draw_underbau_blocks(c, rx: float, ry: float, rw: float, rh: float, view: str, label: str) -> None:
@@ -8896,8 +9417,6 @@ def render_analysis_module(uploaded_file) -> None:
             )
 
 
-
-
 def _control_extract_numbers(value: Any) -> List[int]:
     """Extrahiert numerische Bauteilnummern für Kontrolltabellen."""
     text = str(value or '')
@@ -9088,7 +9607,6 @@ def build_control_issue_table(bundle_control_df: pd.DataFrame, assignment_contro
     return pd.DataFrame(issues)
 
 
-
 def _manual_plan_signature(placements_df: pd.DataFrame) -> str:
     """Signatur, damit manuelle Korrekturen nur zurückgesetzt werden, wenn der Automatikplan neu ist."""
     if placements_df is None or placements_df.empty:
@@ -9128,7 +9646,6 @@ def _loading_plan_input_signature(
         _loading_dataframe_signature(platforms_df),
         settings_text,
     ])
-
 
 
 def _manual_platform_signature(platforms_df: pd.DataFrame) -> str:
@@ -9288,7 +9805,6 @@ def _manual_place_by_position(
     if 'Bundeinlage_mm' in df.columns:
         updates['Bundeinlage_mm'] = max(safe_number(row.get('Bundeinlage_mm'), 0.0), safe_number(spacer_under, 0.0))
     return _manual_update_row(df, row_idx, **updates)
-
 
 
 def _build_manual_platforms_from_excel(pritschen_df: pd.DataFrame, selected_option: str, standards: Dict[str, Any]) -> pd.DataFrame:
@@ -9458,7 +9974,6 @@ def _apply_manual_assignment_table(
         result.at[idx, 'Z_manuell_mm'] = z_manual
 
     return clean_placements_dataframe(result)
-
 
 
 _MANUAL_ZONE_LABELS = {
@@ -9725,7 +10240,6 @@ def _manual_zone_grid(manual_df: pd.DataFrame, platform_name: str) -> pd.DataFra
     return pd.DataFrame(out_rows)
 
 
-
 def _manual_get_platform_status(platforms_df: pd.DataFrame, platform_name: str) -> str:
     if platforms_df is None or platforms_df.empty or 'Pritsche' not in platforms_df.columns:
         return 'Leer'
@@ -9872,7 +10386,6 @@ def _manual_validate_zone_plan(manual_df: pd.DataFrame, platforms_df: pd.DataFra
                 })
 
     return pd.DataFrame(issues)
-
 
 
 def _manual_small_platform_overview(platforms_df: pd.DataFrame, manual_df: pd.DataFrame) -> pd.DataFrame:
