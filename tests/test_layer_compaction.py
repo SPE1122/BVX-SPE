@@ -100,6 +100,42 @@ def atomic_six_part_group() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def atomic_group_with_supported_upper_load() -> pd.DataFrame:
+    """Realer Datenpfad: lange obere Last erzeugt nach dem Repack eine neue, aber gültige Tragkante."""
+    rows = atomic_six_part_group().to_dict('records')
+    rows.extend([
+        {
+            **rows[0],
+            'Einheit_ID': 'BE31',
+            'Typ': 'Bund',
+            'X_mm': 10800.0,
+            'Y_mm': 0.0,
+            'Z_mm': 600.0,
+            'Länge_mm': 1000.0,
+            'Breite_mm': 1000.0,
+            'Höhe_mm': 280.0,
+            'Logische_Reihenfolge_im_Block': 0,
+        },
+        {
+            **rows[0],
+            'Einheit_ID': 'AUFLAGER-BE31',
+            'Typ': 'Unterbau',
+            'Auflager_fuer': 'BE31',
+            'Auflager_Offset_X_mm': 0.0,
+            'Auflager_Offset_Y_mm': 0.0,
+            'X_mm': 10800.0,
+            'Y_mm': 0.0,
+            'Z_mm': 520.0,
+            'Länge_mm': 1000.0,
+            'Breite_mm': 1000.0,
+            'Höhe_mm': 80.0,
+            'Gewicht_kg': 0.0,
+            'Logische_Reihenfolge_im_Block': 0,
+        },
+    ])
+    return pd.DataFrame(rows)
+
+
 def f02_side_by_side_release_group() -> pd.DataFrame:
     rows = []
     for number, y, z in [(39, 0.0, 80.0), (42, 1200.0, 80.0), (38, 600.0, 280.0)]:
@@ -164,6 +200,37 @@ class LayerCompactionTest(unittest.TestCase):
             abs(after_cog['Schwerpunkt_Abstand_Y_mm']),
             abs(before_cog['Schwerpunkt_Abstand_Y_mm']) + 1.0,
         )
+
+    def test_atomic_repack_allows_order_correct_new_support_below_existing_upper_load(self):
+        platform = f02_platform()
+        platform.loc[0, ['Länge_mm', 'Überhang_vorne_mm', 'Überhang_hinten_mm']] = [
+            7500.0, 1500.0, 2961.0,
+        ]
+        before = atomic_group_with_supported_upper_load()
+
+        after = app.compact_placements_conservatively(before, platform)
+        compacted = after[after['Einheit_ID'].isin([f'BE{i}' for i in range(43, 49)])]
+        upper = after.loc[after['Einheit_ID'].eq('BE31')].iloc[0]
+
+        self.assertTrue((compacted['Z_mm'] == 80.0).all())
+        self.assertEqual(0, len(app.find_geometry_conflicts(
+            after[after['Typ'].eq('Bund')], platform
+        )))
+        self.assertTrue(any(
+            app._axis_overlap_mm(
+                upper['X_mm'],
+                upper['X_mm'] + upper['Länge_mm'],
+                lower['X_mm'],
+                lower['X_mm'] + lower['Länge_mm'],
+            ) > 0
+            and app._axis_overlap_mm(
+                upper['Y_mm'],
+                upper['Y_mm'] + upper['Breite_mm'],
+                lower['Y_mm'],
+                lower['Y_mm'] + lower['Breite_mm'],
+            ) > 0
+            for _, lower in compacted.iterrows()
+        ))
 
     def test_f02_side_by_side_release_keeps_attached_support_and_lowers_38(self):
         platform = f02_platform()

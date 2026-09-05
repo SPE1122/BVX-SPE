@@ -4673,8 +4673,29 @@ def compact_placements_conservatively(
                 (u, l) for u, upper in current.iterrows() for l, lower in current.iterrows() if u != l
                 and _xy_overlap(upper, lower) and upper['Z_mm'] >= lower['Z_mm'] + lower['Höhe_mm'] - 1.0
             }
-            if not edges.issubset(original_edges):
-                return False
+            new_edges = edges - original_edges
+            if new_edges:
+                # Eine horizontale Neuordnung einer unteren Lage darf unter
+                # bereits darüberliegenden Teilen neue reale Tragflächen
+                # erzeugen, sofern dadurch die vorgegebene Entladereihenfolge
+                # nicht umgedreht wird. Pauschal alle neuen Überdeckungen zu
+                # verbieten blockierte im realen F02 die Gruppe 43--48 unter
+                # den langen Teilen 31--42.
+                if 'Logische_Reihenfolge_im_Block' not in current.columns:
+                    return False
+                for upper_idx, lower_idx in new_edges:
+                    if lower_idx not in moved_indices or upper_idx in moved_indices:
+                        return False
+                    upper_rank = pd.to_numeric(
+                        pd.Series([current.loc[upper_idx, 'Logische_Reihenfolge_im_Block']]),
+                        errors='coerce',
+                    ).iloc[0]
+                    lower_rank = pd.to_numeric(
+                        pd.Series([current.loc[lower_idx, 'Logische_Reihenfolge_im_Block']]),
+                        errors='coerce',
+                    ).iloc[0]
+                    if pd.isna(upper_rank) or pd.isna(lower_rank) or float(upper_rank) >= float(lower_rank):
+                        return False
             state = init_platform_state(prow, base_z, safe_number(prow.get('Einlage_zwischen_Lagen_mm'), 0.0), 0.0)
             state['placements'] = tmp[tmp['Pritsche'].astype(str).eq(pname)].to_dict('records')
             for idx, row in current.iterrows():
