@@ -6,6 +6,7 @@ import fitz
 PDFS = {
     "vorher": Path("attached_assets/28-08-2026-Schulhaus_1994_pritschenplan_a3-2_1788633209333.pdf"),
     "nachher": Path("attached_assets/28-08-2026-Schulhaus_1994_pritschenplan_a3-4_1788637880593.pdf"),
+    "aktuell": Path("attached_assets/28-08-2026-Schulhaus_1994_pritschenplan_a3-4_1788639696804.pdf"),
 }
 
 output_dir = Path(".agents/outputs/current_pritschenplan")
