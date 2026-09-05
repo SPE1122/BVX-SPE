@@ -4035,6 +4035,166 @@ def improve_longitudinal_weight_balance(
 
 
 
+def compact_placements_conservatively(
+    placements_df: pd.DataFrame,
+    platforms_df: pd.DataFrame,
+    max_moves_per_platform: int = 24,
+) -> pd.DataFrame:
+    """Verdichtet nur sichere Lagen: keine neue Entlade-Abhängigkeit oder schlechtere Auflage."""
+    if placements_df is None or placements_df.empty or platforms_df is None or platforms_df.empty:
+        return placements_df.copy() if placements_df is not None else pd.DataFrame()
+    result = placements_df.copy()
+    required = {'Pritsche', 'X_mm', 'Y_mm', 'Z_mm', 'Länge_mm', 'Breite_mm', 'Höhe_mm'}
+    if not required.issubset(result.columns):
+        return result
+    for col in required - {'Pritsche'} | {'Gewicht_kg'}:
+        if col in result.columns:
+            result[col] = pd.to_numeric(result[col], errors='coerce')
+    helper_types = {'Unterbau', 'Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz'}
+
+    def _real_mask(df: pd.DataFrame, pname: str) -> pd.Series:
+        typ = df['Typ'].astype(str) if 'Typ' in df.columns else pd.Series('', index=df.index, dtype=str)
+        return (df['Pritsche'].astype(str).eq(pname) & df['X_mm'].notna() & df['Y_mm'].notna()
+                & df['Z_mm'].notna() & df['Länge_mm'].notna() & df['Breite_mm'].notna()
+                & df['Höhe_mm'].notna()
+                & ~typ.isin(helper_types))
+
+    def _xy_overlap(a: pd.Series, b: pd.Series) -> bool:
+        return (_axis_overlap_mm(a['X_mm'], a['X_mm'] + a['Länge_mm'], b['X_mm'], b['X_mm'] + b['Länge_mm']) > 0
+                and _axis_overlap_mm(a['Y_mm'], a['Y_mm'] + a['Breite_mm'], b['Y_mm'], b['Y_mm'] + b['Breite_mm']) > 0)
+
+    for pname, prow in {str(r.get('Pritsche', '')): r for _, r in platforms_df.iterrows()}.items():
+        initial = result.loc[_real_mask(result, pname)].copy()
+        if initial.empty:
+            continue
+        base_z = safe_number(prow.get('Kantholz_erste_Lage_mm'), 0.0)
+        minimum = max(0.0, min(1.0, safe_number(
+            prow.get('Mindest_Stützbreite_%', prow.get('Mindest_Stuetzbreite_%')), 35.0) / 100.0))
+        # The original vertical-overlap pairs are the exact established unloading order.
+        original_edges = {
+            (u, l) for u, upper in initial.iterrows() for l, lower in initial.iterrows() if u != l
+            and _xy_overlap(upper, lower) and upper['Z_mm'] >= lower['Z_mm'] + lower['Höhe_mm'] - 1.0
+        }
+        initial_cog = _load_center_of_gravity_values_for_platform(result, prow)
+        accepted_cog_limit = (
+            abs(safe_number(initial_cog.get('Schwerpunkt_Abstand_X_mm'), 0.0)),
+            abs(safe_number(initial_cog.get('Schwerpunkt_Abstand_Y_mm'), 0.0)),
+        )
+
+        def _valid(tmp: pd.DataFrame, prior_ratios: Dict[Any, float], moved_idx: Any) -> bool:
+            current = tmp.loc[_real_mask(tmp, pname)]
+            eff_len = safe_number(prow.get('Länge_mm'), 0.0) + safe_number(prow.get('Überhang_vorne_mm'), 0.0) + safe_number(prow.get('Überhang_hinten_mm'), 0.0)
+            if ((current['X_mm'] < -0.1).any() or (current['Y_mm'] < -0.1).any()
+                    or ((current['X_mm'] + current['Länge_mm']) > eff_len + 0.1).any()
+                    or ((current['Y_mm'] + current['Breite_mm']) > safe_number(prow.get('Breite_mm'), 0.0) + 0.1).any()
+                    or ((current['Z_mm'] + current['Höhe_mm']) > safe_number(prow.get('Max_Höhe_mm'), 0.0) + 0.1).any()):
+                return False
+            if not find_geometry_conflicts(current, pd.DataFrame([prow])).empty:
+                return False
+            edges = {
+                (u, l) for u, upper in current.iterrows() for l, lower in current.iterrows() if u != l
+                and _xy_overlap(upper, lower) and upper['Z_mm'] >= lower['Z_mm'] + lower['Höhe_mm'] - 1.0
+            }
+            if not edges.issubset(original_edges):
+                return False
+            state = init_platform_state(prow, base_z, safe_number(prow.get('Einlage_zwischen_Lagen_mm'), 0.0), 0.0)
+            state['placements'] = tmp[tmp['Pritsche'].astype(str).eq(pname)].to_dict('records')
+            for idx, row in current.iterrows():
+                ratio = _support_area_ratio_for_candidate(state, row['X_mm'], row['Y_mm'], row['Z_mm'], row['Länge_mm'], row['Breite_mm'])
+                # Die verschobene Einheit darf von einer vollflächigen oberen
+                # Tragfläche auf die Pritsche abgesenkt werden, sofern die
+                # konfigurierte Mindestauflage weiterhin erfüllt ist. Bereits
+                # liegende Einheiten dürfen durch den Zug dagegen keine Auflage
+                # verlieren.
+                required_ratio = minimum if idx == moved_idx else max(minimum, prior_ratios.get(idx, 0.0))
+                if ratio + 1e-6 < required_ratio:
+                    return False
+            return True
+
+        for _ in range(max_moves_per_platform):
+            current = result.loc[_real_mask(result, pname)].copy()
+            state = init_platform_state(prow, base_z, safe_number(prow.get('Einlage_zwischen_Lagen_mm'), 0.0), 0.0)
+            state['placements'] = result[result['Pritsche'].astype(str).eq(pname)].to_dict('records')
+            ratios = {i: _support_area_ratio_for_candidate(state, r['X_mm'], r['Y_mm'], r['Z_mm'], r['Länge_mm'], r['Breite_mm']) for i, r in current.iterrows()}
+            best = None
+            for idx, row in current.sort_values('Z_mm', ascending=False, kind='stable').iterrows():
+                others = current.drop(index=idx)
+                # Die eigene Ebene erlaubt zusätzlich echtes 2D-Nachrücken
+                # (hintereinander oder nebeneinander), auch ohne Absenkung.
+                zs = sorted(set([row['Z_mm'], base_z] + [r['Z_mm'] + r['Höhe_mm'] for _, r in others.iterrows() if r['Z_mm'] + r['Höhe_mm'] < row['Z_mm'] - 1]))
+                old_layer = current[current['Z_mm'].round(1).eq(round(row['Z_mm'], 1))]
+                old_span = ((old_layer['X_mm'] + old_layer['Länge_mm']).max() - old_layer['X_mm'].min()) * ((old_layer['Y_mm'] + old_layer['Breite_mm']).max() - old_layer['Y_mm'].min())
+                max_x = safe_number(prow.get('Länge_mm'), 0.0) + safe_number(prow.get('Überhang_vorne_mm'), 0.0) + safe_number(prow.get('Überhang_hinten_mm'), 0.0) - row['Länge_mm']
+                for z in zs:
+                    if best is not None and z > best[0][0] + 0.1:
+                        break
+                    # Nur Kanten von Teilen berücksichtigen, die auf der
+                    # Zielhöhe kollidieren oder direkt tragen können. Kanten
+                    # weit entfernter Lagen vervielfachten die Laufzeit ohne
+                    # zusätzliche sinnvolle Positionen.
+                    relevant = others[
+                        (
+                            (others['Z_mm'] < z + row['Höhe_mm'] - 0.1)
+                            & ((others['Z_mm'] + others['Höhe_mm']) > z + 0.1)
+                        )
+                        | ((others['Z_mm'] + others['Höhe_mm'] - z).abs() <= 1.0)
+                    ]
+                    xs = {0.0, max_x, row['X_mm']}
+                    max_y = safe_number(prow.get('Breite_mm'), 0.0) - row['Breite_mm']
+                    ys = {0.0, max_y, row['Y_mm']}
+                    for _, other in relevant.iterrows():
+                        xs.update([other['X_mm'] - row['Länge_mm'], other['X_mm'] + other['Länge_mm']])
+                        ys.update([other['Y_mm'] - row['Breite_mm'], other['Y_mm'] + other['Breite_mm']])
+                    xs = sorted({round(float(x), 1) for x in xs if -0.1 <= float(x) <= max_x + 0.1})
+                    ys = sorted({round(float(y), 1) for y in ys if -0.1 <= float(y) <= max_y + 0.1})
+                    found_at_z = False
+                    for x in xs:
+                        for y in ys:
+                            candidate_box = (float(x), float(x) + row['Länge_mm'], float(y), float(y) + row['Breite_mm'],
+                                             float(z), float(z) + row['Höhe_mm'])
+                            if any(
+                                (box := _row_box_values(other)) is not None
+                                and _boxes_overlap_3d(candidate_box, box, tol=1.0)
+                                for _, other in others.iterrows()
+                            ):
+                                continue
+                            candidate_ratio = _support_area_ratio_for_candidate(
+                                state, x, y, z, row['Länge_mm'], row['Breite_mm']
+                            )
+                            if candidate_ratio + 1e-6 < minimum:
+                                continue
+                            tmp = result.copy()
+                            tmp.loc[idx, ['X_mm', 'Y_mm', 'Z_mm']] = [round(x, 1), round(y, 1), round(z, 1)]
+                            tmp = _sync_planned_support_rows_to_load(tmp)
+                            if abs(z - row['Z_mm']) < 0.1:
+                                new_layer = tmp.loc[_real_mask(tmp, pname)]
+                                new_layer = new_layer[new_layer['Z_mm'].round(1).eq(round(z, 1))]
+                                new_span = ((new_layer['X_mm'] + new_layer['Länge_mm']).max() - new_layer['X_mm'].min()) * ((new_layer['Y_mm'] + new_layer['Breite_mm']).max() - new_layer['Y_mm'].min())
+                                if new_span >= old_span - 0.1:
+                                    continue
+                            if not _valid(tmp, ratios, idx):
+                                continue
+                            new_cog = _load_center_of_gravity_values_for_platform(tmp, prow)
+                            # Einzelne Kaskadenschritte dürfen gegenüber dem
+                            # unmittelbar vorherigen Zwischenschritt abweichen;
+                            # die ursprüngliche Planung bleibt die harte Grenze.
+                            if (abs(safe_number(new_cog.get('Schwerpunkt_Abstand_X_mm'), 0.0)) > accepted_cog_limit[0] + 0.1
+                                    or abs(safe_number(new_cog.get('Schwerpunkt_Abstand_Y_mm'), 0.0)) > accepted_cog_limit[1] + 0.1):
+                                continue
+                            score = (z, abs(x - row['X_mm']) + abs(y - row['Y_mm']))
+                            if best is None or score < best[0]:
+                                best = (score, tmp, idx)
+                                found_at_z = True
+                    if found_at_z:
+                        break
+            if best is None:
+                break
+            _, result, moved = best
+            if 'Ebene' in result.columns and 'konservativ verdichtet' not in str(result.loc[moved, 'Ebene']):
+                result.loc[moved, 'Ebene'] = f"{result.loc[moved, 'Ebene']} / konservativ verdichtet"
+    return result
+
+
 def apply_main_loading_postprocess(
     placements_df: pd.DataFrame,
     summary_df: Optional[pd.DataFrame],
@@ -4065,6 +4225,11 @@ def apply_main_loading_postprocess(
         result = improve_longitudinal_weight_balance(result, platforms_local, gap_mm=gap_mm)
         result = resolve_x_collisions_by_layer(result, platforms_local, gap_mm=gap_mm)
         result = shift_x_to_use_front_overhang(result, platforms_local)
+        result = _sync_planned_support_rows_to_load(result)
+        # Nach der gemeinsamen Ausrichtung verbleibende, nachweislich sichere
+        # Leerstellen nutzen. Der Schritt ist auch für selektive Neuberechnungen
+        # identisch, weil beide durch diese zentrale Nachlogik laufen.
+        result = compact_placements_conservatively(result, platforms_local)
         result = _sync_planned_support_rows_to_load(result)
     new_summary = recompute_summary_from_placements(result, platforms_local)
     return result, new_summary
