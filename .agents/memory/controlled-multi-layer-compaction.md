@@ -7,4 +7,4 @@ After initial placement, attempt controlled repacking across adjacent layers bef
 
 **Why:** A greedy layer-by-layer placement can leave avoidable upper layers even when a cascading move or a two-dimensional arrangement would preserve the exact unloading sequence and improve compactness.
 
-**How to apply:** Accept a repack only when unloading access and logical order remain unchanged, every part has valid real support and a support chain, geometry remains collision-free, and weight balance does not worsen materially.
+**How to apply:** Accept a repack only when unloading access and logical order remain unchanged, every part has valid real support and a support chain, geometry remains collision-free, and weight balance does not worsen materially. A load with a bound support may move horizontally on its existing height when the support follows it, but it must never be lowered into or through that support. Center atomic shelf layouts on the physical platform, not on an asymmetric overhang allowance, or a valid compaction can be rejected by the center-of-gravity guard.

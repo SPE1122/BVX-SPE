@@ -65,25 +65,37 @@ def f02_groups_37_to_48() -> pd.DataFrame:
 
 
 def atomic_six_part_group() -> pd.DataFrame:
-    """Real-F02-shaped topology: target plus two adjacent source levels."""
+    """Real F02: 47/48 with supports below 43--46 on two upper levels."""
     rows = []
     dimensions = [(3025.0, 1200.0)] * 5 + [(3003.0, 952.0)]
     for offset, (length, width) in enumerate(dimensions):
+        number = 43 + offset
         rows.append({
             'Pritsche': 'F02 Anhänger',
-            'Einheit_ID': f'BE{43 + offset}',
+            'Einheit_ID': f'BE{number}',
             'Typ': 'Bund',
             'X_mm': (offset % 3) * 3025.0,
             'Y_mm': 0.0,
-            # Two parts are already on the target level.  The regression is
-            # only solved when they are shuffled with both upper levels.
-            'Z_mm': 80.0 if offset < 2 else (280.0 if offset < 4 else 480.0),
+            'Z_mm': 400.0 if number < 45 else (240.0 if number < 47 else 80.0),
             'Länge_mm': length,
             'Breite_mm': width,
-            'Höhe_mm': 200.0,
+            'Höhe_mm': 160.0,
             'Gewicht_kg': 100.0,
             'Ebene': 'Ausgangslage',
             'Logische_Reihenfolge_im_Block': offset + 1,
+        })
+    for number in (47, 48):
+        parent = next(row for row in rows if row['Einheit_ID'] == f'BE{number}')
+        rows.append({
+            **parent,
+            'Einheit_ID': f'AUFLAGER-BE{number}',
+            'Typ': 'Unterbau',
+            'Auflager_fuer': f'BE{number}',
+            'Auflager_Offset_X_mm': 0.0,
+            'Auflager_Offset_Y_mm': 0.0,
+            'Z_mm': 0.0,
+            'Höhe_mm': 80.0,
+            'Gewicht_kg': 0.0,
         })
     return pd.DataFrame(rows)
 
@@ -119,20 +131,31 @@ def f02_side_by_side_release_group() -> pd.DataFrame:
 class LayerCompactionTest(unittest.TestCase):
     def test_atomic_shelf_repack_fits_five_3025_and_one_3003_as_3x2(self):
         platform = f02_platform()
-        platform.loc[0, 'Länge_mm'] = 9250.0
+        platform.loc[0, ['Länge_mm', 'Überhang_vorne_mm', 'Überhang_hinten_mm']] = [
+            7500.0, 1500.0, 2961.0,
+        ]
         before = atomic_six_part_group()
         before_cog = app._load_center_of_gravity_values_for_platform(before, platform.iloc[0])
 
-        after = app.compact_placements_conservatively(before, platform)
-        after_cog = app._load_center_of_gravity_values_for_platform(after, platform.iloc[0])
-
-        self.assertTrue((after['Z_mm'] == 80.0).all())
-        self.assertEqual(0, len(app.find_geometry_conflicts(after, platform)))
-        self.assertTrue(after['Ebene'].astype(str).str.contains('atomar verdichtet').all())
-        self.assertListEqual(
-            before['Logische_Reihenfolge_im_Block'].tolist(),
-            after['Logische_Reihenfolge_im_Block'].tolist(),
+        after, _summary = app.apply_main_loading_postprocess(
+            before, None, platform, gap_mm=0.0, center_geometric=True
         )
+        after_cog = app._load_center_of_gravity_values_for_platform(after, platform.iloc[0])
+        loads = after[after['Typ'].eq('Bund')]
+
+        self.assertTrue((loads['Z_mm'] == 80.0).all())
+        self.assertEqual(0, len(app.find_geometry_conflicts(loads, platform)))
+        self.assertTrue(loads['Ebene'].astype(str).str.contains('atomar verdichtet').all())
+        self.assertListEqual(
+            before.loc[before['Typ'].eq('Bund'), 'Logische_Reihenfolge_im_Block'].tolist(),
+            loads['Logische_Reihenfolge_im_Block'].tolist(),
+        )
+        for number in (47, 48):
+            parent = after.loc[after['Einheit_ID'].eq(f'BE{number}')].iloc[0]
+            support = after.loc[after['Einheit_ID'].eq(f'AUFLAGER-BE{number}')].iloc[0]
+            self.assertEqual(float(parent['X_mm']), float(support['X_mm']))
+            self.assertEqual(float(parent['Y_mm']), float(support['Y_mm']))
+            self.assertGreaterEqual(float(parent['Z_mm']), float(support['Z_mm']) + float(support['Höhe_mm']))
         self.assertLessEqual(
             abs(after_cog['Schwerpunkt_Abstand_X_mm']),
             abs(before_cog['Schwerpunkt_Abstand_X_mm']) + 1.0,

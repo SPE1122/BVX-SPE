@@ -4689,7 +4689,12 @@ def compact_placements_conservatively(
                     return False
             return True
 
-        def _atomic_shelf_layouts(group: pd.DataFrame, eff_len: float, platform_width: float) -> List[Dict[Any, Tuple[float, float]]]:
+        def _atomic_shelf_layouts(
+            group: pd.DataFrame,
+            eff_len: float,
+            platform_width: float,
+            target_center_x: float,
+        ) -> List[Dict[Any, Tuple[float, float]]]:
             """Return order-preserving one/two-row shelf layouts for ``group``.
 
             A shelf consumes the greatest width of one of its parts, rather
@@ -4722,8 +4727,11 @@ def compact_placements_conservatively(
                 span = max(shelf_lengths)
                 if span > eff_len + 0.1:
                     continue
-                # Center the complete rectangular shelf group, not each row.
-                x0 = (eff_len - span) / 2.0
+                # Um die physische Pritschenmitte zentrieren, nicht um das
+                # gesamte Ladefenster inklusive asymmetrischer Überhänge.
+                # Andernfalls verwirft die Schwerpunktprüfung gerade die
+                # gewünschte Verdichtung nach der vorherigen Ausrichtung.
+                x0 = max(0.0, min(eff_len - span, target_center_x - span / 2.0))
                 layout: Dict[Any, Tuple[float, float]] = {}
                 y0 = 0.0
                 for shelf_no, shelf in enumerate(shelves):
@@ -4758,6 +4766,10 @@ def compact_placements_conservatively(
                 + safe_number(prow.get('Überhang_vorne_mm'), 0.0)
                 + safe_number(prow.get('Überhang_hinten_mm'), 0.0)
             )
+            platform_center_x = (
+                safe_number(prow.get('Überhang_hinten_mm'), 0.0)
+                + safe_number(prow.get('Länge_mm'), 0.0) / 2.0
+            )
             platform_width = safe_number(prow.get('Breite_mm'), 0.0)
             target_zs = {base_z}
             target_zs.update(
@@ -4770,7 +4782,14 @@ def compact_placements_conservatively(
             for target_z in sorted(target_zs):
                 movable = current
                 if fixed_parent_ids and 'Einheit_ID' in movable.columns:
-                    movable = movable[~movable['Einheit_ID'].astype(str).isin(fixed_parent_ids)]
+                    # Ein gebundenes Auflager verbietet das Absenken seines
+                    # Elternelements, nicht aber eine horizontale Neuordnung
+                    # auf derselben Höhe. Das ist für die reale F02-Gruppe
+                    # entscheidend: 47/48 bilden bereits die unterste Lage und
+                    # ihre Auflager können in X/Y sicher mitgeführt werden.
+                    supported_parent = movable['Einheit_ID'].astype(str).isin(fixed_parent_ids)
+                    already_on_target = (movable['Z_mm'] - target_z).abs() <= 1.0
+                    movable = movable[~supported_parent | already_on_target]
                 # Repack the parts already on the target height together with
                 # the adjacent upper levels.  Excluding these target-level
                 # parts was precisely what prevented the F02 43--48 group
@@ -4803,7 +4822,7 @@ def compact_placements_conservatively(
                 # subsets (not merely contiguous dataframe rows).  This
                 # allows an unrelated part to stay where it is while retaining
                 # exhaustive validation for the selected atomic group.
-                if not _atomic_shelf_layouts(pool, eff_len, platform_width):
+                if not _atomic_shelf_layouts(pool, eff_len, platform_width, platform_center_x):
                     for size in range(min(6, len(pool_indices)), 1, -1):
                         for group_indices in itertools.combinations(pool_indices, size):
                             group_sets.append(group_indices)
@@ -4819,7 +4838,7 @@ def compact_placements_conservatively(
                     group = pool.loc[list(group_indices)]
                     if not (group['Z_mm'] >= target_z - 1.0).all() or not (group['Z_mm'] > target_z + 1.0).any():
                         continue
-                    for layout in _atomic_shelf_layouts(group, eff_len, platform_width):
+                    for layout in _atomic_shelf_layouts(group, eff_len, platform_width, platform_center_x):
                         candidate = result.copy()
                         for idx, (x, y) in layout.items():
                             candidate.loc[idx, ['X_mm', 'Y_mm', 'Z_mm']] = [x, y, round(target_z, 1)]
@@ -8509,39 +8528,42 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
 
     _pdf_draw_view_orientation_helpers(c, ox, oy, draw_w, draw_h, view, front_at_x_max, left_at_y_max)
 
-    # V122: echte Pritschenmitte und Schwerpunkt in der Seitenansicht zeichnen.
-    # Die Mitte-Linie ist NICHT die Mitte des ganzen Ladefensters inkl. Überhang,
-    # sondern die Mitte der physischen Pritsche.
-    cog_vals_for_view = _load_center_of_gravity_values_for_platform(placements, platform)
-    if used_len > 0 and view in ('side', 'side_left', 'side_right'):
+    # V122: echte Pritschenmitte und Schwerpunkt in der Seitenansicht.
+    # Diese Hilfslinien werden bewusst erst NACH den Ladeflächen gezeichnet.
+    # Sonst überdecken hohe bzw. vollflächige Bauteile die Linien vollständig.
+    def draw_side_reference_markers() -> None:
+        if used_len <= 0 or view not in ('side', 'side_left', 'side_right'):
+            return
+        cog_vals_for_view = _load_center_of_gravity_values_for_platform(placements, platform)
         target_x = safe_number(cog_vals_for_view.get('Pritschenmitte_X_mm'), 0.0)
         if target_x > 0:
-            sx_mid0, _sx_mid1 = _pdf_project_x_range_for_side(target_x, target_x, eff_length, view, left_at_y_max=left_at_y_max)
+            sx_mid0, _sx_mid1 = _pdf_project_x_range_for_side(
+                target_x, target_x, eff_length, view, left_at_y_max=left_at_y_max
+            )
             c.saveState()
-            c.setStrokeColor(colors.HexColor('#8a8a8a'))
+            c.setStrokeColor(colors.HexColor('#666666'))
             c.setDash(2, 2)
-            c.setLineWidth(0.38)
+            c.setLineWidth(0.65)
             c.line(tx(sx_mid0), oy, tx(sx_mid0), oy + draw_h)
             c.setDash()
-            c.setFont('Helvetica', 5.0)
-            c.setFillColor(colors.HexColor('#555555'))
-            # Oberhalb der Zeichnung beschriften. Bei hohen Ladungen wurde
-            # "Mitte P" bisher von den obersten Bauteilen überdeckt.
+            c.setFont('Helvetica-Bold', 5.0)
+            c.setFillColor(colors.HexColor('#444444'))
             c.drawCentredString(tx(sx_mid0), oy + draw_h + 5.0, 'Mitte P')
             c.restoreState()
 
         sp_x = safe_number(cog_vals_for_view.get('Schwerpunkt_X_mm'), 0.0)
         if sp_x > 0:
-            sx_sp0, _sx_sp1 = _pdf_project_x_range_for_side(sp_x, sp_x, eff_length, view, left_at_y_max=left_at_y_max)
+            sx_sp0, _sx_sp1 = _pdf_project_x_range_for_side(
+                sp_x, sp_x, eff_length, view, left_at_y_max=left_at_y_max
+            )
             c.saveState()
-            c.setStrokeColor(colors.HexColor('#202020'))
+            c.setStrokeColor(colors.HexColor('#111111'))
             c.setDash(5, 2)
-            c.setLineWidth(0.55)
+            c.setLineWidth(0.9)
             c.line(tx(sx_sp0), oy, tx(sx_sp0), oy + draw_h)
             c.setDash()
             c.setFont('Helvetica-Bold', 5.4)
             c.setFillColor(colors.black)
-            # Schwerpunktbezeichnung ebenfalls oberhalb der Ladegeometrie.
             c.drawCentredString(tx(sx_sp0), oy + draw_h + 10.5, 'SP')
             c.restoreState()
 
@@ -8681,6 +8703,8 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
 
     for _, row in rows.iterrows():
         draw_projected_row(row, ghost=False)
+
+    draw_side_reference_markers()
 
     for lrx, lry, lrw, lrh, llines, lview, lghost in priority_label_items:
         _pdf_draw_priority_label(c, lrx, lry, lrw, lrh, llines, lview, ghost=lghost)
