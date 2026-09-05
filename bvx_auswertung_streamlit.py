@@ -4764,6 +4764,12 @@ def apply_main_loading_postprocess(
         result = shift_x_to_use_front_overhang(result, platforms_local)
         result = compact_adjacent_loading_layers(result, platforms_local, gap_mm=gap_mm)
         result = _sync_planned_support_rows_to_load(result)
+        # Die allgemeine Kaskaden-/2D-Nachverdichtung muss nach der älteren
+        # Paarlagen-Optimierung ebenfalls aktiv laufen. Beim Zusammenführen der
+        # Task-Änderungen blieb die Funktion vorhanden, wurde hier aber nicht
+        # aufgerufen; dadurch blieb die Ladegeometrie trotz neuem Code identisch.
+        result = compact_placements_conservatively(result, platforms_local)
+        result = _sync_planned_support_rows_to_load(result)
     new_summary = recompute_summary_from_placements(result, platforms_local)
     return result, new_summary
 
