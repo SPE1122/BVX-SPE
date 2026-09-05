@@ -64,7 +64,68 @@ def f02_groups_37_to_48() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def atomic_six_part_group() -> pd.DataFrame:
+    """Two adjacent source layers which only fit when moved together."""
+    rows = []
+    dimensions = [(3025.0, 1200.0)] * 5 + [(3003.0, 952.0)]
+    for offset, (length, width) in enumerate(dimensions):
+        rows.append({
+            'Pritsche': 'F02 Anhänger',
+            'Einheit_ID': f'BE{43 + offset}',
+            'Typ': 'Bund',
+            'X_mm': (offset % 3) * 3025.0,
+            'Y_mm': 0.0,
+            'Z_mm': 280.0 if offset < 3 else 480.0,
+            'Länge_mm': length,
+            'Breite_mm': width,
+            'Höhe_mm': 200.0,
+            'Gewicht_kg': 100.0,
+            'Ebene': 'Ausgangslage',
+            'Logische_Reihenfolge_im_Block': offset + 1,
+        })
+    return pd.DataFrame(rows)
+
+
 class LayerCompactionTest(unittest.TestCase):
+    def test_atomic_shelf_repack_fits_five_3025_and_one_3003_as_3x2(self):
+        platform = f02_platform()
+        platform.loc[0, 'Länge_mm'] = 9250.0
+        before = atomic_six_part_group()
+        before_cog = app._load_center_of_gravity_values_for_platform(before, platform.iloc[0])
+
+        after = app.compact_placements_conservatively(before, platform)
+        after_cog = app._load_center_of_gravity_values_for_platform(after, platform.iloc[0])
+
+        self.assertTrue((after['Z_mm'] == 80.0).all())
+        self.assertEqual(0, len(app.find_geometry_conflicts(after, platform)))
+        self.assertTrue(after['Ebene'].astype(str).str.contains('atomar verdichtet').all())
+        self.assertListEqual(
+            before['Logische_Reihenfolge_im_Block'].tolist(),
+            after['Logische_Reihenfolge_im_Block'].tolist(),
+        )
+        self.assertLessEqual(
+            abs(after_cog['Schwerpunkt_Abstand_X_mm']),
+            abs(before_cog['Schwerpunkt_Abstand_X_mm']) + 1.0,
+        )
+        self.assertLessEqual(
+            abs(after_cog['Schwerpunkt_Abstand_Y_mm']),
+            abs(before_cog['Schwerpunkt_Abstand_Y_mm']) + 1.0,
+        )
+
+    def test_atomic_shelf_repack_rejects_insufficient_lateral_width(self):
+        platform = f02_platform()
+        platform.loc[0, 'Länge_mm'] = 9250.0
+        platform.loc[0, 'Breite_mm'] = 2399.0
+        before = atomic_six_part_group()
+
+        after = app.compact_placements_conservatively(before, platform)
+
+        # A 3x2 shelf needs two 1200-mm shelf widths.  Greedy single moves
+        # may still make a safe local improvement, but the atomic 3x2 state
+        # must never be accepted beyond the effective platform width.
+        self.assertFalse(after['Ebene'].astype(str).str.contains('atomar verdichtet').any())
+        self.assertFalse((after['Z_mm'] == 80.0).all())
+
     def test_f02_groups_use_free_xy_area_without_losing_order_or_support(self):
         platform = f02_platform()
         before = f02_groups_37_to_48()

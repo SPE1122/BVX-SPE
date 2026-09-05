@@ -4604,6 +4604,16 @@ def compact_placements_conservatively(
         initial = result.loc[_real_mask(result, pname)].copy()
         if initial.empty:
             continue
+        fixed_parent_ids = set()
+        if 'Auflager_fuer' in result.columns and 'Typ' in result.columns:
+            fixed_parent_ids = set(
+                result.loc[
+                    result['Pritsche'].astype(str).eq(pname)
+                    & result['Typ'].astype(str).isin(helper_types)
+                    & result['Auflager_fuer'].notna(),
+                    'Auflager_fuer',
+                ].astype(str)
+            )
         base_z = safe_number(prow.get('Kantholz_erste_Lage_mm'), 0.0)
         minimum = max(0.0, min(1.0, safe_number(
             prow.get('Mindest_Stützbreite_%', prow.get('Mindest_Stuetzbreite_%')), 35.0) / 100.0))
@@ -4619,6 +4629,14 @@ def compact_placements_conservatively(
         )
 
         def _valid(tmp: pd.DataFrame, prior_ratios: Dict[Any, float], moved_idx: Any) -> bool:
+            # ``moved_idx`` is normally one index, but an atomic repack passes
+            # a complete set.  Every member of that set may legitimately trade
+            # its former support for the configured minimum support; all other
+            # loads must retain (or improve) their existing support.
+            moved_indices = (
+                set(moved_idx) if isinstance(moved_idx, (set, list, tuple, pd.Index))
+                else {moved_idx}
+            )
             current = tmp.loc[_real_mask(tmp, pname)]
             eff_len = safe_number(prow.get('Länge_mm'), 0.0) + safe_number(prow.get('Überhang_vorne_mm'), 0.0) + safe_number(prow.get('Überhang_hinten_mm'), 0.0)
             if ((current['X_mm'] < -0.1).any() or (current['Y_mm'] < -0.1).any()
@@ -4628,6 +4646,28 @@ def compact_placements_conservatively(
                 return False
             if not find_geometry_conflicts(current, pd.DataFrame([prow])).empty:
                 return False
+            # Gebundene Auflager sind keine Ladung und werden von der normalen
+            # Kollisionsprüfung bewusst ignoriert. Ihr eigenes Elternelement
+            # darf nach einer Verdichtung trotzdem niemals in den Auflagerkörper
+            # abgesenkt werden.
+            if fixed_parent_ids and 'Einheit_ID' in tmp.columns and 'Auflager_fuer' in tmp.columns:
+                real_by_id = {
+                    str(row.get('Einheit_ID', '')): row
+                    for _, row in current.iterrows()
+                }
+                supports = tmp[
+                    tmp['Pritsche'].astype(str).eq(pname)
+                    & tmp.get('Typ', pd.Series('', index=tmp.index)).astype(str).isin(helper_types)
+                    & tmp['Auflager_fuer'].notna()
+                ]
+                for _, support in supports.iterrows():
+                    parent = real_by_id.get(str(support.get('Auflager_fuer', '')))
+                    if parent is None:
+                        continue
+                    parent_box = _row_box_values(parent)
+                    support_box = _row_box_values(support)
+                    if parent_box is not None and support_box is not None and _boxes_overlap_3d(parent_box, support_box, tol=1.0):
+                        return False
             edges = {
                 (u, l) for u, upper in current.iterrows() for l, lower in current.iterrows() if u != l
                 and _xy_overlap(upper, lower) and upper['Z_mm'] >= lower['Z_mm'] + lower['Höhe_mm'] - 1.0
@@ -4643,10 +4683,149 @@ def compact_placements_conservatively(
                 # konfigurierte Mindestauflage weiterhin erfüllt ist. Bereits
                 # liegende Einheiten dürfen durch den Zug dagegen keine Auflage
                 # verlieren.
-                required_ratio = minimum if idx == moved_idx else max(minimum, prior_ratios.get(idx, 0.0))
+                required_ratio = minimum if idx in moved_indices else max(minimum, prior_ratios.get(idx, 0.0))
                 if ratio + 1e-6 < required_ratio:
                     return False
             return True
+
+        def _atomic_shelf_layouts(group: pd.DataFrame, eff_len: float, platform_width: float) -> List[Dict[Any, Tuple[float, float]]]:
+            """Return order-preserving one/two-row shelf layouts for ``group``.
+
+            A shelf consumes the greatest width of one of its parts, rather
+            than the sum of their widths: parts on that shelf are placed
+            longitudinally one after another.  Enumerating the row assignment
+            (with the first part fixed in row zero) is small for the bounded
+            group size and, unlike greedy row filling, handles a narrow part
+            completing an otherwise full second shelf.
+            """
+            ordered = list(group.iterrows())
+            if not ordered:
+                return []
+            layouts: List[Dict[Any, Tuple[float, float]]] = []
+            # The first part is fixed to remove the row-zero/row-one mirror.
+            for mask in range(1 << max(0, len(ordered) - 1)):
+                shelves = [[], []]
+                shelves[0].append(ordered[0])
+                for pos, item in enumerate(ordered[1:]):
+                    shelves[(mask >> pos) & 1].append(item)
+                shelf_widths = [
+                    max((safe_number(row.get('Breite_mm')) for _, row in shelf), default=0.0)
+                    for shelf in shelves
+                ]
+                if sum(shelf_widths) > platform_width + 0.1:
+                    continue
+                shelf_lengths = [
+                    sum(safe_number(row.get('Länge_mm')) for _, row in shelf)
+                    for shelf in shelves
+                ]
+                span = max(shelf_lengths)
+                if span > eff_len + 0.1:
+                    continue
+                # Center the complete rectangular shelf group, not each row.
+                x0 = (eff_len - span) / 2.0
+                layout: Dict[Any, Tuple[float, float]] = {}
+                y0 = 0.0
+                for shelf_no, shelf in enumerate(shelves):
+                    cursor = x0
+                    for idx, row in shelf:
+                        layout[idx] = (round(cursor, 1), round(y0, 1))
+                        cursor += safe_number(row.get('Länge_mm'))
+                    y0 += shelf_widths[shelf_no]
+                layouts.append(layout)
+            return layouts
+
+        # A one-at-a-time move cannot release the interlocking parts of two
+        # neighbouring layers.  Before greedy compaction, try a bounded atomic
+        # move: select compatible nearby upper-layer loads, pack them as up to
+        # two variable-width shelves on one lower Z, and validate the *whole*
+        # resulting state.  Nothing about the units themselves (including
+        # order/rank, rotation, trips, or platform limits) is changed.
+        for _atomic_attempt in range(min(4, max(1, max_moves_per_platform))):
+            current = result.loc[_real_mask(result, pname)].copy()
+            if len(current) < 2:
+                break
+            state = init_platform_state(prow, base_z, safe_number(prow.get('Einlage_zwischen_Lagen_mm'), 0.0), 0.0)
+            state['placements'] = result[result['Pritsche'].astype(str).eq(pname)].to_dict('records')
+            ratios = {
+                idx: _support_area_ratio_for_candidate(
+                    state, row['X_mm'], row['Y_mm'], row['Z_mm'], row['Länge_mm'], row['Breite_mm']
+                )
+                for idx, row in current.iterrows()
+            }
+            eff_len = (
+                safe_number(prow.get('Länge_mm'), 0.0)
+                + safe_number(prow.get('Überhang_vorne_mm'), 0.0)
+                + safe_number(prow.get('Überhang_hinten_mm'), 0.0)
+            )
+            platform_width = safe_number(prow.get('Breite_mm'), 0.0)
+            target_zs = {base_z}
+            target_zs.update(
+                safe_number(row['Z_mm']) + safe_number(row['Höhe_mm'])
+                for _, row in current.iterrows()
+            )
+            atomic_best = None
+            current_z_sum = float(current['Z_mm'].sum())
+            current_top = float((current['Z_mm'] + current['Höhe_mm']).max())
+            for target_z in sorted(target_zs):
+                above = current[current['Z_mm'] > target_z + 1.0]
+                if len(above) < 2:
+                    continue
+                # Only the first two occupied levels above the target are
+                # considered adjacent.  This bounds the search and avoids
+                # pulling a remote stack through an intervening layer.
+                source_zs = sorted(above['Z_mm'].round(1).unique())[:2]
+                pool = above[above['Z_mm'].round(1).isin(source_zs)].sort_values(
+                    ['Z_mm'], kind='stable'
+                )
+                if fixed_parent_ids and 'Einheit_ID' in pool.columns:
+                    pool = pool[~pool['Einheit_ID'].astype(str).isin(fixed_parent_ids)]
+                if len(pool) < 2:
+                    continue
+                pool = pool.head(8)  # 2^7 row assignments remain inexpensive.
+                group_sets: List[Tuple[Any, ...]] = []
+                pool_indices = list(pool.index)
+                # Full adjacent layers are the useful normal case (e.g. 3x2).
+                group_sets.append(tuple(pool_indices))
+                # Also consider contiguous subsequences; these handle an
+                # unrelated unit sharing the source layer without changing it.
+                for size in range(min(6, len(pool_indices)), 1, -1):
+                    for start in range(0, len(pool_indices) - size + 1):
+                        group_sets.append(tuple(pool_indices[start:start + size]))
+                seen_groups = set()
+                for group_indices in group_sets:
+                    if group_indices in seen_groups:
+                        continue
+                    seen_groups.add(group_indices)
+                    group = pool.loc[list(group_indices)]
+                    if not (group['Z_mm'] > target_z + 1.0).all():
+                        continue
+                    for layout in _atomic_shelf_layouts(group, eff_len, platform_width):
+                        candidate = result.copy()
+                        for idx, (x, y) in layout.items():
+                            candidate.loc[idx, ['X_mm', 'Y_mm', 'Z_mm']] = [x, y, round(target_z, 1)]
+                        candidate = _sync_planned_support_rows_to_load(candidate)
+                        if not _valid(candidate, ratios, group_indices):
+                            continue
+                        candidate_current = candidate.loc[_real_mask(candidate, pname)]
+                        new_top = float((candidate_current['Z_mm'] + candidate_current['Höhe_mm']).max())
+                        new_z_sum = float(candidate_current['Z_mm'].sum())
+                        if new_top > current_top + 0.1 or new_z_sum >= current_z_sum - 1.0:
+                            continue
+                        new_cog = _load_center_of_gravity_values_for_platform(candidate, prow)
+                        if (abs(safe_number(new_cog.get('Schwerpunkt_Abstand_X_mm'), 0.0)) > accepted_cog_limit[0] + 0.1
+                                or abs(safe_number(new_cog.get('Schwerpunkt_Abstand_Y_mm'), 0.0)) > accepted_cog_limit[1] + 0.1):
+                            continue
+                        score = (new_top, new_z_sum, len(group_indices))
+                        if atomic_best is None or score < atomic_best[0]:
+                            atomic_best = (score, candidate, group_indices)
+            if atomic_best is None:
+                break
+            _, result, moved_group = atomic_best
+            if 'Ebene' in result.columns:
+                for moved in moved_group:
+                    value = str(result.loc[moved, 'Ebene'])
+                    if 'atomar verdichtet' not in value:
+                        result.loc[moved, 'Ebene'] = f'{value} / atomar verdichtet'
 
         for _ in range(max_moves_per_platform):
             current = result.loc[_real_mask(result, pname)].copy()
@@ -4655,6 +4834,8 @@ def compact_placements_conservatively(
             ratios = {i: _support_area_ratio_for_candidate(state, r['X_mm'], r['Y_mm'], r['Z_mm'], r['Länge_mm'], r['Breite_mm']) for i, r in current.iterrows()}
             best = None
             for idx, row in current.sort_values('Z_mm', ascending=False, kind='stable').iterrows():
+                if str(row.get('Einheit_ID', '')) in fixed_parent_ids:
+                    continue
                 others = current.drop(index=idx)
                 # Die eigene Ebene erlaubt zusätzlich echtes 2D-Nachrücken
                 # (hintereinander oder nebeneinander), auch ohne Absenkung.
