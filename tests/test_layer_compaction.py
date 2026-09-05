@@ -65,7 +65,7 @@ def f02_groups_37_to_48() -> pd.DataFrame:
 
 
 def atomic_six_part_group() -> pd.DataFrame:
-    """Two adjacent source layers which only fit when moved together."""
+    """Real-F02-shaped topology: target plus two adjacent source levels."""
     rows = []
     dimensions = [(3025.0, 1200.0)] * 5 + [(3003.0, 952.0)]
     for offset, (length, width) in enumerate(dimensions):
@@ -75,7 +75,9 @@ def atomic_six_part_group() -> pd.DataFrame:
             'Typ': 'Bund',
             'X_mm': (offset % 3) * 3025.0,
             'Y_mm': 0.0,
-            'Z_mm': 280.0 if offset < 3 else 480.0,
+            # Two parts are already on the target level.  The regression is
+            # only solved when they are shuffled with both upper levels.
+            'Z_mm': 80.0 if offset < 2 else (280.0 if offset < 4 else 480.0),
             'Länge_mm': length,
             'Breite_mm': width,
             'Höhe_mm': 200.0,
@@ -84,6 +86,34 @@ def atomic_six_part_group() -> pd.DataFrame:
             'Logische_Reihenfolge_im_Block': offset + 1,
         })
     return pd.DataFrame(rows)
+
+
+def f02_side_by_side_release_group() -> pd.DataFrame:
+    rows = []
+    for number, y, z in [(39, 0.0, 80.0), (42, 1200.0, 80.0), (38, 600.0, 280.0)]:
+        rows.append({
+            'Pritsche': 'F02 Anhänger',
+            'Einheit_ID': f'BE{number}',
+            'Typ': 'Bund',
+            'X_mm': 2000.0,
+            'Y_mm': y,
+            'Z_mm': z,
+            'Länge_mm': 1000.0,
+            'Breite_mm': 600.0,
+            'Höhe_mm': 200.0,
+            'Gewicht_kg': 100.0,
+            'Ebene': 'F02 Freigabe',
+            'Logische_Reihenfolge_im_Block': number,
+        })
+    support = {
+        **rows[0],
+        'Einheit_ID': 'AUFLAGER-BE39',
+        'Typ': 'Unterbau',
+        'Auflager_fuer': 'BE39',
+        'Z_mm': 0.0,
+        'Höhe_mm': 80.0,
+    }
+    return pd.DataFrame(rows + [support])
 
 
 class LayerCompactionTest(unittest.TestCase):
@@ -103,6 +133,34 @@ class LayerCompactionTest(unittest.TestCase):
             before['Logische_Reihenfolge_im_Block'].tolist(),
             after['Logische_Reihenfolge_im_Block'].tolist(),
         )
+        self.assertLessEqual(
+            abs(after_cog['Schwerpunkt_Abstand_X_mm']),
+            abs(before_cog['Schwerpunkt_Abstand_X_mm']) + 1.0,
+        )
+        self.assertLessEqual(
+            abs(after_cog['Schwerpunkt_Abstand_Y_mm']),
+            abs(before_cog['Schwerpunkt_Abstand_Y_mm']) + 1.0,
+        )
+
+    def test_f02_side_by_side_release_keeps_attached_support_and_lowers_38(self):
+        platform = f02_platform()
+        before = f02_side_by_side_release_group()
+        before_cog = app._load_center_of_gravity_values_for_platform(before, platform.iloc[0])
+
+        after = app.compact_placements_conservatively(before, platform)
+        after_cog = app._load_center_of_gravity_values_for_platform(after, platform.iloc[0])
+        row_38 = after.loc[after['Einheit_ID'].eq('BE38')].iloc[0]
+        row_39 = after.loc[after['Einheit_ID'].eq('BE39')].iloc[0]
+        row_42 = after.loc[after['Einheit_ID'].eq('BE42')].iloc[0]
+        support = after.loc[after['Einheit_ID'].eq('AUFLAGER-BE39')].iloc[0]
+
+        self.assertEqual(80.0, float(row_38['Z_mm']))
+        self.assertEqual(float(row_39['Z_mm']), float(row_42['Z_mm']))
+        self.assertLessEqual(float(row_39['Y_mm']) + float(row_39['Breite_mm']), float(row_42['Y_mm']))
+        self.assertFalse(app._boxes_overlap_3d(app._row_box_values(row_39), app._row_box_values(support), tol=1.0))
+        self.assertEqual(0, len(app.find_geometry_conflicts(
+            after[after['Typ'].eq('Bund')], platform
+        )))
         self.assertLessEqual(
             abs(after_cog['Schwerpunkt_Abstand_X_mm']),
             abs(before_cog['Schwerpunkt_Abstand_X_mm']) + 1.0,

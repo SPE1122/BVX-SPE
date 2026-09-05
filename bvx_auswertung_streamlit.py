@@ -22,6 +22,7 @@ import math
 import io
 import base64
 import copy
+import itertools
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Tuple
 from collections import Counter
@@ -4767,18 +4768,30 @@ def compact_placements_conservatively(
             current_z_sum = float(current['Z_mm'].sum())
             current_top = float((current['Z_mm'] + current['Höhe_mm']).max())
             for target_z in sorted(target_zs):
-                above = current[current['Z_mm'] > target_z + 1.0]
+                movable = current
+                if fixed_parent_ids and 'Einheit_ID' in movable.columns:
+                    movable = movable[~movable['Einheit_ID'].astype(str).isin(fixed_parent_ids)]
+                # Repack the parts already on the target height together with
+                # the adjacent upper levels.  Excluding these target-level
+                # parts was precisely what prevented the F02 43--48 group
+                # from releasing enough lateral space for its final 3x2
+                # arrangement.
+                on_target = movable[(movable['Z_mm'] - target_z).abs() <= 1.0]
+                above = movable[movable['Z_mm'] > target_z + 1.0]
                 if len(above) < 2:
                     continue
                 # Only the first two occupied levels above the target are
                 # considered adjacent.  This bounds the search and avoids
                 # pulling a remote stack through an intervening layer.
                 source_zs = sorted(above['Z_mm'].round(1).unique())[:2]
-                pool = above[above['Z_mm'].round(1).isin(source_zs)].sort_values(
-                    ['Z_mm'], kind='stable'
+                pool = pd.concat([
+                    on_target,
+                    above[above['Z_mm'].round(1).isin(source_zs)],
+                ]).sort_values(
+                    ['Logische_Reihenfolge_im_Block', 'Z_mm']
+                    if 'Logische_Reihenfolge_im_Block' in current.columns else ['Z_mm'],
+                    kind='stable',
                 )
-                if fixed_parent_ids and 'Einheit_ID' in pool.columns:
-                    pool = pool[~pool['Einheit_ID'].astype(str).isin(fixed_parent_ids)]
                 if len(pool) < 2:
                     continue
                 pool = pool.head(8)  # 2^7 row assignments remain inexpensive.
@@ -4786,18 +4799,25 @@ def compact_placements_conservatively(
                 pool_indices = list(pool.index)
                 # Full adjacent layers are the useful normal case (e.g. 3x2).
                 group_sets.append(tuple(pool_indices))
-                # Also consider contiguous subsequences; these handle an
-                # unrelated unit sharing the source layer without changing it.
-                for size in range(min(6, len(pool_indices)), 1, -1):
-                    for start in range(0, len(pool_indices) - size + 1):
-                        group_sets.append(tuple(pool_indices[start:start + size]))
+                # When the complete local pool cannot fit, use bounded true
+                # subsets (not merely contiguous dataframe rows).  This
+                # allows an unrelated part to stay where it is while retaining
+                # exhaustive validation for the selected atomic group.
+                if not _atomic_shelf_layouts(pool, eff_len, platform_width):
+                    for size in range(min(6, len(pool_indices)), 1, -1):
+                        for group_indices in itertools.combinations(pool_indices, size):
+                            group_sets.append(group_indices)
+                            if len(group_sets) >= 65:
+                                break
+                        if len(group_sets) >= 65:
+                            break
                 seen_groups = set()
                 for group_indices in group_sets:
                     if group_indices in seen_groups:
                         continue
                     seen_groups.add(group_indices)
                     group = pool.loc[list(group_indices)]
-                    if not (group['Z_mm'] > target_z + 1.0).all():
+                    if not (group['Z_mm'] >= target_z - 1.0).all() or not (group['Z_mm'] > target_z + 1.0).any():
                         continue
                     for layout in _atomic_shelf_layouts(group, eff_len, platform_width):
                         candidate = result.copy()
