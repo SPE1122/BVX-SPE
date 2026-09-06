@@ -5246,11 +5246,176 @@ def compact_placements_conservatively(
                         result.loc[moved, 'Ebene'] = f'{value} / atomar verdichtet'
 
         # Vier aufeinanderfolgende, gleich hohe Einheiten können eine sichere
+        # Bounded local multi-layer recombination replaces the former
+        # shape-specific cross-layer and single-side-strip stages.  It uses
+        # only logical rank and geometry: five consecutive equal-height units
+        # are partitioned into a lower lateral three-pack and an upper lateral
+        # two-pack, then their dependent chain is settled atomically.
+        current = result.loc[_real_mask(result, pname)].copy()
+        if 'Logische_Reihenfolge_im_Block' in current.columns and len(current) >= 5:
+            current_top = float((current['Z_mm'] + current['Höhe_mm']).max())
+            current_z_sum = float(current['Z_mm'].sum())
+            ranked = current.assign(_rank=pd.to_numeric(
+                current['Logische_Reihenfolge_im_Block'], errors='coerce'
+            )).dropna(subset=['_rank']).sort_values('_rank', kind='stable')
+            state = init_platform_state(prow, base_z, safe_number(
+                prow.get('Einlage_zwischen_Lagen_mm'), 0.0
+            ), 0.0)
+            state['placements'] = result[result['Pritsche'].astype(str).eq(pname)].to_dict('records')
+            ratios = {idx: _support_area_ratio_for_candidate(
+                state, row['X_mm'], row['Y_mm'], row['Z_mm'], row['Länge_mm'], row['Breite_mm']
+            ) for idx, row in current.iterrows()}
+            local_best = None
+            ranked_indices = list(ranked.index)
+            for pos in range(len(ranked_indices) - 4):
+                window_indices = ranked_indices[pos:pos + 5]
+                window = current.loc[window_indices]
+                ranks = pd.to_numeric(window['Logische_Reihenfolge_im_Block'], errors='coerce').tolist()
+                heights = pd.to_numeric(window['Höhe_mm'], errors='coerce')
+                if (any(abs(ranks[i + 1] - ranks[i] - 1.0) > 0.1 for i in range(4))
+                        or heights.isna().any() or heights.max() - heights.min() > 1.0):
+                    continue
+                height = float(heights.iloc[0])
+                target_z = float(window['Z_mm'].min())
+                if target_z < base_z - 0.1:
+                    continue
+                # Die transitive Abhängigkeit hängt vom ursprünglichen lokalen
+                # Fenster ab, nicht von einer einzelnen Layoutvariante.
+                window_dependents = set()
+                frontier = set(window_indices)
+                while frontier:
+                    next_frontier = set()
+                    for lower_idx in frontier:
+                        lower = current.loc[lower_idx]
+                        for upper_idx, upper in current.iterrows():
+                            if upper_idx in window_indices or upper_idx in window_dependents:
+                                continue
+                            if (
+                                safe_number(upper.get('Z_mm'))
+                                >= safe_number(lower.get('Z_mm'))
+                                + safe_number(lower.get('Höhe_mm')) - 1.0
+                                and _xy_overlap(upper, lower)
+                            ):
+                                window_dependents.add(upper_idx)
+                                next_frontier.add(upper_idx)
+                    frontier = next_frontier
+                for lower_indices in itertools.combinations(window_indices, 3):
+                    upper_indices = tuple(idx for idx in window_indices if idx not in lower_indices)
+                    if (sum(safe_number(current.loc[idx].get('Breite_mm')) for idx in lower_indices) > platform_width + 0.1
+                            or sum(safe_number(current.loc[idx].get('Breite_mm')) for idx in upper_indices) > platform_width + 0.1):
+                        continue
+                    # Querreihen folgen der logischen Reihenfolge oder ihrer
+                    # vollständigen Spiegelung. Weitere Permutationen schaffen
+                    # keine zusätzliche Entladereihenfolge, vervielfachen aber
+                    # die teure Tragkettenprüfung.
+                    lower_sorted = tuple(sorted(
+                        lower_indices,
+                        key=lambda idx: safe_number(current.loc[idx].get(
+                            'Logische_Reihenfolge_im_Block'
+                        )),
+                    ))
+                    lower_orders = list(dict.fromkeys(
+                        (lower_sorted, tuple(reversed(lower_sorted)))
+                    ))
+                    upper_sorted = tuple(sorted(
+                        upper_indices,
+                        key=lambda idx: safe_number(current.loc[idx].get(
+                            'Logische_Reihenfolge_im_Block'
+                        )),
+                    ))
+                    upper_orders = list(dict.fromkeys(
+                        (upper_sorted, tuple(reversed(upper_sorted)))
+                    ))
+                    for lower_order in lower_orders:
+                        lower_y, cursor = {}, (platform_width - sum(
+                            safe_number(current.loc[idx].get('Breite_mm')) for idx in lower_order
+                        )) / 2.0
+                        for idx in lower_order:
+                            lower_y[idx] = round(cursor, 1)
+                            cursor += safe_number(current.loc[idx].get('Breite_mm'))
+                        for upper_order in upper_orders:
+                            upper_y, cursor = {}, (platform_width - sum(
+                                safe_number(current.loc[idx].get('Breite_mm')) for idx in upper_order
+                            )) / 2.0
+                            for idx in upper_order:
+                                upper_y[idx] = round(cursor, 1)
+                                cursor += safe_number(current.loc[idx].get('Breite_mm'))
+                            x_options = []
+                            for idx in window_indices:
+                                row = current.loc[idx]
+                                max_x = eff_len - safe_number(row.get('Länge_mm'))
+                                if max_x < -0.1:
+                                    x_options = []
+                                    break
+                                values = {safe_number(row.get('X_mm'))}
+                                if idx in upper_indices:
+                                    values.update({
+                                        platform_center_x - safe_number(row.get('Länge_mm')) / 2.0,
+                                        max_x,  # furthest safe forward position
+                                    })
+                                normalized_x = sorted({
+                                    round(max(0.0, min(max_x, value)), 1) for value in values
+                                }, key=lambda value: (abs(value - safe_number(row.get('X_mm'))), -value))
+                                x_options.append(normalized_x)
+                            if not x_options:
+                                continue
+                            for x_values in itertools.product(*x_options):
+                                candidate = result.copy()
+                                for idx, x in zip(window_indices, x_values):
+                                    y = lower_y[idx] if idx in lower_y else upper_y[idx]
+                                    z = target_z if idx in lower_y else target_z + height
+                                    candidate.loc[idx, ['X_mm', 'Y_mm', 'Z_mm']] = [x, y, round(z, 1)]
+                                moved_indices = set(window_indices)
+                                # Transitive dependent rows follow their new
+                                # supports bottom-up; unrelated rows do not.
+                                for upper_idx in sorted(
+                                    window_dependents,
+                                    key=lambda idx: safe_number(current.loc[idx].get('Z_mm')),
+                                ):
+                                    old_z = safe_number(current.loc[upper_idx].get('Z_mm'))
+                                    upper = candidate.loc[upper_idx]
+                                    tops = [
+                                        safe_number(lower.get('Z_mm')) + safe_number(lower.get('Höhe_mm'))
+                                        for lower_idx, lower in candidate.loc[_real_mask(candidate, pname)].iterrows()
+                                        if lower_idx != upper_idx
+                                        and safe_number(current.loc[lower_idx].get('Z_mm')) < old_z - 1.0
+                                        and _xy_overlap(upper, lower)
+                                        and safe_number(lower.get('Z_mm')) + safe_number(lower.get('Höhe_mm')) <= old_z + 1.0
+                                    ]
+                                    if tops:
+                                        candidate.loc[upper_idx, 'Z_mm'] = round(max(tops), 1)
+                                        moved_indices.add(upper_idx)
+                                if not _valid(candidate, ratios, moved_indices):
+                                    continue
+                                candidate_current = candidate.loc[_real_mask(candidate, pname)]
+                                new_top = float((candidate_current['Z_mm'] + candidate_current['Höhe_mm']).max())
+                                new_sum = float(candidate_current['Z_mm'].sum())
+                                if new_top > current_top + 0.1 or new_sum >= current_z_sum - 1.0:
+                                    continue
+                                new_cog = _load_center_of_gravity_values_for_platform(candidate, prow)
+                                if (abs(safe_number(new_cog.get('Schwerpunkt_Abstand_X_mm'))) > accepted_cog_limit[0] + 1.0
+                                        or abs(safe_number(new_cog.get('Schwerpunkt_Abstand_Y_mm'))) > accepted_cog_limit[1] + 1.0):
+                                    continue
+                                x0, x1 = float(candidate_current['X_mm'].min()), float((candidate_current['X_mm'] + candidate_current['Länge_mm']).max())
+                                overhang = abs(x0 - safe_number(prow.get('Überhang_hinten_mm'))) + abs((eff_len - x1) - safe_number(prow.get('Überhang_vorne_mm')))
+                                score = (new_top, new_sum, abs(safe_number(new_cog.get('Schwerpunkt_Abstand_X_mm'))) + abs(safe_number(new_cog.get('Schwerpunkt_Abstand_Y_mm'))), overhang)
+                                if local_best is None or score < local_best[0]:
+                                    local_best = (score, candidate, moved_indices)
+            if local_best is not None:
+                _, result, moved_indices = local_best
+                if 'Ebene' in result.columns:
+                    for moved in moved_indices:
+                        value = str(result.loc[moved, 'Ebene'])
+                        if 'lokal mehrlagig verdichtet' not in value:
+                            result.loc[moved, 'Ebene'] = f'{value} / lokal mehrlagig verdichtet'
+
+        # Legacy shape-specific stages are intentionally disabled: the bounded
+        # five-unit search above is the sole cross-layer recombination path.
         # Querlagen-Kaskade bilden: schmal / breit / breit / schmal. Die erste,
         # dritte und vierte Einheit teilen die tiefere Lage; die zweite liegt
         # darüber ausschließlich auf den logisch späteren Einheiten.
         current = result.loc[_real_mask(result, pname)].copy()
-        if 'Logische_Reihenfolge_im_Block' in current.columns and len(current) >= 4:
+        if False and 'Logische_Reihenfolge_im_Block' in current.columns and len(current) >= 4:
             ranked = current.assign(
                 _rank=pd.to_numeric(
                     current['Logische_Reihenfolge_im_Block'], errors='coerce'
@@ -5404,7 +5569,7 @@ def compact_placements_conservatively(
         # Seitenstreifen einer tieferen Lage nutzen. Die vorhandene Grundgruppe
         # wird dabei nicht neu gepackt; verschoben wird genau eine vollständige
         # Verladeeinheit.
-        for _side_pair_attempt in range(min(4, max(1, max_moves_per_platform))):
+        for _side_pair_attempt in range(0):
             current = result.loc[_real_mask(result, pname)].copy()
             state = init_platform_state(
                 prow, base_z,

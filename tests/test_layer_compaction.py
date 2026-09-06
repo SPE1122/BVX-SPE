@@ -392,14 +392,22 @@ class LayerCompactionTest(unittest.TestCase):
         after = app.compact_placements_conservatively(before, platform)
 
         row_39 = after.loc[after['Bauteile'].eq('39')].iloc[0]
+        row_38 = after.loc[after['Bauteile'].eq('38')].iloc[0]
         row_40 = after.loc[after['Bauteile'].eq('40')].iloc[0]
+        row_37 = after.loc[after['Bauteile'].eq('37')].iloc[0]
         row_42 = after.loc[after['Bauteile'].eq('42')].iloc[0]
         self.assertEqual(float(row_39['Z_mm']), float(row_42['Z_mm']))
+        self.assertEqual(float(row_39['Z_mm'] + row_39['Höhe_mm']), float(row_38['Z_mm']))
+        self.assertEqual(float(row_38['Z_mm']), float(row_40['Z_mm']))
         self.assertTrue(
-            float(row_39['Y_mm']) + float(row_39['Breite_mm']) <= float(row_42['Y_mm'])
-            or float(row_42['Y_mm']) + float(row_42['Breite_mm']) <= float(row_39['Y_mm'])
+            float(row_38['Y_mm']) + float(row_38['Breite_mm']) <= float(row_40['Y_mm'])
+            or float(row_40['Y_mm']) + float(row_40['Breite_mm']) <= float(row_38['Y_mm'])
         )
         self.assertGreater(float(row_40['X_mm']), old_40_x)
+        self.assertLess(
+            float(row_37['Z_mm']),
+            float(before.loc[before['Bauteile'].eq('37'), 'Z_mm'].iloc[0]),
+        )
         self.assertEqual(0, len(app.find_geometry_conflicts(after, platform)))
 
     def test_f02_side_by_side_release_keeps_attached_support_and_lowers_38(self):
