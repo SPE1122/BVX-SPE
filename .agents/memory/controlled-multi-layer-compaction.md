@@ -69,6 +69,12 @@ Only an accepted homogeneous terminal six-unit 3×2 base is immutable. A complet
 
 **How to apply:** Distinguish terminal bindings from ordinary atomic bindings. Reject a five-window only when it would partially intersect a terminal binding; otherwise replace all touched provisional bindings with the validated complete five-unit binding.
 
+When several overlapping five-unit windows are valid in one equal-height logical run, prioritize the latest logical window so the lowest shelf is fixed before rebuilding earlier units above it.
+
+**Why:** Scoring height reduction first could select an earlier overlapping window in 31–42, leaving the last middle member high even though the intended terminal-adjacent 38–42 shelf was geometrically valid.
+
+**How to apply:** Put descending window rank before height and displacement criteria in the complete-window score. Derive this solely from logical order, never fixed part numbers.
+
 Bound atomic compaction by a small per-platform time budget and a short prioritized candidate list. If the budget expires, retain the last fully validated state rather than continuing exhaustive subset search or accepting an unchecked layout.
 
 **Why:** Independent shelf starts create many combinatorial variants; exhaustive validation can turn an otherwise short app calculation into a run lasting more than 16 minutes.

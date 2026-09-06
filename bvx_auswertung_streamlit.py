@@ -5481,7 +5481,17 @@ def compact_placements_conservatively(
                                         ) <= 0.1
                                     )
                                 score = (
-                                    new_top, new_sum, 0 if narrow_adjacent else 1,
+                                    # Build the lowest logical shelf first.
+                                    # Several overlapping five-unit windows can
+                                    # all be valid in a long equal-height run;
+                                    # preferring the latest rank makes 38--42
+                                    # the base shelf before 31--37 is rebuilt
+                                    # above it, instead of consuming an earlier
+                                    # window and leaving its last member high.
+                                    -max(float(rank) for rank in ranks),
+                                    new_top,
+                                    new_sum,
+                                    0 if narrow_adjacent else 1,
                                     abs(safe_number(new_cog.get('Schwerpunkt_Abstand_X_mm')))
                                     + abs(safe_number(new_cog.get('Schwerpunkt_Abstand_Y_mm'))),
                                     overhang,
