@@ -45,6 +45,12 @@ Compact mode must atomically rebuild an upper run of single rows into the fewest
 
 **How to apply:** Preserve logical top-down order. With an odd count, first try the earliest unloading unit as the top singleton and pair the even remainder below it. Install all rows atomically, then validate support, collisions, height, bounds, and total-load lateral balance.
 
+An upper rest group must end at the first gap in its physical part-number sequence; unrelated higher parts must not change whether the group has an odd or even member count.
+
+**Why:** Collecting every part above the same anchor can absorb a later part from another stack, turning a seven-part run into an apparent eight-part run and defeating the intended top singleton.
+
+**How to apply:** Derive the ordered numeric sequence from the displayed part identifiers when available and stop the atomic candidate at the first non-consecutive number.
+
 Bound atomic compaction by a small per-platform time budget and a short prioritized candidate list. If the budget expires, retain the last fully validated state rather than continuing exhaustive subset search or accepting an unchecked layout.
 
 **Why:** Independent shelf starts create many combinatorial variants; exhaustive validation can turn an otherwise short app calculation into a run lasting more than 16 minutes.

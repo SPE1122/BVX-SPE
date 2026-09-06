@@ -341,6 +341,21 @@ class LayerCompactionTest(unittest.TestCase):
             }
             for number, y, z, width in specs
         ])
+        placements = pd.concat([
+            placements,
+            pd.DataFrame([{
+                'Pritsche': 'F02', 'Einheit_ID': '39', 'Bauteile': '39',
+                'Typ': 'Einzelteil', 'X_mm': 9500.0, 'Y_mm': 0.0, 'Z_mm': 1680.0,
+                'Länge_mm': 400.0, 'Breite_mm': 1200.0, 'Höhe_mm': 280.0,
+                'Gewicht_kg': 400.0, 'Logische_Reihenfolge_im_Block': 9,
+            }]),
+        ], ignore_index=True)
+        placements.loc[
+            placements['Bauteile'].isin(['38', '40']), 'Länge_mm'
+        ] = 10000.0
+        original_39 = placements.loc[
+            placements['Bauteile'].eq('39'), ['X_mm', 'Y_mm', 'Z_mm']
+        ].iloc[0].copy()
 
         promoted = app.promote_early_narrow_fillers_to_top(placements, platform)
         after = app.repack_upper_ranked_rows_compactly(promoted, platform)
@@ -352,9 +367,21 @@ class LayerCompactionTest(unittest.TestCase):
         self.assertEqual(float(by_part.loc['36', 'Z_mm']), float(by_part.loc['37', 'Z_mm']))
         self.assertGreater(float(by_part.loc['32', 'Z_mm']), float(by_part.loc['34', 'Z_mm']))
         self.assertGreater(float(by_part.loc['34', 'Z_mm']), float(by_part.loc['36', 'Z_mm']))
+        pd.testing.assert_series_equal(
+            by_part.loc['39', ['X_mm', 'Y_mm', 'Z_mm']],
+            original_39,
+            check_names=False,
+        )
+        compacted_parts = after['Bauteile'].isin([str(number) for number in range(31, 38)])
+        original_compacted_parts = placements['Bauteile'].isin(
+            [str(number) for number in range(31, 38)]
+        )
         self.assertLess(
-            float((after['Z_mm'] + after['Höhe_mm']).max()),
-            float((placements['Z_mm'] + placements['Höhe_mm']).max()),
+            float((after.loc[compacted_parts, 'Z_mm'] + after.loc[compacted_parts, 'Höhe_mm']).max()),
+            float((
+                placements.loc[original_compacted_parts, 'Z_mm']
+                + placements.loc[original_compacted_parts, 'Höhe_mm']
+            ).max()),
         )
         self.assertTrue(app.find_geometry_conflicts(after, platform).empty)
         _underbau, warnings = app.calculate_underbau_rows_for_platform(

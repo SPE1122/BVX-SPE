@@ -6291,7 +6291,22 @@ def repack_upper_ranked_rows_compactly(
         )
         if upper['_rank'].isna().any():
             continue
-        upper = upper.sort_values('_rank', kind='stable')
+        upper['_sequence_number'] = upper.apply(_fallback_rank, axis=1)
+        if upper['_sequence_number'].notna().all():
+            upper = upper.sort_values('_sequence_number', kind='stable')
+            consecutive_indices: List[Any] = []
+            previous_number: Optional[float] = None
+            for idx, row in upper.iterrows():
+                number = float(row['_sequence_number'])
+                if previous_number is not None and abs(number - previous_number - 1.0) > 0.01:
+                    break
+                consecutive_indices.append(idx)
+                previous_number = number
+            upper = upper.loc[consecutive_indices]
+            if len(upper) < 4:
+                continue
+        else:
+            upper = upper.sort_values('_rank', kind='stable')
 
         # Top-down order remains logical. For an odd upper run, prefer the
         # earliest unloading unit as the top singleton. The remaining even
