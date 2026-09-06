@@ -15,6 +15,12 @@ When two narrow units from adjacent layers should share a level, evaluate the co
 
 **How to apply:** Detect consecutive, equal-height local windows by rank and dimensions rather than part numbers. Prefer logical order plus its mirror over exhaustive lateral permutations, and vary longitudinal positions mainly for upper loads. Revalidate every changed support at the configured minimum; lateral center-of-gravity tradeoffs must stay bounded and longitudinal balance must not worsen.
 
+For a five-unit 3+2 window, equal height and non-overlap are not enough when the objective is to combine two narrow units. Prefer width-driven lateral orders that put the two narrowest compatible units in direct edge contact; a wide unit between them does not satisfy that objective.
+
+**Why:** A geometrically valid regression once placed the narrow units on the same Z level but separated them by a wide unit, so the exported end view still contradicted the requested arrangement.
+
+**How to apply:** Assert direct Y-edge contact in the regression and inspect the rendered front/back PDF view independently of coordinate expectations. For a terminal 3x2 base, prefer a common longitudinal position near the physical deck center so its own overhang is shared front/rear, but accept the nearest fully supported position rather than forcing exact symmetry.
+
 Bound atomic compaction by a small per-platform time budget and a short prioritized candidate list. If the budget expires, retain the last fully validated state rather than continuing exhaustive subset search or accepting an unchecked layout.
 
 **Why:** Independent shelf starts create many combinatorial variants; exhaustive validation can turn an otherwise short app calculation into a run lasting more than 16 minutes.

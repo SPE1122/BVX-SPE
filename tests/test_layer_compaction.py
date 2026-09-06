@@ -394,9 +394,20 @@ class LayerCompactionTest(unittest.TestCase):
         row_39 = after.loc[after['Bauteile'].eq('39')].iloc[0]
         row_38 = after.loc[after['Bauteile'].eq('38')].iloc[0]
         row_40 = after.loc[after['Bauteile'].eq('40')].iloc[0]
+        row_41 = after.loc[after['Bauteile'].eq('41')].iloc[0]
         row_37 = after.loc[after['Bauteile'].eq('37')].iloc[0]
         row_42 = after.loc[after['Bauteile'].eq('42')].iloc[0]
         self.assertEqual(float(row_39['Z_mm']), float(row_42['Z_mm']))
+        self.assertTrue(
+            abs(float(row_39['Y_mm'] + row_39['Breite_mm']) - float(row_42['Y_mm'])) <= 0.1
+            or abs(float(row_42['Y_mm'] + row_42['Breite_mm']) - float(row_39['Y_mm'])) <= 0.1
+        )
+        narrow_y0 = min(float(row_39['Y_mm']), float(row_42['Y_mm']))
+        narrow_y1 = max(
+            float(row_39['Y_mm'] + row_39['Breite_mm']),
+            float(row_42['Y_mm'] + row_42['Breite_mm']),
+        )
+        self.assertFalse(narrow_y0 + 0.1 < float(row_41['Y_mm']) < narrow_y1 - 0.1)
         self.assertEqual(float(row_39['Z_mm'] + row_39['Höhe_mm']), float(row_38['Z_mm']))
         self.assertEqual(float(row_38['Z_mm']), float(row_40['Z_mm']))
         self.assertTrue(
@@ -487,6 +498,17 @@ class LayerCompactionTest(unittest.TestCase):
         terminal = after[after['Bauteile'].astype(str).isin([str(n) for n in range(21, 27)])]
         self.assertEqual(6, len(terminal))
         self.assertTrue((terminal['Z_mm'] == 80.0).all())
+        terminal_x0 = float(terminal['X_mm'].min())
+        terminal_x1 = float((terminal['X_mm'] + terminal['Länge_mm']).max())
+        own_rear = terminal_x0 - float(platform.iloc[0]['Überhang_hinten_mm'])
+        own_front = (
+            float(platform.iloc[0]['Länge_mm'])
+            + float(platform.iloc[0]['Überhang_hinten_mm'])
+            + float(platform.iloc[0]['Überhang_vorne_mm'])
+            - terminal_x1
+            - float(platform.iloc[0]['Überhang_vorne_mm'])
+        )
+        self.assertLessEqual(abs(own_rear - own_front), 1.0)
         self.assertEqual(0, len(app.find_geometry_conflicts(after, platform)))
 
     def test_complete_31_to_48_profile_stack_cascades_from_terminal_six_base(self):

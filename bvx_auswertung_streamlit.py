@@ -4934,6 +4934,7 @@ def compact_placements_conservatively(
                 )
                 return (
                     x1 - x0,
+                    abs(((x0 + x1) / 2.0) - target_center_x),
                     abs(new_y_center - old_y_center),
                     -anchor_overlap,
                     displacement,
@@ -5279,6 +5280,10 @@ def compact_placements_conservatively(
                 target_z = float(window['Z_mm'].min())
                 if target_z < base_z - 0.1:
                     continue
+                narrowest_indices = tuple(sorted(
+                    window_indices,
+                    key=lambda idx: safe_number(current.loc[idx].get('Breite_mm')),
+                )[:2])
                 # Die transitive Abhängigkeit hängt vom ursprünglichen lokalen
                 # Fenster ab, nicht von einer einzelnen Layoutvariante.
                 window_dependents = set()
@@ -5317,6 +5322,22 @@ def compact_placements_conservatively(
                     lower_orders = list(dict.fromkeys(
                         (lower_sorted, tuple(reversed(lower_sorted)))
                     ))
+                    # Width-driven lateral candidates ensure the two narrowest
+                    # compatible units are tried directly next to each other,
+                    # including both mirrors, rather than leaving a wide unit
+                    # between them because of logical rank order.
+                    if set(narrowest_indices).issubset(lower_indices):
+                        remaining_idx = next(
+                            idx for idx in lower_indices if idx not in narrowest_indices
+                        )
+                        narrow_a, narrow_b = narrowest_indices
+                        lower_orders.extend([
+                            (narrow_a, narrow_b, remaining_idx),
+                            (narrow_b, narrow_a, remaining_idx),
+                            (remaining_idx, narrow_a, narrow_b),
+                            (remaining_idx, narrow_b, narrow_a),
+                        ])
+                        lower_orders = list(dict.fromkeys(lower_orders))
                     upper_sorted = tuple(sorted(
                         upper_indices,
                         key=lambda idx: safe_number(current.loc[idx].get(
@@ -5398,7 +5419,27 @@ def compact_placements_conservatively(
                                     continue
                                 x0, x1 = float(candidate_current['X_mm'].min()), float((candidate_current['X_mm'] + candidate_current['Länge_mm']).max())
                                 overhang = abs(x0 - safe_number(prow.get('Überhang_hinten_mm'))) + abs((eff_len - x1) - safe_number(prow.get('Überhang_vorne_mm')))
-                                score = (new_top, new_sum, abs(safe_number(new_cog.get('Schwerpunkt_Abstand_X_mm'))) + abs(safe_number(new_cog.get('Schwerpunkt_Abstand_Y_mm'))), overhang)
+                                narrow_adjacent = False
+                                if set(narrowest_indices).issubset(lower_indices):
+                                    narrow_a, narrow_b = narrowest_indices
+                                    narrow_adjacent = (
+                                        abs(
+                                            lower_y[narrow_a]
+                                            + safe_number(current.loc[narrow_a].get('Breite_mm'))
+                                            - lower_y[narrow_b]
+                                        ) <= 0.1
+                                        or abs(
+                                            lower_y[narrow_b]
+                                            + safe_number(current.loc[narrow_b].get('Breite_mm'))
+                                            - lower_y[narrow_a]
+                                        ) <= 0.1
+                                    )
+                                score = (
+                                    new_top, new_sum, 0 if narrow_adjacent else 1,
+                                    abs(safe_number(new_cog.get('Schwerpunkt_Abstand_X_mm')))
+                                    + abs(safe_number(new_cog.get('Schwerpunkt_Abstand_Y_mm'))),
+                                    overhang,
+                                )
                                 if local_best is None or score < local_best[0]:
                                     local_best = (score, candidate, moved_indices)
             if local_best is not None:
