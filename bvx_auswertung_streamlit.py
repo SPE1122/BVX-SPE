@@ -4268,6 +4268,7 @@ def compact_adjacent_loading_layers(
     gap_mm: float = 0.0,
     max_moves_per_platform: int = 40,
     max_candidate_checks_per_platform: int = 800,
+    bundles_only: bool = False,
 ) -> pd.DataFrame:
     """Verdichtet benachbarte Lagen mit vollständiger Sicherheitsprüfung.
 
@@ -4493,6 +4494,8 @@ def compact_adjacent_loading_layers(
             current_z_sum = float(real['Z_mm'].sum())
             best = None
             for idx, row in real.sort_values('Z_mm', ascending=False, kind='stable').iterrows():
+                if bundles_only and str(row.get('Typ', '')).strip() != 'Bund':
+                    continue
                 if str(row.get('Einheit_ID', idx)) in supported_parent_ids:
                     continue
                 old_x, old_y, old_z = (
@@ -4578,6 +4581,7 @@ def compact_placements_conservatively(
     placements_df: pd.DataFrame,
     platforms_df: pd.DataFrame,
     max_moves_per_platform: int = 24,
+    bundles_only: bool = False,
 ) -> pd.DataFrame:
     """Verdichtet nur sichere Lagen: keine neue Entlade-Abhängigkeit oder schlechtere Auflage."""
     if placements_df is None or placements_df.empty or platforms_df is None or platforms_df.empty:
@@ -4702,7 +4706,11 @@ def compact_placements_conservatively(
                 if 'Logische_Reihenfolge_im_Block' not in current.columns:
                     return False
                 for upper_idx, lower_idx in new_edges:
-                    if lower_idx not in moved_indices or upper_idx in moved_indices:
+                    # A terminal-profile cascade moves its dependent upper
+                    # layers in the same transaction.  New support within
+                    # that transaction is safe only when the established
+                    # logical unloading order still runs from upper to lower.
+                    if lower_idx not in moved_indices:
                         return False
                     upper_rank = pd.to_numeric(
                         pd.Series([current.loc[upper_idx, 'Logische_Reihenfolge_im_Block']]),
@@ -4929,6 +4937,32 @@ def compact_placements_conservatively(
             # bleiben bevorzugt erhalten.
             return sorted(layouts, key=_layout_priority)[:64]
 
+        def _terminal_profile_six_group(movable: pd.DataFrame) -> pd.DataFrame:
+            """Return a complete homogeneous terminal six-unit block.
+
+            The last six units of a logical loading block may form a physical
+            3x2 shelf. Looking for that structural pattern instead of concrete
+            part numbers keeps the compaction usable for other projects.
+            """
+            if movable.empty or 'Logische_Reihenfolge_im_Block' not in movable.columns:
+                return pd.DataFrame()
+            ranked = movable.copy()
+            ranked['_terminal_rank'] = pd.to_numeric(
+                ranked['Logische_Reihenfolge_im_Block'], errors='coerce'
+            )
+            ranked = ranked[ranked['_terminal_rank'].notna()].sort_values(
+                '_terminal_rank', kind='stable'
+            )
+            if len(ranked) < 6:
+                return pd.DataFrame()
+            group = ranked.tail(6).drop(columns=['_terminal_rank'])
+            heights = pd.to_numeric(group.get('Höhe_mm'), errors='coerce')
+            if heights.isna().any() or heights.max() - heights.min() > 1.0:
+                return pd.DataFrame()
+            if 'Profil' in group.columns and group['Profil'].astype(str).nunique(dropna=False) != 1:
+                return pd.DataFrame()
+            return group
+
         # A one-at-a-time move cannot release the interlocking parts of two
         # neighbouring layers.  Before greedy compaction, try a bounded atomic
         # move: select compatible nearby upper-layer loads, pack them as up to
@@ -4971,6 +5005,11 @@ def compact_placements_conservatively(
                 if time.monotonic() >= compaction_deadline:
                     break
                 movable = current
+                if bundles_only:
+                    # Im Bundmodus ist der Bund die atomare Verladeeinheit.
+                    # Einzelteile dürfen weder in einen Bundzug geraten noch
+                    # als dessen unvollständiger Rest verschoben werden.
+                    movable = movable[movable.get('Typ', pd.Series('', index=movable.index)).astype(str).eq('Bund')]
                 if fixed_parent_ids and 'Einheit_ID' in movable.columns:
                     # Ein gebundenes Auflager verbietet das Absenken seines
                     # Elternelements, nicht aber eine horizontale Neuordnung
@@ -5011,6 +5050,16 @@ def compact_placements_conservatively(
                     continue
                 pool = pool.head(8)  # 2^7 row assignments remain inexpensive.
                 group_sets: List[Tuple[Any, ...]] = []
+                terminal_group = _terminal_profile_six_group(movable)
+                if (
+                    not terminal_group.empty
+                    and (terminal_group['Z_mm'] >= target_z - 1.0).all()
+                    and (terminal_group['Z_mm'] > target_z + 1.0).any()
+                ):
+                    # Evaluate the complete, homogeneous terminal block before
+                    # generic subsets.  Thus 43--48 (and F01 21--26) remain an
+                    # actual six-unit 3x2 candidate, never a partial bundle.
+                    group_sets.append(tuple(terminal_group.index))
                 pool_indices = list(pool.index)
                 # Den typischen letzten Kaskadenschritt zuerst prüfen:
                 # bestehende Ziellage plus genau ein Teil der nächsthöheren
@@ -5047,7 +5096,11 @@ def compact_placements_conservatively(
                     if group_indices in seen_groups:
                         continue
                     seen_groups.add(group_indices)
-                    group = pool.loc[list(group_indices)]
+                    group = current.loc[list(group_indices)]
+                    is_terminal_profile_group = (
+                        not terminal_group.empty
+                        and set(group_indices) == set(terminal_group.index)
+                    )
                     if 'Logische_Reihenfolge_im_Block' in group.columns:
                         group = group.sort_values(
                             ['Logische_Reihenfolge_im_Block', 'Z_mm'],
@@ -5059,6 +5112,59 @@ def compact_placements_conservatively(
                         candidate = result.copy()
                         for idx, (x, y) in layout.items():
                             candidate.loc[idx, ['X_mm', 'Y_mm', 'Z_mm']] = [x, y, round(target_z, 1)]
+                        moved_indices = set(group_indices)
+                        if is_terminal_profile_group:
+                            # The terminal 43--48 / 21--26 profile shelf is a
+                            # real 3x2 base.  Its former staggered positions
+                            # can carry upper rows only provisionally.  Settle
+                            # every *dependent* upper row in the same atomic
+                            # candidate, so the complete stack is validated as
+                            # a cascade rather than rejecting 43/44 in
+                            # isolation because their old upper loads remain.
+                            dependents = set()
+                            frontier = set(group_indices)
+                            while frontier:
+                                next_frontier = set()
+                                for lower_idx in frontier:
+                                    lower = current.loc[lower_idx]
+                                    for upper_idx, upper in current.iterrows():
+                                        if upper_idx in moved_indices or upper_idx in dependents:
+                                            continue
+                                        if (
+                                            safe_number(upper.get('Z_mm'))
+                                            >= safe_number(lower.get('Z_mm')) + safe_number(lower.get('Höhe_mm')) - 1.0
+                                            and _xy_overlap(upper, lower)
+                                        ):
+                                            dependents.add(upper_idx)
+                                            next_frontier.add(upper_idx)
+                                frontier = next_frontier
+                            # Bottom-up settling permits a dependent layer to
+                            # become the verified support of the next layer.
+                            # X/Y are deliberately unchanged: only genuine
+                            # vertical dependencies participate in this
+                            # cascade; unrelated rows remain byte-for-byte at
+                            # their original position.
+                            for upper_idx in sorted(
+                                dependents,
+                                key=lambda value: safe_number(current.loc[value].get('Z_mm')),
+                            ):
+                                upper = candidate.loc[upper_idx]
+                                old_z = safe_number(current.loc[upper_idx].get('Z_mm'))
+                                lower_tops = []
+                                for lower_idx, lower in candidate.loc[
+                                    _real_mask(candidate, pname)
+                                ].iterrows():
+                                    if lower_idx == upper_idx:
+                                        continue
+                                    original_lower_z = safe_number(current.loc[lower_idx].get('Z_mm'))
+                                    if original_lower_z >= old_z - 1.0 or not _xy_overlap(upper, lower):
+                                        continue
+                                    lower_top = safe_number(lower.get('Z_mm')) + safe_number(lower.get('Höhe_mm'))
+                                    if lower_top <= old_z + 1.0:
+                                        lower_tops.append(lower_top)
+                                if lower_tops:
+                                    candidate.loc[upper_idx, 'Z_mm'] = round(max(lower_tops), 1)
+                                    moved_indices.add(upper_idx)
                         # Automatisch erzeugte Auflager gehören zur alten
                         # Position. Wird ihr Elternelement wirklich abgesenkt,
                         # werden sie entfernt und die neue Lage anschließend
@@ -5084,7 +5190,7 @@ def compact_placements_conservatively(
                                 )
                             ].copy()
                         candidate = _sync_planned_support_rows_to_load(candidate)
-                        if not _valid(candidate, ratios, group_indices):
+                        if not _valid(candidate, ratios, moved_indices):
                             continue
                         candidate_current = candidate.loc[_real_mask(candidate, pname)]
                         new_top = float((candidate_current['Z_mm'] + candidate_current['Höhe_mm']).max())
@@ -5095,7 +5201,7 @@ def compact_placements_conservatively(
                         if (abs(safe_number(new_cog.get('Schwerpunkt_Abstand_X_mm'), 0.0)) > accepted_cog_limit[0] + 1.0
                                 or abs(safe_number(new_cog.get('Schwerpunkt_Abstand_Y_mm'), 0.0)) > accepted_cog_limit[1] + 1.0):
                             continue
-                        candidate_group = candidate.loc[list(group_indices)]
+                        candidate_group = candidate.loc[list(moved_indices)]
                         group_x_span = float(
                             (candidate_group['X_mm'] + candidate_group['Länge_mm']).max()
                             - candidate_group['X_mm'].min()
@@ -5103,9 +5209,9 @@ def compact_placements_conservatively(
                         # Bei gleicher Höhenverbesserung echte 2D-Belegung
                         # bevorzugen: zwei seitliche Reihen mit kürzerer
                         # Längsausdehnung statt alle Teile hintereinander.
-                        score = (new_top, new_z_sum, group_x_span, len(group_indices))
+                        score = (new_top, new_z_sum, group_x_span, len(moved_indices))
                         if atomic_best is None or score < atomic_best[0]:
-                            atomic_best = (score, candidate, group_indices)
+                            atomic_best = (score, candidate, moved_indices)
                             # Jede harte Geometrie-, Tragketten-, Auflage-,
                             # Reihenfolge- und Schwerpunktprüfung ist erfüllt.
                             # Weitere tausende Layoutvarianten ändern die
@@ -5131,6 +5237,8 @@ def compact_placements_conservatively(
             ratios = {i: _support_area_ratio_for_candidate(state, r['X_mm'], r['Y_mm'], r['Z_mm'], r['Länge_mm'], r['Breite_mm']) for i, r in current.iterrows()}
             best = None
             for idx, row in current.sort_values('Z_mm', ascending=False, kind='stable').iterrows():
+                if bundles_only and str(row.get('Typ', '')).strip() != 'Bund':
+                    continue
                 if str(row.get('Einheit_ID', '')) in fixed_parent_ids:
                     continue
                 others = current.drop(index=idx)
@@ -5216,6 +5324,8 @@ def apply_main_loading_postprocess(
     platforms_used_df: pd.DataFrame,
     gap_mm: float = 0.0,
     center_geometric: bool = True,
+    enable_multilayer_compaction: bool = False,
+    bundles_only_compaction: bool = False,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """V124: Gemeinsame Nachlogik für Hauptverladung und selektive Neuberechnung.
 
@@ -5240,14 +5350,15 @@ def apply_main_loading_postprocess(
         result = improve_longitudinal_weight_balance(result, platforms_local, gap_mm=gap_mm)
         result = resolve_x_collisions_by_layer(result, platforms_local, gap_mm=gap_mm)
         result = shift_x_to_use_front_overhang(result, platforms_local)
-        result = compact_adjacent_loading_layers(result, platforms_local, gap_mm=gap_mm)
-        result = _sync_planned_support_rows_to_load(result)
-        # Die allgemeine Kaskaden-/2D-Nachverdichtung muss nach der älteren
-        # Paarlagen-Optimierung ebenfalls aktiv laufen. Beim Zusammenführen der
-        # Task-Änderungen blieb die Funktion vorhanden, wurde hier aber nicht
-        # aufgerufen; dadurch blieb die Ladegeometrie trotz neuem Code identisch.
-        result = compact_placements_conservatively(result, platforms_local)
-        result = _sync_planned_support_rows_to_load(result)
+        if enable_multilayer_compaction:
+            result = compact_adjacent_loading_layers(
+                result, platforms_local, gap_mm=gap_mm, bundles_only=bundles_only_compaction
+            )
+            result = _sync_planned_support_rows_to_load(result)
+            result = compact_placements_conservatively(
+                result, platforms_local, bundles_only=bundles_only_compaction
+            )
+            result = _sync_planned_support_rows_to_load(result)
     new_summary = recompute_summary_from_placements(result, platforms_local)
     return result, new_summary
 
@@ -5471,6 +5582,7 @@ def create_variant_a_loading_plan(
     fill_remainder_next_group: bool = False,
     prefer_stable_option: bool = True,
     prefer_support_quality: bool = True,
+    enable_multilayer_compaction: bool = False,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """V22: geprüfte Block-Suche pro Pritsche mit getrennter Sortier- und Anzeige-/Stapelrichtung.
 
@@ -5629,6 +5741,77 @@ def create_variant_a_loading_plan(
         loaded = placements_try[placements_try['Pritsche'] != 'NICHT VERLADEN'].copy()
         wanted_ids = block_units_top['Einheit_ID'].astype(str).tolist()
         loaded_ids = loaded.get('Einheit_ID', pd.Series(dtype=str)).dropna().astype(str).tolist()
+        ranked_block = block_units_top.copy()
+        ranked_block['_terminal_rank'] = pd.to_numeric(
+            ranked_block.get('Logische_Reihenfolge_im_Block'), errors='coerce'
+        )
+        ranked_block = ranked_block[ranked_block['_terminal_rank'].notna()].sort_values(
+            '_terminal_rank', kind='stable'
+        )
+        terminal_six = ranked_block.tail(6)
+        terminal_heights = pd.to_numeric(terminal_six.get('Höhe_mm'), errors='coerce')
+        has_complete_terminal_six = (
+            len(terminal_six) == 6
+            and not terminal_heights.isna().any()
+            and terminal_heights.max() - terminal_heights.min() <= 1.0
+            and (
+                'Profil' not in terminal_six.columns
+                or terminal_six['Profil'].astype(str).nunique(dropna=False) == 1
+            )
+        )
+        # The normal planner must remain exactly untouched unless the explicit
+        # option is enabled.  With it enabled, a temporarily taller plan is
+        # only a candidate: the complete bundle block is subsequently repacked
+        # and validated against the original platform height.
+        if (
+            bool(enable_multilayer_compaction)
+            and has_complete_terminal_six
+            and set(wanted_ids) != set(loaded_ids)
+        ):
+            provisional_platform = platform_row.copy()
+            original_max_height = safe_number(platform_row.get('Max_Höhe_mm'))
+            provisional_platform['Max_Höhe_mm'] = max(
+                original_max_height,
+                original_max_height
+                + float(pd.to_numeric(block_units_top['Höhe_mm'], errors='coerce').fillna(0).max())
+                + layer_default,
+            )
+            provisional_df = pd.DataFrame([provisional_platform]).reset_index(drop=True)
+            placements_try, _summary_try = create_loading_plan(
+                physical_order, provisional_df, base_wood_height=base_default,
+                layer_spacer_height=layer_default, gap_length=gap_default,
+                allow_beside=allow_beside, allow_stack=allow_stack,
+                allow_rotation=allow_rotation,
+                bundle_order_flex_percent=bundle_order_flex_percent,
+                prevent_wide_on_narrow=prevent_wide_on_narrow,
+                min_support_width_ratio=min_support_width_ratio,
+                max_unsupported_length_mm=max_unsupported_length_mm,
+                max_unsupported_side_mm=max_unsupported_side_mm,
+                max_unsupported_length_percent=max_unsupported_length_percent,
+                max_unsupported_side_percent=max_unsupported_side_percent,
+                prefer_length_before_stack=prefer_length_before_stack,
+                prefer_support_quality=prefer_support_quality,
+            )
+            loaded = placements_try[placements_try['Pritsche'] != 'NICHT VERLADEN'].copy()
+            loaded_ids = loaded.get('Einheit_ID', pd.Series(dtype=str)).dropna().astype(str).tolist()
+            if set(wanted_ids) == set(loaded_ids):
+                loaded, _summary_try = apply_main_loading_postprocess(
+                    loaded, _summary_try, pd.DataFrame([platform_row]),
+                    gap_mm=gap_default, center_geometric=True,
+                    enable_multilayer_compaction=True,
+                    bundles_only_compaction=bool(use_bundles),
+                )
+                loaded_ids = loaded.get('Einheit_ID', pd.Series(dtype=str)).dropna().astype(str).tolist()
+                too_high = (
+                    not loaded.empty
+                    and (pd.to_numeric(loaded['Z_mm'], errors='coerce')
+                         + pd.to_numeric(loaded['Höhe_mm'], errors='coerce')
+                         > original_max_height + 0.1).any()
+                )
+                if too_high or not find_geometry_conflicts(
+                    loaded, pd.DataFrame([platform_row])
+                ).empty:
+                    loaded_ids = []
         if set(wanted_ids) != set(loaded_ids):
             return False, pd.DataFrame(), pd.DataFrame()
         loaded = loaded[loaded['Einheit_ID'].astype(str).isin(wanted_ids)].copy()
@@ -5882,7 +6065,9 @@ def create_variant_a_loading_plan(
         # V124: Hauptverladung nutzt die gemeinsame Nachlogik. Dieselbe Funktion
         # wird auch für „Welche Fuhre / Pritsche neu rechnen?“ verwendet.
         placements_df, summary_df = apply_main_loading_postprocess(
-            placements_df, summary_df, platforms_used_df, gap_mm=gap_default, center_geometric=True
+            placements_df, summary_df, platforms_used_df, gap_mm=gap_default, center_geometric=True,
+            enable_multilayer_compaction=enable_multilayer_compaction,
+            bundles_only_compaction=bool(use_bundles),
         )
 
     fuhren_log_df = pd.DataFrame(fuhren_log)
@@ -11350,6 +11535,12 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
     allow_rotation = col3.checkbox('90° hochkant drehen erlauben, wenn Pritsche es erlaubt', value=False, help='Hochkant bedeutet: Länge bleibt gleich, Breite und Höhe werden getauscht.')
     center_geometric = True
     max_fuhren = col4.number_input('Max. Fuhren Sicherheitslimit', min_value=1, max_value=200, value=50, step=1)
+    enable_multilayer_compaction = st.checkbox(
+        'Optionale Mehrlagen-Verdichtung versuchen',
+        value=False,
+        key='enable_multilayer_compaction_v129',
+        help='Prüft passende Einzelteile oder vollständige Bunde als sichere 2D-Neupackung. Bunde bleiben ungeteilt. Aus lässt Verladung und Bundbildung unverändert.',
+    )
 
     # V111: Arbeitskopie für die eigentliche Verladung.
     # Sie darf zusätzliche Kontroll-/Gruppierungsspalten bekommen; die Original-BVX bleibt unverändert.
@@ -11434,6 +11625,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
     project_meta['Pritschen_Trennattribut_wirksam'] = effective_fuhre_split_attr
     project_meta['Verladegruppen'] = ' | '.join([f"{r['Gruppe']}: {r['Werte gemeinsam']}" for r in loading_group_rows]) if loading_group_rows else ''
     project_meta['Restplatz_mit_naechster_Gruppe_auffuellen'] = bool(fill_remainder_next_group)
+    project_meta['Optionale_Mehrlagen_Verdichtung'] = bool(enable_multilayer_compaction)
 
     with st.expander('6c. Verladung mit Runge', expanded=False):
         st.caption('Runge = Wand in der Mitte der Pritschenbreite. Unterhalb der Runge werden Bunde links/rechts davon platziert; oberhalb der Runge darf wieder mittig über die Runge verladen werden.')
@@ -11597,6 +11789,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
             'consider_generated_supports': bool(consider_generated_supports),
             'support_planning_mode': str(support_planning_mode),
             'compact_transport_strategy': bool(compact_transport_strategy),
+            'enable_multilayer_compaction': bool(enable_multilayer_compaction),
             'effective_fuhre_split_attr': str(effective_fuhre_split_attr),
             'fill_remainder_next_group': bool(fill_remainder_next_group),
             'base_wood_height': float(base_wood_height),
@@ -11657,6 +11850,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                 fill_remainder_next_group=bool(fill_remainder_next_group),
                 prefer_stable_option=bool(compact_transport_strategy),
                 prefer_support_quality=bool(prefer_support_quality),
+                enable_multilayer_compaction=bool(enable_multilayer_compaction),
             )
             st.session_state['automatic_loading_plan_v84'] = {
                 'signature': automatic_input_signature,
@@ -11953,6 +12147,12 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                         effective_recalc_bundle_flex = float(recalc_bundle_order_flex) if target_has_bundles else 0.0
                         recalc_keep_sort_hint = rr3.checkbox('Grundsortierung / Gruppen als Hinweis anzeigen', value=True, key='v116_recalc_sort_hint')
                         recalc_check_center = rr4.checkbox('Ladungsmittelpunkt prüfen', value=True, key='v116_recalc_center_check')
+                        recalc_multilayer_compaction = st.checkbox(
+                            'Optionale Mehrlagen-Verdichtung versuchen',
+                            value=bool(enable_multilayer_compaction),
+                            key='v116_recalc_multilayer_compaction',
+                            help='Verschiebt passende Einzelteile oder vollständige Bunde und übernimmt eine Variante nur nach Höhen-, Auflage-, Kollisions-, Entlade- und Schwerpunktprüfung.',
+                        )
                         if recalc_keep_sort_hint:
                             st.caption('V124: Vorschau nutzt dieselbe Hauptlogik/Nachlogik wie die normale Verladung, aber nur für diese Fuhre. Globale Fuhren davor/danach bleiben fix.')
 
@@ -11990,6 +12190,8 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                                 local_platform_df.reset_index(drop=True),
                                 gap_mm=float(gap_length),
                                 center_geometric=True,
+                                enable_multilayer_compaction=bool(recalc_multilayer_compaction),
+                                bundles_only_compaction=bool(target_has_bundles),
                             )
 
                         if st.button('Vorschau neu berechnen', key='v113_recalc_preview_button'):

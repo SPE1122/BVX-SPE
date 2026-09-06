@@ -274,7 +274,8 @@ class LayerCompactionTest(unittest.TestCase):
         before_cog = app._load_center_of_gravity_values_for_platform(before, platform.iloc[0])
 
         after, _summary = app.apply_main_loading_postprocess(
-            before, None, platform, gap_mm=0.0, center_geometric=True
+            before, None, platform, gap_mm=0.0, center_geometric=True,
+            enable_multilayer_compaction=True, bundles_only_compaction=True,
         )
         after_cog = app._load_center_of_gravity_values_for_platform(after, platform.iloc[0])
         loads = after[after['Typ'].eq('Bund')]
@@ -424,6 +425,69 @@ class LayerCompactionTest(unittest.TestCase):
         # must never be accepted beyond the effective platform width.
         self.assertFalse(after['Ebene'].astype(str).str.contains('atomar verdichtet').any())
         self.assertFalse((after['Z_mm'] == 80.0).all())
+
+    def test_f01_terminal_profile_group_is_compacted_as_complete_six_unit_block(self):
+        platform = f02_platform()
+        platform.loc[0, 'Pritsche'] = 'F01 Auflieger'
+        platform.loc[0, ['Länge_mm', 'Überhang_vorne_mm', 'Überhang_hinten_mm']] = [
+            7500.0, 1500.0, 2961.0,
+        ]
+        rows = []
+        for number in range(21, 27):
+            offset = number - 21
+            rows.append({
+                'Pritsche': 'F01 Auflieger',
+                'Einheit_ID': f'B{number}',
+                'Bauteile': str(number),
+                'Typ': 'Bund',
+                'Profil': 'P-120',
+                'X_mm': (offset % 3) * 3025.0,
+                'Y_mm': 0.0,
+                'Z_mm': 400.0 if number < 23 else (240.0 if number < 25 else 80.0),
+                'Länge_mm': 3025.0 if number < 26 else 3003.0,
+                'Breite_mm': 1200.0 if number < 26 else 952.0,
+                'Höhe_mm': 160.0,
+                'Gewicht_kg': 100.0,
+                'Logische_Reihenfolge_im_Block': offset + 1,
+                'Ebene': 'Profilblock 21-26',
+            })
+        before = pd.DataFrame(rows)
+
+        after = app.compact_placements_conservatively(before, platform, bundles_only=True)
+
+        terminal = after[after['Bauteile'].astype(str).isin([str(n) for n in range(21, 27)])]
+        self.assertEqual(6, len(terminal))
+        self.assertTrue((terminal['Z_mm'] == 80.0).all())
+        self.assertEqual(0, len(app.find_geometry_conflicts(after, platform)))
+
+    def test_complete_31_to_48_profile_stack_cascades_from_terminal_six_base(self):
+        platform = f02_platform()
+        platform.loc[0, ['Länge_mm', 'Breite_mm', 'Max_Höhe_mm']] = [6000.0, 1200.0, 600.0]
+        rows = []
+        for number in range(31, 49):
+            offset = (number - 31) % 6
+            # 31--36 and 37--42 are two dependent shelves above the
+            # terminal 43--48 profile group.  The original stack exceeds the
+            # limit by one layer; the complete cascade must save that layer.
+            z = 720.0 if number <= 36 else (560.0 if number <= 42 else (400.0 if number <= 44 else (240.0 if number <= 46 else 80.0)))
+            rows.append({
+                'Pritsche': 'F02 Anhänger', 'Einheit_ID': f'B{number}',
+                'Bauteile': str(number), 'Typ': 'Bund',
+                'Profil': 'TERMINAL-PROFIL' if number >= 43 else 'OBERE-LAST',
+                'X_mm': (offset % 3) * 1000.0, 'Y_mm': (offset // 3) * 600.0,
+                'Z_mm': z, 'Länge_mm': 1000.0, 'Breite_mm': 600.0,
+                'Höhe_mm': 160.0, 'Gewicht_kg': 100.0,
+                'Logische_Reihenfolge_im_Block': number - 30,
+                'Ebene': 'vollständiger Profilblock 31-48',
+            })
+        before = pd.DataFrame(rows)
+
+        after = app.compact_placements_conservatively(before, platform, bundles_only=True)
+
+        terminal = after[after['Bauteile'].astype(str).isin([str(n) for n in range(43, 49)])]
+        self.assertTrue((terminal['Z_mm'] == 80.0).all())
+        self.assertLessEqual(float((after['Z_mm'] + after['Höhe_mm']).max()), 600.0)
+        self.assertEqual(0, len(app.find_geometry_conflicts(after, platform)))
 
     def test_f02_groups_use_free_xy_area_without_losing_order_or_support(self):
         platform = f02_platform()
