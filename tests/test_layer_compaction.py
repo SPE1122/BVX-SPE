@@ -234,6 +234,37 @@ def f02_side_by_side_release_group() -> pd.DataFrame:
 
 
 class LayerCompactionTest(unittest.TestCase):
+    def test_assignment_control_ignores_numbers_absent_from_input(self):
+        placements = pd.DataFrame([
+            {
+                'Pritsche': 'F01 Auflieger',
+                'Bauteile': str(number),
+                'Bauteile_Liste': str(number),
+                'Gewicht_kg': 100.0,
+            }
+            for number in list(range(1, 13)) + list(range(21, 27))
+        ])
+        platforms = pd.DataFrame([{'Pritsche': 'F01 Auflieger'}])
+
+        control = app.build_control_assignment_table(placements, platforms)
+
+        self.assertEqual('', control.iloc[0]['Fehlende_Nummern_innerhalb_Bereich'])
+
+    def test_assignment_control_reports_existing_number_on_other_platform(self):
+        placements = pd.DataFrame([
+            {'Pritsche': 'F01 Auflieger', 'Bauteile': '1', 'Bauteile_Liste': '1', 'Gewicht_kg': 100.0},
+            {'Pritsche': 'F02 Auflieger', 'Bauteile': '2', 'Bauteile_Liste': '2', 'Gewicht_kg': 100.0},
+            {'Pritsche': 'F01 Auflieger', 'Bauteile': '3', 'Bauteile_Liste': '3', 'Gewicht_kg': 100.0},
+        ])
+        platforms = pd.DataFrame([
+            {'Pritsche': 'F01 Auflieger'},
+            {'Pritsche': 'F02 Auflieger'},
+        ])
+
+        control = app.build_control_assignment_table(placements, platforms)
+
+        self.assertEqual('2', control.iloc[0]['Fehlende_Nummern_innerhalb_Bereich'])
+
     def test_atomic_shelf_repack_fits_five_3025_and_one_3003_as_3x2(self):
         platform = f02_platform()
         platform.loc[0, ['Länge_mm', 'Überhang_vorne_mm', 'Überhang_hinten_mm']] = [

@@ -9976,6 +9976,11 @@ def build_control_assignment_table(placements_df: pd.DataFrame, platforms_df: pd
     if placements_df is None or placements_df.empty:
         return pd.DataFrame()
     porder = _control_platform_order(platforms_df)
+    known_nums = {
+        num
+        for _, row in placements_df.iterrows()
+        for num in _control_nums_from_row(row)
+    }
     loaded = placements_df[placements_df.get('Pritsche', '').astype(str) != 'NICHT VERLADEN'].copy()
     if loaded.empty:
         return pd.DataFrame()
@@ -9992,7 +9997,13 @@ def build_control_assignment_table(placements_df: pd.DataFrame, platforms_df: pd
         ruecksprung = bool(last_max is not None and min_num is not None and min_num <= last_max)
         missing_inside = ''
         if min_num is not None and max_num is not None:
-            expected = set(range(min_num, max_num + 1))
+            # Projektnummern müssen nicht lückenlos vergeben sein. Als fehlend
+            # gelten deshalb nur Nummern, die in der Eingabe tatsächlich
+            # vorkommen, aber nicht auf dieser Pritsche liegen.
+            expected = {
+                num for num in known_nums
+                if min_num <= num <= max_num
+            }
             missing = sorted(expected.difference(set(nums_unique)))
             if missing:
                 missing_inside = _control_join_nums(missing, 20)

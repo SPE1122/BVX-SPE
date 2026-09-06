@@ -5,3 +5,4 @@
 - [Single-part support planning](single-part-support-planning.md) — Bundle-order flexibility must never reorder individual parts; exact contact and support-aligned positions govern 35% support.
 - [Loading block search](loading-block-search.md) — Prefix validity is non-monotonic when logical loading order is physically reversed; optimize exact maximum search from the upper bound downward.
 - [Controlled multi-layer compaction](controlled-multi-layer-compaction.md) — Repack adjacent layers downward and in 2D when unloading access, support, and order remain valid.
+- [Assignment gap validation](assignment-gap-validation.md) — Report platform gaps only for part numbers present in the project; numbering itself may intentionally skip ranges.
