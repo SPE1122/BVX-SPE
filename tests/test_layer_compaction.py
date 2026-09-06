@@ -314,7 +314,7 @@ class LayerCompactionTest(unittest.TestCase):
         _underbau, warnings = app.calculate_underbau_rows_for_platform(after, platform.iloc[0], min_support_ratio=0.35)
         self.assertTrue(warnings.empty)
 
-    def test_upper_31_to_37_group_is_repacked_into_four_compact_rows(self):
+    def test_upper_31_to_37_group_keeps_31_as_top_singleton(self):
         platform = pd.DataFrame([{
             'Pritsche': 'F02',
             'Länge_mm': 10000.0,
@@ -346,10 +346,12 @@ class LayerCompactionTest(unittest.TestCase):
         after = app.repack_upper_ranked_rows_compactly(promoted, platform)
         by_part = after.set_index('Bauteile')
 
-        self.assertEqual(float(by_part.loc['31', 'Z_mm']), float(by_part.loc['32', 'Z_mm']))
-        self.assertEqual(float(by_part.loc['33', 'Z_mm']), float(by_part.loc['34', 'Z_mm']))
-        self.assertEqual(float(by_part.loc['35', 'Z_mm']), float(by_part.loc['36', 'Z_mm']))
-        self.assertLess(float(by_part.loc['37', 'Z_mm']), float(by_part.loc['36', 'Z_mm']))
+        self.assertGreater(float(by_part.loc['31', 'Z_mm']), float(by_part.loc['32', 'Z_mm']))
+        self.assertEqual(float(by_part.loc['32', 'Z_mm']), float(by_part.loc['33', 'Z_mm']))
+        self.assertEqual(float(by_part.loc['34', 'Z_mm']), float(by_part.loc['35', 'Z_mm']))
+        self.assertEqual(float(by_part.loc['36', 'Z_mm']), float(by_part.loc['37', 'Z_mm']))
+        self.assertGreater(float(by_part.loc['32', 'Z_mm']), float(by_part.loc['34', 'Z_mm']))
+        self.assertGreater(float(by_part.loc['34', 'Z_mm']), float(by_part.loc['36', 'Z_mm']))
         self.assertLess(
             float((after['Z_mm'] + after['Höhe_mm']).max()),
             float((placements['Z_mm'] + placements['Höhe_mm']).max()),

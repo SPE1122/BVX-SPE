@@ -6293,13 +6293,18 @@ def repack_upper_ranked_rows_compactly(
             continue
         upper = upper.sort_values('_rank', kind='stable')
 
-        # Top-down order remains logical. Each row is filled only until the
-        # physical deck width is reached; the final odd member becomes the
-        # lowest singleton rather than creating several unnecessary top rows.
+        # Top-down order remains logical. For an odd upper run, prefer the
+        # earliest unloading unit as the top singleton. The remaining even
+        # run is then paired below it. This keeps the earliest unit clearly
+        # accessible without increasing the number of rows.
         top_down_rows: List[List[Any]] = []
         current_row: List[Any] = []
         current_width = 0.0
-        for idx, row in upper.iterrows():
+        upper_items = list(upper.iterrows())
+        if len(upper_items) % 2 == 1:
+            first_idx, _first_row = upper_items.pop(0)
+            top_down_rows.append([first_idx])
+        for idx, row in upper_items:
             width = safe_number(row.get('Breite_mm'), 0.0)
             if current_row and current_width + width > platform_width + 0.1:
                 top_down_rows.append(current_row)

@@ -43,7 +43,7 @@ Compact mode must atomically rebuild an upper run of single rows into the fewest
 
 **Why:** Moving one member at a time gets trapped because dependents temporarily lose support, leaving a tall central column even though the complete multi-row arrangement is valid.
 
-**How to apply:** Preserve logical top-down order, greedily form width-valid rows, install all rows in one candidate, then validate support, collisions, height, bounds, and total-load lateral balance. With an odd count, one singleton is unavoidable.
+**How to apply:** Preserve logical top-down order. With an odd count, first try the earliest unloading unit as the top singleton and pair the even remainder below it. Install all rows atomically, then validate support, collisions, height, bounds, and total-load lateral balance.
 
 Bound atomic compaction by a small per-platform time budget and a short prioritized candidate list. If the budget expires, retain the last fully validated state rather than continuing exhaustive subset search or accepting an unchecked layout.
 
