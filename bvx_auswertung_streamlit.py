@@ -5882,6 +5882,8 @@ def apply_main_loading_postprocess(
             result = _sync_planned_support_rows_to_load(result)
             result = center_upper_single_stacks_laterally(result, compaction_platforms)
             result = _sync_planned_support_rows_to_load(result)
+            result = promote_early_narrow_fillers_to_top(result, compaction_platforms)
+            result = _sync_planned_support_rows_to_load(result)
     new_summary = recompute_summary_from_placements(result, platforms_local)
     return result, new_summary
 
@@ -6097,6 +6099,113 @@ def center_upper_single_stacks_laterally(
                 result.loc[chain, 'Ebene'] = result.loc[chain, 'Ebene'].astype(str).apply(
                     lambda value: value if 'Y-Stapel mittig' in value else f'{value} / Y-Stapel mittig'
                 )
+
+    return result
+
+
+def promote_early_narrow_fillers_to_top(
+    placements_df: pd.DataFrame,
+    platforms_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Move an early narrow part from a lower filler position beside the top part."""
+    if placements_df is None or placements_df.empty or platforms_df is None or platforms_df.empty:
+        return placements_df.copy() if placements_df is not None else pd.DataFrame()
+
+    result = placements_df.copy()
+    required = {'Pritsche', 'X_mm', 'Y_mm', 'Z_mm', 'Länge_mm', 'Breite_mm', 'Höhe_mm'}
+    if not required.issubset(result.columns):
+        return result
+    for col in ['X_mm', 'Y_mm', 'Z_mm', 'Länge_mm', 'Breite_mm', 'Höhe_mm', 'Gewicht_kg']:
+        if col in result.columns:
+            result[col] = pd.to_numeric(result[col], errors='coerce')
+
+    helper_types = {'Unterbau', 'Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz'}
+
+    def _part_number(row: pd.Series) -> Optional[float]:
+        for key in ('Bauteile', 'Bauteilnummer', 'Ansicht_Label'):
+            match = re.search(r'\d+(?:[.,]\d+)?', str(row.get(key, '') or ''))
+            if match:
+                return safe_number(match.group(0).replace(',', '.'), float('nan'))
+        return None
+
+    for _, prow in platforms_df.iterrows():
+        pname = str(prow.get('Pritsche', ''))
+        platform_width = safe_number(prow.get('Breite_mm'), 0.0)
+        if not pname or platform_width <= 0:
+            continue
+        mask = (
+            result['Pritsche'].astype(str).eq(pname)
+            & result['X_mm'].notna() & result['Y_mm'].notna() & result['Z_mm'].notna()
+            & ~result.get('Typ', pd.Series(dtype=str)).astype(str).isin(helper_types)
+        )
+        real = result.loc[mask].copy()
+        if len(real) < 3:
+            continue
+        real['_part_number'] = real.apply(_part_number, axis=1)
+        top_z = float(real['Z_mm'].max())
+        top = real[real['Z_mm'].round(1).eq(round(top_z, 1))]
+        if len(top) != 1:
+            continue
+        top_idx = top.index[0]
+        top_width = safe_number(result.loc[top_idx, 'Breite_mm'], 0.0)
+
+        narrow_rows = real[
+            (real['Z_mm'] < top_z - 1.0)
+            & (real['Breite_mm'] <= platform_width * 0.30)
+            & real['_part_number'].notna()
+        ].sort_values(['_part_number', 'Z_mm'], kind='stable')
+
+        for narrow_idx, narrow in narrow_rows.iterrows():
+            narrow_number = float(narrow['_part_number'])
+            later_above = real[
+                (real['Z_mm'] > safe_number(narrow.get('Z_mm')) + 1.0)
+                & real['_part_number'].notna()
+                & (real['_part_number'] > narrow_number)
+            ]
+            narrow_width = safe_number(narrow.get('Breite_mm'), 0.0)
+            combined_width = top_width + narrow_width
+            if later_above.empty or narrow_width <= 0 or combined_width > platform_width + 0.1:
+                continue
+
+            group_start = (platform_width - combined_width) / 2.0
+            layouts = [
+                (group_start, group_start + narrow_width),
+                (group_start + top_width, group_start),
+            ]
+            best: Optional[Tuple[float, pd.DataFrame]] = None
+            for narrow_y, top_y in layouts:
+                candidate = result.copy()
+                candidate.loc[narrow_idx, ['Y_mm', 'Z_mm']] = [round(narrow_y, 1), round(top_z, 1)]
+                candidate.at[top_idx, 'Y_mm'] = round(top_y, 1)
+
+                on_platform = candidate[candidate['Pritsche'].astype(str).eq(pname)]
+                if not find_geometry_conflicts(on_platform, pd.DataFrame([prow])).empty:
+                    continue
+                minimum = _effective_multilayer_support_ratio(
+                    safe_number(
+                        prow.get('Mindest_Stützbreite_%', prow.get('Mindest_Stuetzbreite_%')),
+                        35.0,
+                    ) / 100.0,
+                    True,
+                )
+                _underbau, warnings = calculate_underbau_rows_for_platform(
+                    candidate, prow, min_support_ratio=minimum
+                )
+                if warnings is not None and not warnings.empty:
+                    continue
+                cog = _load_center_of_gravity_values_for_platform(candidate, prow)
+                score = abs(safe_number(cog.get('Schwerpunkt_Abstand_Y_mm')))
+                if best is None or score < best[0]:
+                    best = (score, candidate)
+
+            if best is not None:
+                result = best[1]
+                if 'Ebene' in result.columns:
+                    for idx in (narrow_idx, top_idx):
+                        value = str(result.at[idx, 'Ebene'])
+                        if 'frühes Schmalteil oben' not in value:
+                            result.at[idx, 'Ebene'] = f'{value} / frühes Schmalteil oben'
+                break
 
     return result
 

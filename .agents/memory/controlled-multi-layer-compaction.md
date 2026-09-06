@@ -33,6 +33,12 @@ A valid compacted load must also remain laterally credible: do not leave a long 
 
 **How to apply:** Move only a complete directly contacting upper chain above a multi-part layer. Accept it only when support, collision checks, and lateral center of gravity all improve; keep the paired lower layer unchanged.
 
+An early-unloading narrow part must not remain as an unnecessary incidental support below later parts merely because it can theoretically slide out longitudinally.
+
+**Why:** Geometric blocking checks accepted a narrow part deep beside a wider one while later parts rested above it; mathematically supported, but operationally implausible and contrary to the visible unload sequence.
+
+**How to apply:** If the narrow early part fits beside the current top member without increasing height, promote it there. Revalidate all support, collisions, and platform bounds after removing its lower support contribution.
+
 Bound atomic compaction by a small per-platform time budget and a short prioritized candidate list. If the budget expires, retain the last fully validated state rather than continuing exhaustive subset search or accepting an unchecked layout.
 
 **Why:** Independent shelf starts create many combinatorial variants; exhaustive validation can turn an otherwise short app calculation into a run lasting more than 16 minutes.

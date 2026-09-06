@@ -264,6 +264,56 @@ class LayerCompactionTest(unittest.TestCase):
         self.assertEqual(1200.0, float(after.loc[after['Einheit_ID'].eq('38'), 'Y_mm'].iloc[0]))
         self.assertTrue(app.find_geometry_conflicts(after, platform).empty)
 
+    def test_early_narrow_filler_is_promoted_beside_top_member(self):
+        platform = pd.DataFrame([{
+            'Pritsche': 'F02',
+            'Länge_mm': 10000.0,
+            'Breite_mm': 2400.0,
+            'Max_Höhe_mm': 2480.0,
+            'Überhang_vorne_mm': 0.0,
+            'Überhang_hinten_mm': 0.0,
+            'Kantholz_erste_Lage_mm': 0.0,
+            'Mindest_Stützbreite_%': 30.0,
+        }])
+        rows = [
+            {'Bauteile': '38', 'Y_mm': 0.0, 'Z_mm': 0.0, 'Breite_mm': 1200.0},
+            {'Bauteile': '40', 'Y_mm': 1200.0, 'Z_mm': 0.0, 'Breite_mm': 1200.0},
+            {'Bauteile': '37', 'Y_mm': 0.0, 'Z_mm': 280.0, 'Breite_mm': 1200.0},
+            {'Bauteile': '31', 'Y_mm': 1200.0, 'Z_mm': 280.0, 'Breite_mm': 400.0},
+            {'Bauteile': '36', 'Y_mm': 600.0, 'Z_mm': 560.0, 'Breite_mm': 1200.0},
+            {'Bauteile': '35', 'Y_mm': 600.0, 'Z_mm': 840.0, 'Breite_mm': 1200.0},
+            {'Bauteile': '34', 'Y_mm': 600.0, 'Z_mm': 1120.0, 'Breite_mm': 1200.0},
+            {'Bauteile': '33', 'Y_mm': 600.0, 'Z_mm': 1400.0, 'Breite_mm': 1200.0},
+            {'Bauteile': '32', 'Y_mm': 600.0, 'Z_mm': 1680.0, 'Breite_mm': 1200.0},
+        ]
+        placements = pd.DataFrame([
+            {
+                'Pritsche': 'F02',
+                'Einheit_ID': str(row['Bauteile']),
+                'Typ': 'Einzelteil',
+                'X_mm': 0.0,
+                'Länge_mm': 9000.0,
+                'Höhe_mm': 280.0,
+                'Gewicht_kg': 1000.0,
+                **row,
+            }
+            for row in rows
+        ])
+
+        after = app.promote_early_narrow_fillers_to_top(placements, platform)
+        part31 = after[after['Bauteile'].eq('31')].iloc[0]
+        part32 = after[after['Bauteile'].eq('32')].iloc[0]
+
+        self.assertEqual(float(part32['Z_mm']), float(part31['Z_mm']))
+        edge_gap = min(
+            abs(float(part31['Y_mm']) + float(part31['Breite_mm']) - float(part32['Y_mm'])),
+            abs(float(part32['Y_mm']) + float(part32['Breite_mm']) - float(part31['Y_mm'])),
+        )
+        self.assertLessEqual(edge_gap, 0.1)
+        self.assertTrue(app.find_geometry_conflicts(after, platform).empty)
+        _underbau, warnings = app.calculate_underbau_rows_for_platform(after, platform.iloc[0], min_support_ratio=0.35)
+        self.assertTrue(warnings.empty)
+
     def test_assignment_control_ignores_numbers_absent_from_input(self):
         placements = pd.DataFrame([
             {
