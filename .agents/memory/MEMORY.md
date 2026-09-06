@@ -6,3 +6,4 @@
 - [Loading block search](loading-block-search.md) — Prefix validity is non-monotonic when logical loading order is physically reversed; optimize exact maximum search from the upper bound downward.
 - [Controlled multi-layer compaction](controlled-multi-layer-compaction.md) — Repack adjacent layers downward and in 2D when unloading access, support, and order remain valid.
 - [Assignment gap validation](assignment-gap-validation.md) — Report platform gaps only for part numbers present in the project; numbering itself may intentionally skip ranges.
+- [Optional post-plan compaction](optional-post-plan-compaction.md) — Keep original part/bundle loading unchanged; expose compaction as an opt-in postprocess in main planning and V116 recalculation.
