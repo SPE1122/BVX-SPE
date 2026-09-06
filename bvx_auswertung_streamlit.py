@@ -5812,6 +5812,15 @@ def compact_placements_conservatively(
     return result
 
 
+def _effective_multilayer_support_ratio(
+    requested_ratio: float,
+    enable_multilayer_compaction: bool,
+) -> float:
+    """Return the voluntary support floor used by optional multilayer search."""
+    requested = max(0.0, min(1.0, float(requested_ratio)))
+    return max(requested, 0.35) if enable_multilayer_compaction else requested
+
+
 def apply_main_loading_postprocess(
     placements_df: pd.DataFrame,
     summary_df: Optional[pd.DataFrame],
@@ -5845,12 +5854,30 @@ def apply_main_loading_postprocess(
         result = resolve_x_collisions_by_layer(result, platforms_local, gap_mm=gap_mm)
         result = shift_x_to_use_front_overhang(result, platforms_local)
         if enable_multilayer_compaction:
+            compaction_platforms = platforms_local.copy()
+            support_column = (
+                'Mindest_Stützbreite_%'
+                if 'Mindest_Stützbreite_%' in compaction_platforms.columns
+                else 'Mindest_Stuetzbreite_%'
+            )
+            if support_column not in compaction_platforms.columns:
+                compaction_platforms[support_column] = (
+                    _effective_multilayer_support_ratio(0.0, True) * 100.0
+                )
+            else:
+                compaction_platforms[support_column] = pd.to_numeric(
+                    compaction_platforms[support_column], errors='coerce'
+                ).fillna(0.0).apply(
+                    lambda value: _effective_multilayer_support_ratio(
+                        float(value) / 100.0, True
+                    ) * 100.0
+                )
             result = compact_adjacent_loading_layers(
-                result, platforms_local, gap_mm=gap_mm, bundles_only=bundles_only_compaction
+                result, compaction_platforms, gap_mm=gap_mm, bundles_only=bundles_only_compaction
             )
             result = _sync_planned_support_rows_to_load(result)
             result = compact_placements_conservatively(
-                result, platforms_local, bundles_only=bundles_only_compaction
+                result, compaction_platforms, bundles_only=bundles_only_compaction
             )
             result = _sync_planned_support_rows_to_load(result)
     new_summary = recompute_summary_from_placements(result, platforms_local)
@@ -6091,6 +6118,16 @@ def create_variant_a_loading_plan(
     """
     if sorted_parts is None or sorted_parts.empty:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+    # Die optionale Mehrlagenoptimierung darf im Kompakt-Modus nicht auf einer
+    # nur knapp mit 30 % gestützten Zwischenlösung aufbauen.  Sonst akzeptiert
+    # die vorgelagerte atomare Suche eine Teilkaskade, bevor die vollständige
+    # 3x2-Basis und das anschliessende 3+2-Fenster geprüft werden.  Der
+    # Benutzerwert bleibt die gültige Mindestanforderung; für diesen optionalen
+    # Optimierungsweg planen wir freiwillig mit mindestens 35 %.
+    compaction_planning_support_ratio = _effective_multilayer_support_ratio(
+        min_support_width_ratio,
+        enable_multilayer_compaction,
+    )
 
     enabled_options = options_df[options_df['Freigegeben'] == True].copy()
     enabled_options = enabled_options.sort_values('Priorität', kind='stable').reset_index(drop=True)
@@ -6222,7 +6259,7 @@ def create_variant_a_loading_plan(
             allow_rotation=allow_rotation,
             bundle_order_flex_percent=bundle_order_flex_percent,
             prevent_wide_on_narrow=prevent_wide_on_narrow,
-            min_support_width_ratio=min_support_width_ratio,
+            min_support_width_ratio=compaction_planning_support_ratio,
             max_unsupported_length_mm=max_unsupported_length_mm,
             max_unsupported_side_mm=max_unsupported_side_mm,
             max_unsupported_length_percent=max_unsupported_length_percent,
@@ -6278,7 +6315,7 @@ def create_variant_a_loading_plan(
                 allow_rotation=allow_rotation,
                 bundle_order_flex_percent=bundle_order_flex_percent,
                 prevent_wide_on_narrow=prevent_wide_on_narrow,
-                min_support_width_ratio=min_support_width_ratio,
+                min_support_width_ratio=compaction_planning_support_ratio,
                 max_unsupported_length_mm=max_unsupported_length_mm,
                 max_unsupported_side_mm=max_unsupported_side_mm,
                 max_unsupported_length_percent=max_unsupported_length_percent,

@@ -234,6 +234,11 @@ def f02_side_by_side_release_group() -> pd.DataFrame:
 
 
 class LayerCompactionTest(unittest.TestCase):
+    def test_compact_mode_uses_safe_multilayer_support_floor_only_when_enabled(self):
+        self.assertEqual(0.30, app._effective_multilayer_support_ratio(0.30, False))
+        self.assertEqual(0.35, app._effective_multilayer_support_ratio(0.30, True))
+        self.assertEqual(0.40, app._effective_multilayer_support_ratio(0.40, True))
+
     def test_assignment_control_ignores_numbers_absent_from_input(self):
         placements = pd.DataFrame([
             {
