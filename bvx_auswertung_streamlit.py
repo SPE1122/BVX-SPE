@@ -23,6 +23,7 @@ import io
 import base64
 import copy
 import itertools
+import time
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Tuple
 from collections import Counter
@@ -4605,6 +4606,10 @@ def compact_placements_conservatively(
         initial = result.loc[_real_mask(result, pname)].copy()
         if initial.empty:
             continue
+        # Die atomare Nachverdichtung ist eine Zusatzoptimierung. Sie darf die
+        # Gesamtberechnung nicht minutenlang blockieren. Nach Ablauf bleibt
+        # ausschließlich der letzte vollständig validierte Zustand erhalten.
+        compaction_deadline = time.monotonic() + 20.0
         fixed_parent_ids = set()
         generated_only_parent_ids = set()
         if 'Auflager_fuer' in result.columns and 'Typ' in result.columns:
@@ -4895,7 +4900,7 @@ def compact_placements_conservatively(
             # Vor der teuren vollständigen Tragkettenvalidierung redundante
             # Kantenkombinationen begrenzen. Kompakte, bewegungsarme Varianten
             # bleiben bevorzugt erhalten.
-            return sorted(layouts, key=_layout_priority)[:64]
+            return sorted(layouts, key=_layout_priority)[:12]
 
         # A one-at-a-time move cannot release the interlocking parts of two
         # neighbouring layers.  Before greedy compaction, try a bounded atomic
@@ -4903,7 +4908,9 @@ def compact_placements_conservatively(
         # two variable-width shelves on one lower Z, and validate the *whole*
         # resulting state.  Nothing about the units themselves (including
         # order/rank, rotation, trips, or platform limits) is changed.
-        for _atomic_attempt in range(min(4, max(1, max_moves_per_platform))):
+        for _atomic_attempt in range(min(2, max(1, max_moves_per_platform))):
+            if time.monotonic() >= compaction_deadline:
+                break
             current = result.loc[_real_mask(result, pname)].copy()
             if len(current) < 2:
                 break
@@ -4934,6 +4941,8 @@ def compact_placements_conservatively(
             current_z_sum = float(current['Z_mm'].sum())
             current_top = float((current['Z_mm'] + current['Höhe_mm']).max())
             for target_z in sorted(target_zs):
+                if time.monotonic() >= compaction_deadline:
+                    break
                 movable = current
                 if fixed_parent_ids and 'Einheit_ID' in movable.columns:
                     # Ein gebundenes Auflager verbietet das Absenken seines
@@ -4997,16 +5006,17 @@ def compact_placements_conservatively(
                 # subsets (not merely contiguous dataframe rows).  This
                 # allows an unrelated part to stay where it is while retaining
                 # exhaustive validation for the selected atomic group.
-                if not _atomic_shelf_layouts(pool, eff_len, platform_width, platform_center_x, current):
-                    for size in range(min(6, len(pool_indices)), 1, -1):
-                        for group_indices in itertools.combinations(pool_indices, size):
-                            group_sets.append(group_indices)
-                            if len(group_sets) >= 65:
-                                break
-                        if len(group_sets) >= 65:
+                for size in range(min(6, len(pool_indices)), 1, -1):
+                    for group_indices in itertools.combinations(pool_indices, size):
+                        group_sets.append(group_indices)
+                        if len(group_sets) >= 12:
                             break
+                    if len(group_sets) >= 12:
+                        break
                 seen_groups = set()
                 for group_indices in group_sets:
+                    if time.monotonic() >= compaction_deadline:
+                        break
                     if group_indices in seen_groups:
                         continue
                     seen_groups.add(group_indices)
