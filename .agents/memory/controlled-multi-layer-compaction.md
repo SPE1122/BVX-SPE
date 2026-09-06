@@ -51,6 +51,12 @@ An upper rest group must end at the first gap in its physical part-number sequen
 
 **How to apply:** Derive the ordered numeric sequence from the displayed part identifiers when available and stop the atomic candidate at the first non-consecutive number.
 
+Members of an accepted atomic base shelf remain bound for all later single-unit optimization stages; only a later atomic operation may reconsider the whole group.
+
+**Why:** A valid five-part base was created correctly, but a later generic single-unit move extracted its middle member and placed it at the top, preserving geometric accessibility while violating the intended load sequence.
+
+**How to apply:** Mark only the core members when an atomic candidate is accepted. Exclude marked members from individual lowering, filler promotion, and upper-rest repacking; do not mark transitive dependents.
+
 Bound atomic compaction by a small per-platform time budget and a short prioritized candidate list. If the budget expires, retain the last fully validated state rather than continuing exhaustive subset search or accepting an unchecked layout.
 
 **Why:** Independent shelf starts create many combinatorial variants; exhaustive validation can turn an otherwise short app calculation into a run lasting more than 16 minutes.

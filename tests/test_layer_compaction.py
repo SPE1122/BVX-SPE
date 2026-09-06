@@ -553,6 +553,11 @@ class LayerCompactionTest(unittest.TestCase):
         row_37 = after.loc[after['Bauteile'].eq('37')].iloc[0]
         row_42 = after.loc[after['Bauteile'].eq('42')].iloc[0]
         self.assertEqual(float(row_39['Z_mm']), float(row_42['Z_mm']))
+        self.assertTrue(str(row_39['_Atomare_Basisgruppe']).strip())
+        self.assertEqual(
+            str(row_39['_Atomare_Basisgruppe']),
+            str(row_42['_Atomare_Basisgruppe']),
+        )
         self.assertTrue(
             abs(float(row_39['Y_mm'] + row_39['Breite_mm']) - float(row_42['Y_mm'])) <= 0.1
             or abs(float(row_42['Y_mm'] + row_42['Breite_mm']) - float(row_39['Y_mm'])) <= 0.1

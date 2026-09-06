@@ -4593,6 +4593,11 @@ def compact_placements_conservatively(
     for col in required - {'Pritsche'} | {'Gewicht_kg'}:
         if col in result.columns:
             result[col] = pd.to_numeric(result[col], errors='coerce')
+    atomic_group_column = '_Atomare_Basisgruppe'
+    if atomic_group_column not in result.columns:
+        result[atomic_group_column] = ''
+    else:
+        result[atomic_group_column] = result[atomic_group_column].fillna('').astype(str)
     helper_types = {'Unterbau', 'Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz'}
 
     def _real_mask(df: pd.DataFrame, pname: str) -> pd.Series:
@@ -5026,6 +5031,12 @@ def compact_placements_conservatively(
                     # Einzelteile dürfen weder in einen Bundzug geraten noch
                     # als dessen unvollständiger Rest verschoben werden.
                     movable = movable[movable.get('Typ', pd.Series('', index=movable.index)).astype(str).eq('Bund')]
+                movable = movable[
+                    movable.get(
+                        atomic_group_column,
+                        pd.Series('', index=movable.index),
+                    ).astype(str).str.strip().eq('')
+                ]
                 if fixed_parent_ids and 'Einheit_ID' in movable.columns:
                     # Ein gebundenes Auflager verbietet das Absenken seines
                     # Elternelements, nicht aber eine horizontale Neuordnung
@@ -5227,7 +5238,9 @@ def compact_placements_conservatively(
                         # Längsausdehnung statt alle Teile hintereinander.
                         score = (new_top, new_z_sum, group_x_span, len(moved_indices))
                         if atomic_best is None or score < atomic_best[0]:
-                            atomic_best = (score, candidate, moved_indices)
+                            atomic_best = (
+                                score, candidate, moved_indices, set(group_indices)
+                            )
                             # Jede harte Geometrie-, Tragketten-, Auflage-,
                             # Reihenfolge- und Schwerpunktprüfung ist erfüllt.
                             # Weitere tausende Layoutvarianten ändern die
@@ -5239,7 +5252,15 @@ def compact_placements_conservatively(
                     break
             if atomic_best is None:
                 break
-            _, result, moved_group = atomic_best
+            _, result, moved_group, atomic_core_group = atomic_best
+            atomic_group_id = (
+                f'{pname}:atomic:'
+                + ','.join(sorted(
+                    str(result.loc[idx].get('Einheit_ID', idx))
+                    for idx in atomic_core_group
+                ))
+            )
+            result.loc[list(atomic_core_group), atomic_group_column] = atomic_group_id
             if 'Ebene' in result.columns:
                 for moved in moved_group:
                     value = str(result.loc[moved, 'Ebene'])
@@ -5271,6 +5292,11 @@ def compact_placements_conservatively(
             for pos in range(len(ranked_indices) - 4):
                 window_indices = ranked_indices[pos:pos + 5]
                 window = current.loc[window_indices]
+                if window.get(
+                    atomic_group_column,
+                    pd.Series('', index=window.index),
+                ).astype(str).str.strip().ne('').any():
+                    continue
                 ranks = pd.to_numeric(window['Logische_Reihenfolge_im_Block'], errors='coerce').tolist()
                 heights = pd.to_numeric(window['Höhe_mm'], errors='coerce')
                 if (any(abs(ranks[i + 1] - ranks[i] - 1.0) > 0.1 for i in range(4))
@@ -5441,9 +5467,20 @@ def compact_placements_conservatively(
                                     overhang,
                                 )
                                 if local_best is None or score < local_best[0]:
-                                    local_best = (score, candidate, moved_indices)
+                                    local_best = (
+                                        score, candidate, moved_indices,
+                                        set(window_indices),
+                                    )
             if local_best is not None:
-                _, result, moved_indices = local_best
+                _, result, moved_indices, atomic_core_group = local_best
+                atomic_group_id = (
+                    f'{pname}:local:'
+                    + ','.join(sorted(
+                        str(result.loc[idx].get('Einheit_ID', idx))
+                        for idx in atomic_core_group
+                    ))
+                )
+                result.loc[list(atomic_core_group), atomic_group_column] = atomic_group_id
                 if 'Ebene' in result.columns:
                     for moved in moved_indices:
                         value = str(result.loc[moved, 'Ebene'])
@@ -5732,6 +5769,8 @@ def compact_placements_conservatively(
             best = None
             for idx, row in current.sort_values('Z_mm', ascending=False, kind='stable').iterrows():
                 if bundles_only and str(row.get('Typ', '')).strip() != 'Bund':
+                    continue
+                if str(row.get(atomic_group_column, '')).strip():
                     continue
                 if str(row.get('Einheit_ID', '')) in fixed_parent_ids:
                     continue
@@ -6143,18 +6182,25 @@ def promote_early_narrow_fillers_to_top(
         real = result.loc[mask].copy()
         if len(real) < 3:
             continue
+        atomic_group_column = '_Atomare_Basisgruppe'
         real['_part_number'] = real.apply(_part_number, axis=1)
         top_z = float(real['Z_mm'].max())
         top = real[real['Z_mm'].round(1).eq(round(top_z, 1))]
         if len(top) != 1:
             continue
         top_idx = top.index[0]
+        if str(result.loc[top_idx].get(atomic_group_column, '')).strip():
+            continue
         top_width = safe_number(result.loc[top_idx, 'Breite_mm'], 0.0)
 
         narrow_rows = real[
             (real['Z_mm'] < top_z - 1.0)
             & (real['Breite_mm'] <= platform_width * 0.30)
             & real['_part_number'].notna()
+            & real.get(
+                atomic_group_column,
+                pd.Series('', index=real.index),
+            ).astype(str).str.strip().eq('')
         ].sort_values(['_part_number', 'Z_mm'], kind='stable')
 
         for narrow_idx, narrow in narrow_rows.iterrows():
@@ -6272,6 +6318,13 @@ def repack_upper_ranked_rows_compactly(
             for idx in layer.index
         ]
         upper = real.loc[upper_indices].copy()
+        atomic_group_column = '_Atomare_Basisgruppe'
+        upper = upper[
+            upper.get(
+                atomic_group_column,
+                pd.Series('', index=upper.index),
+            ).astype(str).str.strip().eq('')
+        ]
         if len(upper) < 4:
             continue
         heights = pd.to_numeric(upper['Höhe_mm'], errors='coerce')
