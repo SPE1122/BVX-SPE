@@ -27,6 +27,12 @@ Optional multi-layer search uses a voluntary 35% internal support floor even whe
 
 **How to apply:** Keep the user-visible Compact minimum at 30%, but build and postprocess optional multi-layer candidates at no less than 35%. Reproduction scripts must call the planner with named arguments; positional arguments once enabled an unintended split attribute and produced a misleading layout.
 
+A valid compacted load must also remain laterally credible: do not leave a long upper single-column chain as a wall on one deck side when the complete chain can safely move toward the deck center.
+
+**Why:** Centering each layer independently can destroy support, but leaving every inherited Y position unchanged produced an obviously one-sided F02 despite valid geometry.
+
+**How to apply:** Move only a complete directly contacting upper chain above a multi-part layer. Accept it only when support, collision checks, and lateral center of gravity all improve; keep the paired lower layer unchanged.
+
 Bound atomic compaction by a small per-platform time budget and a short prioritized candidate list. If the budget expires, retain the last fully validated state rather than continuing exhaustive subset search or accepting an unchecked layout.
 
 **Why:** Independent shelf starts create many combinatorial variants; exhaustive validation can turn an otherwise short app calculation into a run lasting more than 16 minutes.

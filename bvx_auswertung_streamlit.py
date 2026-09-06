@@ -5880,6 +5880,8 @@ def apply_main_loading_postprocess(
                 result, compaction_platforms, bundles_only=bundles_only_compaction
             )
             result = _sync_planned_support_rows_to_load(result)
+            result = center_upper_single_stacks_laterally(result, compaction_platforms)
+            result = _sync_planned_support_rows_to_load(result)
     new_summary = recompute_summary_from_placements(result, platforms_local)
     return result, new_summary
 
@@ -5946,6 +5948,158 @@ def normalize_y_from_platform_center(placements_df: pd.DataFrame, platforms_df: 
             result.at[idx, 'Y_mm'] = round(new_y, 1)
 
     return result
+
+
+def center_upper_single_stacks_laterally(
+    placements_df: pd.DataFrame,
+    platforms_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Center coherent upper single-column stacks when lateral balance improves."""
+    if placements_df is None or placements_df.empty or platforms_df is None or platforms_df.empty:
+        return placements_df.copy() if placements_df is not None else pd.DataFrame()
+
+    result = placements_df.copy()
+    required = {'Pritsche', 'X_mm', 'Y_mm', 'Z_mm', 'Länge_mm', 'Breite_mm', 'Höhe_mm'}
+    if not required.issubset(result.columns):
+        return result
+
+    for col in ['X_mm', 'Y_mm', 'Z_mm', 'Länge_mm', 'Breite_mm', 'Höhe_mm', 'Gewicht_kg']:
+        if col in result.columns:
+            result[col] = pd.to_numeric(result[col], errors='coerce')
+
+    helper_types = {'Unterbau', 'Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz'}
+    platform_lookup = {str(row.get('Pritsche', '')): row for _, row in platforms_df.iterrows()}
+
+    def _overlap_2d(a: pd.Series, b: pd.Series) -> bool:
+        return (
+            min(
+                safe_number(a.get('X_mm')) + safe_number(a.get('Länge_mm')),
+                safe_number(b.get('X_mm')) + safe_number(b.get('Länge_mm')),
+            )
+            > max(safe_number(a.get('X_mm')), safe_number(b.get('X_mm'))) + 1.0
+            and min(
+                safe_number(a.get('Y_mm')) + safe_number(a.get('Breite_mm')),
+                safe_number(b.get('Y_mm')) + safe_number(b.get('Breite_mm')),
+            )
+            > max(safe_number(a.get('Y_mm')), safe_number(b.get('Y_mm'))) + 1.0
+        )
+
+    for pname, prow in platform_lookup.items():
+        platform_width = safe_number(prow.get('Breite_mm'), 0.0)
+        if platform_width <= 0:
+            continue
+        real_mask = (
+            result['Pritsche'].astype(str).eq(pname)
+            & result['X_mm'].notna()
+            & result['Y_mm'].notna()
+            & result['Z_mm'].notna()
+            & ~result.get('Typ', pd.Series(dtype=str)).astype(str).isin(helper_types)
+        )
+        real = result.loc[real_mask].copy()
+        if real.empty:
+            continue
+        layers = [
+            (float(z_key), group.copy())
+            for z_key, group in real.groupby(real['Z_mm'].round(1), sort=True)
+        ]
+
+        for layer_pos in range(1, len(layers)):
+            _z, layer = layers[layer_pos]
+            _lower_z, lower_layer = layers[layer_pos - 1]
+            if len(layer) != 1 or len(lower_layer) < 2:
+                continue
+
+            first_idx = layer.index[0]
+            first = result.loc[first_idx]
+            first_width = safe_number(first.get('Breite_mm'), 0.0)
+            if first_width <= 0 or first_width >= platform_width * 0.75:
+                continue
+
+            chain = [first_idx]
+            previous = first
+            for next_pos in range(layer_pos + 1, len(layers)):
+                _next_z, next_layer = layers[next_pos]
+                if len(next_layer) != 1:
+                    break
+                next_idx = next_layer.index[0]
+                next_row = result.loc[next_idx]
+                direct_contact = abs(
+                    safe_number(next_row.get('Z_mm'))
+                    - safe_number(previous.get('Z_mm'))
+                    - safe_number(previous.get('Höhe_mm'))
+                ) <= 2.0
+                same_width = abs(safe_number(next_row.get('Breite_mm')) - first_width) <= 2.0
+                if not direct_contact or not same_width or not _overlap_2d(previous, next_row):
+                    break
+                chain.append(next_idx)
+                previous = next_row
+
+            if len(chain) < 2:
+                continue
+
+            target_y = round((platform_width - first_width) / 2.0, 1)
+            if max(abs(safe_number(result.loc[idx, 'Y_mm']) - target_y) for idx in chain) < 1.0:
+                continue
+
+            candidate = result.copy()
+            moved_ids = set()
+            for idx in chain:
+                old_y = safe_number(candidate.loc[idx, 'Y_mm'])
+                delta_y = target_y - old_y
+                candidate.at[idx, 'Y_mm'] = target_y
+                if 'Einheit_ID' in candidate.columns:
+                    parent_id = str(candidate.loc[idx, 'Einheit_ID'])
+                    moved_ids.add(parent_id)
+                    if 'Auflager_fuer' in candidate.columns:
+                        attached = (
+                            candidate['Pritsche'].astype(str).eq(pname)
+                            & candidate['Auflager_fuer'].astype(str).eq(parent_id)
+                        )
+                        candidate.loc[attached, 'Y_mm'] = (
+                            pd.to_numeric(candidate.loc[attached, 'Y_mm'], errors='coerce')
+                            + delta_y
+                        ).round(1)
+
+            platform_candidate = candidate[candidate['Pritsche'].astype(str).eq(pname)].copy()
+            conflicts = find_geometry_conflicts(platform_candidate, pd.DataFrame([prow]))
+            if conflicts is not None and not conflicts.empty:
+                continue
+
+            minimum = _effective_multilayer_support_ratio(
+                safe_number(
+                    prow.get('Mindest_Stützbreite_%', prow.get('Mindest_Stuetzbreite_%')),
+                    35.0,
+                ) / 100.0,
+                True,
+            )
+            _underbau, support_warnings = calculate_underbau_rows_for_platform(
+                candidate,
+                prow,
+                min_support_ratio=minimum,
+            )
+            if support_warnings is not None and not support_warnings.empty and moved_ids:
+                moved_warnings = support_warnings[
+                    support_warnings.get('Einheit_ID', pd.Series(dtype=str)).astype(str).isin(moved_ids)
+                ]
+                if not moved_warnings.empty:
+                    continue
+
+            before_cog = _load_center_of_gravity_values_for_platform(result, prow)
+            after_cog = _load_center_of_gravity_values_for_platform(candidate, prow)
+            if (
+                abs(safe_number(after_cog.get('Schwerpunkt_Abstand_Y_mm')))
+                >= abs(safe_number(before_cog.get('Schwerpunkt_Abstand_Y_mm'))) - 1.0
+            ):
+                continue
+
+            result = candidate
+            if 'Ebene' in result.columns:
+                result.loc[chain, 'Ebene'] = result.loc[chain, 'Ebene'].astype(str).apply(
+                    lambda value: value if 'Y-Stapel mittig' in value else f'{value} / Y-Stapel mittig'
+                )
+
+    return result
+
 
 def invert_vertical_order_by_platform(placements_df: pd.DataFrame, platforms_df: pd.DataFrame) -> pd.DataFrame:
     """Spiegelt die Z-Reihenfolge je belegter Pritsche.

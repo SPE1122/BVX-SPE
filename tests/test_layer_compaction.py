@@ -239,6 +239,31 @@ class LayerCompactionTest(unittest.TestCase):
         self.assertEqual(0.35, app._effective_multilayer_support_ratio(0.30, True))
         self.assertEqual(0.40, app._effective_multilayer_support_ratio(0.40, True))
 
+    def test_upper_single_stack_is_centered_above_paired_lower_layer(self):
+        platform = pd.DataFrame([{
+            'Pritsche': 'F02',
+            'Länge_mm': 10000.0,
+            'Breite_mm': 2400.0,
+            'Max_Höhe_mm': 4000.0,
+            'Überhang_vorne_mm': 0.0,
+            'Überhang_hinten_mm': 0.0,
+            'Kantholz_erste_Lage_mm': 0.0,
+            'Mindest_Stützbreite_%': 30.0,
+        }])
+        rows = pd.DataFrame([
+            {'Pritsche': 'F02', 'Einheit_ID': '38', 'Typ': 'Einzelteil', 'X_mm': 0.0, 'Y_mm': 1200.0, 'Z_mm': 280.0, 'Länge_mm': 9000.0, 'Breite_mm': 1200.0, 'Höhe_mm': 280.0, 'Gewicht_kg': 1000.0},
+            {'Pritsche': 'F02', 'Einheit_ID': '40', 'Typ': 'Einzelteil', 'X_mm': 5000.0, 'Y_mm': 0.0, 'Z_mm': 280.0, 'Länge_mm': 4000.0, 'Breite_mm': 1200.0, 'Höhe_mm': 280.0, 'Gewicht_kg': 500.0},
+            {'Pritsche': 'F02', 'Einheit_ID': '37', 'Typ': 'Einzelteil', 'X_mm': 0.0, 'Y_mm': 1200.0, 'Z_mm': 560.0, 'Länge_mm': 9000.0, 'Breite_mm': 1200.0, 'Höhe_mm': 280.0, 'Gewicht_kg': 1000.0},
+            {'Pritsche': 'F02', 'Einheit_ID': '36', 'Typ': 'Einzelteil', 'X_mm': 0.0, 'Y_mm': 1200.0, 'Z_mm': 840.0, 'Länge_mm': 9000.0, 'Breite_mm': 1200.0, 'Höhe_mm': 280.0, 'Gewicht_kg': 1000.0},
+        ])
+
+        after = app.center_upper_single_stacks_laterally(rows, platform)
+
+        self.assertEqual(600.0, float(after.loc[after['Einheit_ID'].eq('37'), 'Y_mm'].iloc[0]))
+        self.assertEqual(600.0, float(after.loc[after['Einheit_ID'].eq('36'), 'Y_mm'].iloc[0]))
+        self.assertEqual(1200.0, float(after.loc[after['Einheit_ID'].eq('38'), 'Y_mm'].iloc[0]))
+        self.assertTrue(app.find_geometry_conflicts(after, platform).empty)
+
     def test_assignment_control_ignores_numbers_absent_from_input(self):
         placements = pd.DataFrame([
             {
