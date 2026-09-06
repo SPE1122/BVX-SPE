@@ -4651,7 +4651,12 @@ def compact_placements_conservatively(
             abs(safe_number(initial_cog.get('Schwerpunkt_Abstand_Y_mm'), 0.0)),
         )
 
-        def _valid(tmp: pd.DataFrame, prior_ratios: Dict[Any, float], moved_idx: Any) -> bool:
+        def _valid(
+            tmp: pd.DataFrame,
+            prior_ratios: Dict[Any, float],
+            moved_idx: Any,
+            baseline_edges: Optional[set] = None,
+        ) -> bool:
             # ``moved_idx`` is normally one index, but an atomic repack passes
             # a complete set.  Every member of that set may legitimately trade
             # its former support for the configured minimum support; all other
@@ -4695,7 +4700,9 @@ def compact_placements_conservatively(
                 (u, l) for u, upper in current.iterrows() for l, lower in current.iterrows() if u != l
                 and _xy_overlap(upper, lower) and upper['Z_mm'] >= lower['Z_mm'] + lower['Höhe_mm'] - 1.0
             }
-            new_edges = edges - original_edges
+            new_edges = edges - (
+                original_edges if baseline_edges is None else baseline_edges
+            )
             if new_edges:
                 # Eine horizontale Neuordnung einer unteren Lage darf unter
                 # bereits darüberliegenden Teilen neue reale Tragflächen
@@ -4710,7 +4717,7 @@ def compact_placements_conservatively(
                     # layers in the same transaction.  New support within
                     # that transaction is safe only when the established
                     # logical unloading order still runs from upper to lower.
-                    if lower_idx not in moved_indices:
+                    if upper_idx not in moved_indices and lower_idx not in moved_indices:
                         return False
                     upper_rank = pd.to_numeric(
                         pd.Series([current.loc[upper_idx, 'Logische_Reihenfolge_im_Block']]),
@@ -4983,6 +4990,14 @@ def compact_placements_conservatively(
                 )
                 for idx, row in current.iterrows()
             }
+            side_pair_baseline_edges = {
+                (u, l)
+                for u, upper in current.iterrows()
+                for l, lower in current.iterrows()
+                if u != l
+                and _xy_overlap(upper, lower)
+                and upper['Z_mm'] >= lower['Z_mm'] + lower['Höhe_mm'] - 1.0
+            }
             eff_len = (
                 safe_number(prow.get('Länge_mm'), 0.0)
                 + safe_number(prow.get('Überhang_vorne_mm'), 0.0)
@@ -5229,6 +5244,279 @@ def compact_placements_conservatively(
                     value = str(result.loc[moved, 'Ebene'])
                     if 'atomar verdichtet' not in value:
                         result.loc[moved, 'Ebene'] = f'{value} / atomar verdichtet'
+
+        # Vier aufeinanderfolgende, gleich hohe Einheiten können eine sichere
+        # Querlagen-Kaskade bilden: schmal / breit / breit / schmal. Die erste,
+        # dritte und vierte Einheit teilen die tiefere Lage; die zweite liegt
+        # darüber ausschließlich auf den logisch späteren Einheiten.
+        current = result.loc[_real_mask(result, pname)].copy()
+        if 'Logische_Reihenfolge_im_Block' in current.columns and len(current) >= 4:
+            ranked = current.assign(
+                _rank=pd.to_numeric(
+                    current['Logische_Reihenfolge_im_Block'], errors='coerce'
+                )
+            ).dropna(subset=['_rank']).sort_values('_rank', kind='stable')
+            state = init_platform_state(
+                prow, base_z,
+                safe_number(prow.get('Einlage_zwischen_Lagen_mm'), 0.0), 0.0,
+            )
+            state['placements'] = result[
+                result['Pritsche'].astype(str).eq(pname)
+            ].to_dict('records')
+            ratios = {
+                idx: _support_area_ratio_for_candidate(
+                    state, row['X_mm'], row['Y_mm'], row['Z_mm'],
+                    row['Länge_mm'], row['Breite_mm'],
+                )
+                for idx, row in current.iterrows()
+            }
+            cross_baseline_edges = {
+                (u, l)
+                for u, upper in current.iterrows()
+                for l, lower in current.iterrows()
+                if u != l
+                and _xy_overlap(upper, lower)
+                and upper['Z_mm'] >= lower['Z_mm'] + lower['Höhe_mm'] - 1.0
+            }
+            cross_best = None
+            ranked_indices = list(ranked.index)
+            for pos in range(len(ranked_indices) - 3):
+                window_indices = ranked_indices[pos:pos + 4]
+                window = current.loc[window_indices]
+                ranks = pd.to_numeric(
+                    window['Logische_Reihenfolge_im_Block'], errors='coerce'
+                ).tolist()
+                if any(abs(ranks[i + 1] - ranks[i] - 1.0) > 0.1 for i in range(3)):
+                    continue
+                heights = pd.to_numeric(window['Höhe_mm'], errors='coerce')
+                if heights.isna().any() or heights.max() - heights.min() > 1.0:
+                    continue
+                first_idx, second_idx, third_idx, fourth_idx = window_indices
+                first, second, third, fourth = (
+                    current.loc[first_idx], current.loc[second_idx],
+                    current.loc[third_idx], current.loc[fourth_idx],
+                )
+                widths = [
+                    safe_number(first.get('Breite_mm')),
+                    safe_number(second.get('Breite_mm')),
+                    safe_number(third.get('Breite_mm')),
+                    safe_number(fourth.get('Breite_mm')),
+                ]
+                if (
+                    widths[0] >= platform_width * 0.5
+                    or widths[3] >= platform_width * 0.5
+                    or widths[1] < platform_width * 0.4
+                    or widths[2] < platform_width * 0.4
+                    or widths[0] + widths[2] + widths[3] > platform_width + 0.1
+                ):
+                    continue
+                target_z = safe_number(fourth.get('Z_mm'))
+                height = float(heights.iloc[0])
+                if target_z < base_z - 0.1 or safe_number(first.get('Z_mm')) <= target_z + 1.0:
+                    continue
+                for lower_order in (
+                    (first_idx, third_idx, fourth_idx),
+                    (fourth_idx, third_idx, first_idx),
+                ):
+                    total_width = sum(safe_number(current.loc[idx].get('Breite_mm')) for idx in lower_order)
+                    start_y = (platform_width - total_width) / 2.0
+                    y_positions = {}
+                    cursor = start_y
+                    for idx in lower_order:
+                        y_positions[idx] = round(cursor, 1)
+                        cursor += safe_number(current.loc[idx].get('Breite_mm'))
+                    # Die zweite Einheit darf die logisch frühere erste Einheit
+                    # nicht überdecken; sie liegt auf der dritten/vierten.
+                    upper_y = y_positions[third_idx]
+                    max_second_x = eff_len - safe_number(second.get('Länge_mm'))
+                    second_x_candidates = {
+                        max(0.0, min(max_second_x, safe_number(second.get('X_mm')))),
+                        max(0.0, min(max_second_x, platform_center_x - safe_number(second.get('Länge_mm')) / 2.0)),
+                        max(0.0, max_second_x),
+                    }
+                    for second_x in sorted(second_x_candidates):
+                        candidate = result.copy()
+                        for idx in lower_order:
+                            candidate.loc[idx, ['Y_mm', 'Z_mm']] = [
+                                y_positions[idx], round(target_z, 1),
+                            ]
+                        candidate.loc[second_idx, ['X_mm', 'Y_mm', 'Z_mm']] = [
+                            round(second_x, 1), upper_y, round(target_z + height, 1),
+                        ]
+                        moved_indices = set(window_indices)
+                        candidate_state = init_platform_state(
+                            prow, base_z,
+                            safe_number(prow.get('Einlage_zwischen_Lagen_mm'), 0.0),
+                            0.0,
+                        )
+                        candidate_state['placements'] = candidate[
+                            candidate['Pritsche'].astype(str).eq(pname)
+                        ].to_dict('records')
+                        # Eine direkt auf der neu gebildeten Querlagen-Kaskade
+                        # stehende Einheit gehört zur selben atomaren Prüfung.
+                        # Sie darf auf die konfigurierte Mindestauflage wechseln,
+                        # muss diese aber weiterhin vollständig erreichen.
+                        dependent_z = target_z + 2.0 * height
+                        for dependent_idx, dependent in current.iterrows():
+                            if dependent_idx in moved_indices:
+                                continue
+                            if abs(safe_number(dependent.get('Z_mm')) - dependent_z) > 1.0:
+                                continue
+                            new_ratio = _support_area_ratio_for_candidate(
+                                candidate_state,
+                                candidate.loc[dependent_idx, 'X_mm'],
+                                candidate.loc[dependent_idx, 'Y_mm'],
+                                candidate.loc[dependent_idx, 'Z_mm'],
+                                candidate.loc[dependent_idx, 'Länge_mm'],
+                                candidate.loc[dependent_idx, 'Breite_mm'],
+                            )
+                            if minimum - 1e-6 <= new_ratio < ratios.get(dependent_idx, 0.0) - 1e-6:
+                                moved_indices.add(dependent_idx)
+                        if not _valid(
+                            candidate, ratios, moved_indices,
+                            baseline_edges=cross_baseline_edges,
+                        ):
+                            continue
+                        new_cog = _load_center_of_gravity_values_for_platform(candidate, prow)
+                        if (
+                            abs(safe_number(new_cog.get('Schwerpunkt_Abstand_X_mm')))
+                            > accepted_cog_limit[0] + 1.0
+                            or abs(safe_number(new_cog.get('Schwerpunkt_Abstand_Y_mm')))
+                            > accepted_cog_limit[1] + max(1.0, platform_width * 0.05)
+                        ):
+                            continue
+                        score = (
+                            abs(safe_number(new_cog.get('Schwerpunkt_Abstand_X_mm'))),
+                            abs(safe_number(new_cog.get('Schwerpunkt_Abstand_Y_mm'))),
+                            -second_x,
+                        )
+                        if cross_best is None or score < cross_best[0]:
+                            cross_best = (score, candidate, moved_indices)
+            if cross_best is not None:
+                _, result, moved_indices = cross_best
+                if 'Ebene' in result.columns:
+                    for moved in moved_indices:
+                        value = str(result.loc[moved, 'Ebene'])
+                        if 'Querlagen-Kaskade' not in value:
+                            result.loc[moved, 'Ebene'] = f'{value} / Querlagen-Kaskade'
+
+        # Eine schmale Einheit darf nach der vertikalen Kaskade einen freien
+        # Seitenstreifen einer tieferen Lage nutzen. Die vorhandene Grundgruppe
+        # wird dabei nicht neu gepackt; verschoben wird genau eine vollständige
+        # Verladeeinheit.
+        for _side_pair_attempt in range(min(4, max(1, max_moves_per_platform))):
+            current = result.loc[_real_mask(result, pname)].copy()
+            state = init_platform_state(
+                prow, base_z,
+                safe_number(prow.get('Einlage_zwischen_Lagen_mm'), 0.0), 0.0,
+            )
+            state['placements'] = result[
+                result['Pritsche'].astype(str).eq(pname)
+            ].to_dict('records')
+            ratios = {
+                idx: _support_area_ratio_for_candidate(
+                    state, row['X_mm'], row['Y_mm'], row['Z_mm'],
+                    row['Länge_mm'], row['Breite_mm'],
+                )
+                for idx, row in current.iterrows()
+            }
+            pair_best = None
+            for upper_idx, upper in current.sort_values(
+                ['Breite_mm', 'Z_mm'], kind='stable'
+            ).iterrows():
+                if bundles_only and str(upper.get('Typ', '')).strip() != 'Bund':
+                    continue
+                if str(upper.get('Einheit_ID', '')) in fixed_parent_ids:
+                    continue
+                old_z = safe_number(upper.get('Z_mm'))
+                width = safe_number(upper.get('Breite_mm'))
+                length = safe_number(upper.get('Länge_mm'))
+                max_x = eff_len - length
+                if width <= 0.0 or length <= 0.0 or max_x < -0.1:
+                    continue
+                lower_levels = sorted(
+                    z for z in current['Z_mm'].round(1).unique()
+                    if base_z - 0.1 <= z < old_z - 1.0
+                )
+                for target_z in reversed(lower_levels):
+                    target_rows = current[
+                        current['Z_mm'].round(1).eq(round(target_z, 1))
+                    ]
+                    if target_rows.empty or not any(
+                        width + safe_number(row.get('Breite_mm'))
+                        <= platform_width + 0.1
+                        for _, row in target_rows.iterrows()
+                    ):
+                        continue
+                    occupied = sorted(
+                        (
+                            max(0.0, safe_number(row.get('Y_mm'))),
+                            min(
+                                platform_width,
+                                safe_number(row.get('Y_mm'))
+                                + safe_number(row.get('Breite_mm')),
+                            ),
+                        )
+                        for _, row in target_rows.iterrows()
+                    )
+                    merged = []
+                    for start, end in occupied:
+                        if end <= start + 0.1:
+                            continue
+                        if merged and start <= merged[-1][1] + 0.1:
+                            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+                        else:
+                            merged.append((start, end))
+                    gaps = []
+                    cursor = 0.0
+                    for start, end in merged:
+                        if start - cursor >= width - 0.1:
+                            gaps.append((cursor, start))
+                        cursor = max(cursor, end)
+                    if platform_width - cursor >= width - 0.1:
+                        gaps.append((cursor, platform_width))
+                    y_candidates = {
+                        round(value, 1)
+                        for start, end in gaps
+                        for value in (start, end - width, start + (end - start - width) / 2.0)
+                    }
+                    x_candidates = {
+                        round(max(0.0, min(max_x, safe_number(upper.get('X_mm')))), 1),
+                        round(max(0.0, min(max_x, platform_center_x - length / 2.0)), 1),
+                    }
+                    for y in sorted(y_candidates):
+                        for x in sorted(x_candidates):
+                            candidate = result.copy()
+                            candidate.loc[upper_idx, ['X_mm', 'Y_mm', 'Z_mm']] = [
+                                x, y, round(target_z, 1),
+                            ]
+                            if not _valid(
+                                candidate, ratios, upper_idx,
+                                baseline_edges=side_pair_baseline_edges,
+                            ):
+                                continue
+                            new_cog = _load_center_of_gravity_values_for_platform(candidate, prow)
+                            if (
+                                abs(safe_number(new_cog.get('Schwerpunkt_Abstand_X_mm')))
+                                > accepted_cog_limit[0] + 1.0
+                                or abs(safe_number(new_cog.get('Schwerpunkt_Abstand_Y_mm')))
+                                > accepted_cog_limit[1] + max(1.0, platform_width * 0.05)
+                            ):
+                                continue
+                            score = (
+                                target_z,
+                                abs(safe_number(new_cog.get('Schwerpunkt_Abstand_X_mm'))),
+                                abs(safe_number(new_cog.get('Schwerpunkt_Abstand_Y_mm'))),
+                            )
+                            if pair_best is None or score < pair_best[0]:
+                                pair_best = (score, candidate, upper_idx)
+            if pair_best is None:
+                break
+            _, result, moved = pair_best
+            if 'Ebene' in result.columns:
+                value = str(result.loc[moved, 'Ebene'])
+                if 'quer verdichtet' not in value:
+                    result.loc[moved, 'Ebene'] = f'{value} / quer verdichtet'
 
         for _ in range(max_moves_per_platform):
             current = result.loc[_real_mask(result, pname)].copy()
