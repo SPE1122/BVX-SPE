@@ -39,6 +39,12 @@ An early-unloading narrow part must not remain as an unnecessary incidental supp
 
 **How to apply:** If the narrow early part fits beside the current top member without increasing height, promote it there. Revalidate all support, collisions, and platform bounds after removing its lower support contribution.
 
+Compact mode must atomically rebuild an upper run of single rows into the fewest width-valid rows; lateral centering alone is not compaction.
+
+**Why:** Moving one member at a time gets trapped because dependents temporarily lose support, leaving a tall central column even though the complete multi-row arrangement is valid.
+
+**How to apply:** Preserve logical top-down order, greedily form width-valid rows, install all rows in one candidate, then validate support, collisions, height, bounds, and total-load lateral balance. With an odd count, one singleton is unavoidable.
+
 Bound atomic compaction by a small per-platform time budget and a short prioritized candidate list. If the budget expires, retain the last fully validated state rather than continuing exhaustive subset search or accepting an unchecked layout.
 
 **Why:** Independent shelf starts create many combinatorial variants; exhaustive validation can turn an otherwise short app calculation into a run lasting more than 16 minutes.

@@ -314,6 +314,52 @@ class LayerCompactionTest(unittest.TestCase):
         _underbau, warnings = app.calculate_underbau_rows_for_platform(after, platform.iloc[0], min_support_ratio=0.35)
         self.assertTrue(warnings.empty)
 
+    def test_upper_31_to_37_group_is_repacked_into_four_compact_rows(self):
+        platform = pd.DataFrame([{
+            'Pritsche': 'F02',
+            'Länge_mm': 10000.0,
+            'Breite_mm': 2400.0,
+            'Max_Höhe_mm': 2480.0,
+            'Überhang_vorne_mm': 0.0,
+            'Überhang_hinten_mm': 0.0,
+            'Kantholz_erste_Lage_mm': 0.0,
+            'Mindest_Stützbreite_%': 30.0,
+        }])
+        specs = [
+            ('38', 0.0, 0.0, 1200.0), ('40', 1200.0, 0.0, 1200.0),
+            ('37', 0.0, 280.0, 1200.0), ('31', 1200.0, 280.0, 400.0),
+            ('36', 600.0, 560.0, 1200.0), ('35', 600.0, 840.0, 1200.0),
+            ('34', 600.0, 1120.0, 1200.0), ('33', 600.0, 1400.0, 1200.0),
+            ('32', 600.0, 1680.0, 1200.0),
+        ]
+        placements = pd.DataFrame([
+            {
+                'Pritsche': 'F02', 'Einheit_ID': number, 'Bauteile': number,
+                'Typ': 'Einzelteil', 'X_mm': 0.0, 'Y_mm': y, 'Z_mm': z,
+                'Länge_mm': 9000.0, 'Breite_mm': width, 'Höhe_mm': 280.0,
+                'Gewicht_kg': width, 'Logische_Reihenfolge_im_Block': int(number) - 30,
+            }
+            for number, y, z, width in specs
+        ])
+
+        promoted = app.promote_early_narrow_fillers_to_top(placements, platform)
+        after = app.repack_upper_ranked_rows_compactly(promoted, platform)
+        by_part = after.set_index('Bauteile')
+
+        self.assertEqual(float(by_part.loc['31', 'Z_mm']), float(by_part.loc['32', 'Z_mm']))
+        self.assertEqual(float(by_part.loc['33', 'Z_mm']), float(by_part.loc['34', 'Z_mm']))
+        self.assertEqual(float(by_part.loc['35', 'Z_mm']), float(by_part.loc['36', 'Z_mm']))
+        self.assertLess(float(by_part.loc['37', 'Z_mm']), float(by_part.loc['36', 'Z_mm']))
+        self.assertLess(
+            float((after['Z_mm'] + after['Höhe_mm']).max()),
+            float((placements['Z_mm'] + placements['Höhe_mm']).max()),
+        )
+        self.assertTrue(app.find_geometry_conflicts(after, platform).empty)
+        _underbau, warnings = app.calculate_underbau_rows_for_platform(
+            after, platform.iloc[0], min_support_ratio=0.35
+        )
+        self.assertTrue(warnings.empty)
+
     def test_assignment_control_ignores_numbers_absent_from_input(self):
         placements = pd.DataFrame([
             {

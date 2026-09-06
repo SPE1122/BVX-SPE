@@ -5884,6 +5884,8 @@ def apply_main_loading_postprocess(
             result = _sync_planned_support_rows_to_load(result)
             result = promote_early_narrow_fillers_to_top(result, compaction_platforms)
             result = _sync_planned_support_rows_to_load(result)
+            result = repack_upper_ranked_rows_compactly(result, compaction_platforms)
+            result = _sync_planned_support_rows_to_load(result)
     new_summary = recompute_summary_from_placements(result, platforms_local)
     return result, new_summary
 
@@ -6206,6 +6208,164 @@ def promote_early_narrow_fillers_to_top(
                         if 'frühes Schmalteil oben' not in value:
                             result.at[idx, 'Ebene'] = f'{value} / frühes Schmalteil oben'
                 break
+
+    return result
+
+
+def repack_upper_ranked_rows_compactly(
+    placements_df: pd.DataFrame,
+    platforms_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Atomically rebuild upper single rows into the fewest safe lateral rows."""
+    if placements_df is None or placements_df.empty or platforms_df is None or platforms_df.empty:
+        return placements_df.copy() if placements_df is not None else pd.DataFrame()
+
+    result = placements_df.copy()
+    required = {'Pritsche', 'X_mm', 'Y_mm', 'Z_mm', 'Länge_mm', 'Breite_mm', 'Höhe_mm'}
+    if not required.issubset(result.columns):
+        return result
+    for col in ['X_mm', 'Y_mm', 'Z_mm', 'Länge_mm', 'Breite_mm', 'Höhe_mm', 'Gewicht_kg']:
+        if col in result.columns:
+            result[col] = pd.to_numeric(result[col], errors='coerce')
+    helper_types = {'Unterbau', 'Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz'}
+
+    def _fallback_rank(row: pd.Series) -> float:
+        for key in ('Bauteile', 'Bauteilnummer', 'Ansicht_Label'):
+            match = re.search(r'\d+(?:[.,]\d+)?', str(row.get(key, '') or ''))
+            if match:
+                return safe_number(match.group(0).replace(',', '.'), float('nan'))
+        return float('nan')
+
+    for _, prow in platforms_df.iterrows():
+        pname = str(prow.get('Pritsche', ''))
+        platform_width = safe_number(prow.get('Breite_mm'), 0.0)
+        if not pname or platform_width <= 0:
+            continue
+        mask = (
+            result['Pritsche'].astype(str).eq(pname)
+            & result['X_mm'].notna() & result['Y_mm'].notna() & result['Z_mm'].notna()
+            & ~result.get('Typ', pd.Series(dtype=str)).astype(str).isin(helper_types)
+        )
+        real = result.loc[mask].copy()
+        if len(real) < 5:
+            continue
+
+        layer_list = [
+            (float(z), group.copy())
+            for z, group in real.groupby(real['Z_mm'].round(1), sort=True)
+        ]
+        anchor_pos = None
+        for pos in range(len(layer_list) - 1, -1, -1):
+            _z, layer = layer_list[pos]
+            span_y = float(
+                (layer['Y_mm'] + layer['Breite_mm']).max() - layer['Y_mm'].min()
+            )
+            if len(layer) >= 2 and span_y >= platform_width * 0.90:
+                anchor_pos = pos
+                break
+        if anchor_pos is None or anchor_pos >= len(layer_list) - 1:
+            continue
+
+        upper_indices = [
+            idx
+            for _z, layer in layer_list[anchor_pos + 1:]
+            for idx in layer.index
+        ]
+        upper = real.loc[upper_indices].copy()
+        if len(upper) < 4:
+            continue
+        heights = pd.to_numeric(upper['Höhe_mm'], errors='coerce')
+        if heights.isna().any() or heights.max() - heights.min() > 2.0:
+            continue
+        if (upper['Breite_mm'] > platform_width * 0.55).any():
+            continue
+
+        if 'Logische_Reihenfolge_im_Block' in upper.columns:
+            upper['_rank'] = pd.to_numeric(
+                upper['Logische_Reihenfolge_im_Block'], errors='coerce'
+            )
+        else:
+            upper['_rank'] = upper.apply(_fallback_rank, axis=1)
+        upper['_rank'] = upper['_rank'].where(
+            upper['_rank'].notna(), upper.apply(_fallback_rank, axis=1)
+        )
+        if upper['_rank'].isna().any():
+            continue
+        upper = upper.sort_values('_rank', kind='stable')
+
+        # Top-down order remains logical. Each row is filled only until the
+        # physical deck width is reached; the final odd member becomes the
+        # lowest singleton rather than creating several unnecessary top rows.
+        top_down_rows: List[List[Any]] = []
+        current_row: List[Any] = []
+        current_width = 0.0
+        for idx, row in upper.iterrows():
+            width = safe_number(row.get('Breite_mm'), 0.0)
+            if current_row and current_width + width > platform_width + 0.1:
+                top_down_rows.append(current_row)
+                current_row = []
+                current_width = 0.0
+            current_row.append(idx)
+            current_width += width
+        if current_row:
+            top_down_rows.append(current_row)
+        if len(top_down_rows) >= len(layer_list[anchor_pos + 1:]):
+            continue
+
+        target_bottom_z = min(float(z) for z, _layer in layer_list[anchor_pos + 1:])
+        height = float(heights.iloc[0])
+        old_top = float((upper['Z_mm'] + upper['Höhe_mm']).max())
+        mirror_choices = list(itertools.product(
+            *[(False, True) if len(row_indices) > 1 else (False,)
+              for row_indices in top_down_rows]
+        ))
+        best: Optional[Tuple[float, pd.DataFrame]] = None
+        for mirrors in mirror_choices:
+            candidate = result.copy()
+            bottom_up_rows = list(reversed(top_down_rows))
+            for level, row_indices in enumerate(bottom_up_rows):
+                top_down_pos = len(top_down_rows) - 1 - level
+                ordered = list(reversed(row_indices)) if mirrors[top_down_pos] else list(row_indices)
+                row_width = sum(safe_number(candidate.loc[idx, 'Breite_mm']) for idx in ordered)
+                cursor = (platform_width - row_width) / 2.0
+                for idx in ordered:
+                    candidate.loc[idx, ['Y_mm', 'Z_mm']] = [
+                        round(cursor, 1),
+                        round(target_bottom_z + level * height, 1),
+                    ]
+                    cursor += safe_number(candidate.loc[idx, 'Breite_mm'])
+
+            candidate_upper = candidate.loc[upper.index]
+            new_top = float((candidate_upper['Z_mm'] + candidate_upper['Höhe_mm']).max())
+            if new_top >= old_top - 1.0:
+                continue
+            on_platform = candidate[candidate['Pritsche'].astype(str).eq(pname)]
+            if not find_geometry_conflicts(on_platform, pd.DataFrame([prow])).empty:
+                continue
+            minimum = _effective_multilayer_support_ratio(
+                safe_number(
+                    prow.get('Mindest_Stützbreite_%', prow.get('Mindest_Stuetzbreite_%')),
+                    35.0,
+                ) / 100.0,
+                True,
+            )
+            _underbau, warnings = calculate_underbau_rows_for_platform(
+                candidate, prow, min_support_ratio=minimum
+            )
+            if warnings is not None and not warnings.empty:
+                continue
+            cog = _load_center_of_gravity_values_for_platform(candidate, prow)
+            score = abs(safe_number(cog.get('Schwerpunkt_Abstand_Y_mm')))
+            if best is None or score < best[0]:
+                best = (score, candidate)
+
+        if best is not None:
+            result = best[1]
+            if 'Ebene' in result.columns:
+                for idx in upper.index:
+                    value = str(result.at[idx, 'Ebene'])
+                    if 'obere Restgruppe atomar' not in value:
+                        result.at[idx, 'Ebene'] = f'{value} / obere Restgruppe atomar'
 
     return result
 
