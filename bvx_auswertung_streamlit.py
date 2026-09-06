@@ -4594,10 +4594,11 @@ def compact_placements_conservatively(
         if col in result.columns:
             result[col] = pd.to_numeric(result[col], errors='coerce')
     atomic_group_column = '_Atomare_Basisgruppe'
-    if atomic_group_column not in result.columns:
-        result[atomic_group_column] = ''
-    else:
-        result[atomic_group_column] = result[atomic_group_column].fillna('').astype(str)
+    # Group bindings are valid only within this completed postprocess pass.
+    # Planning builds candidates incrementally; carrying a provisional binding
+    # into the next pass would prevent a newly complete five/six-part block
+    # from being evaluated atomically.
+    result[atomic_group_column] = ''
     helper_types = {'Unterbau', 'Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz'}
 
     def _real_mask(df: pd.DataFrame, pname: str) -> pd.Series:

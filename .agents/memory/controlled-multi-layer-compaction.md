@@ -55,7 +55,7 @@ Members of an accepted atomic base shelf remain bound for all later single-unit 
 
 **Why:** A valid five-part base was created correctly, but a later generic single-unit move extracted its middle member and placed it at the top, preserving geometric accessibility while violating the intended load sequence.
 
-**How to apply:** Mark only the core members when an atomic candidate is accepted. Exclude marked members from individual lowering, filler promotion, and upper-rest repacking; do not mark transitive dependents.
+**How to apply:** Rebuild bindings from scratch on every complete postprocess pass. Mark only core members accepted in that pass; exclude them from later individual lowering, filler promotion, and upper-rest repacking, but do not mark transitive dependents.
 
 Bound atomic compaction by a small per-platform time budget and a short prioritized candidate list. If the budget expires, retain the last fully validated state rather than continuing exhaustive subset search or accepting an unchecked layout.
 

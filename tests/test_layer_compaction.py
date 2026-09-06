@@ -652,6 +652,10 @@ class LayerCompactionTest(unittest.TestCase):
                 'Ebene': 'Profilblock 21-26',
             })
         before = pd.DataFrame(rows)
+        before.loc[
+            before['Bauteile'].astype(str).isin(['21', '22', '23']),
+            '_Atomare_Basisgruppe',
+        ] = 'stale-provisional-group'
 
         after = app.compact_placements_conservatively(before, platform, bundles_only=True)
 
@@ -669,6 +673,11 @@ class LayerCompactionTest(unittest.TestCase):
             - float(platform.iloc[0]['Überhang_vorne_mm'])
         )
         self.assertLessEqual(abs(own_rear - own_front), 1.0)
+        self.assertEqual(1, terminal['_Atomare_Basisgruppe'].nunique())
+        self.assertNotEqual(
+            'stale-provisional-group',
+            str(terminal['_Atomare_Basisgruppe'].iloc[0]),
+        )
         self.assertEqual(0, len(app.find_geometry_conflicts(after, platform)))
 
     def test_complete_31_to_48_profile_stack_cascades_from_terminal_six_base(self):
