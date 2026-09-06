@@ -234,6 +234,56 @@ def f02_side_by_side_release_group() -> pd.DataFrame:
 
 
 class LayerCompactionTest(unittest.TestCase):
+    def test_real_terminal_cascade_places_39_in_three_part_base_row(self):
+        platform = f02_platform()
+        platform.loc[0, [
+            'Länge_mm', 'Breite_mm', 'Überhang_vorne_mm', 'Überhang_hinten_mm',
+        ]] = [7600.0, 2450.0, 1400.0, 2922.0]
+        before = real_f02_intermediate_stack().copy()
+        before['Profil'] = 'Decke über EG'
+        template = before.iloc[0].to_dict()
+        additions = [
+            ('31', 0, 752.0, 1225.0, 2480.0, 7326.0, 400.0, 280.0),
+            ('48', 17, 6050.0, 1225.0, 80.0, 3003.0, 951.724138, 160.0),
+        ]
+        for part, rank, x, y, z, length, width, height in additions:
+            row = {
+                **template,
+                'Bauteile': part,
+                'Einheit_ID': f'E{int(part) - 12:04d}',
+                'X_mm': x, 'Y_mm': y, 'Z_mm': z,
+                'Länge_mm': length, 'Breite_mm': width, 'Höhe_mm': height,
+                'Logische_Reihenfolge_im_Block': rank,
+                'Profil': 'Decke über EG',
+            }
+            before = pd.concat([before, pd.DataFrame([row])], ignore_index=True)
+        terminal_positions = {
+            43: (0.0, 1225.0), 44: (0.0, 25.0),
+            45: (3025.0, 25.0), 46: (3025.0, 1225.0),
+            47: (6050.0, 25.0), 48: (6050.0, 1225.0),
+        }
+        for number, (x, y) in terminal_positions.items():
+            mask = before['Bauteile'].astype(str).eq(str(number))
+            before.loc[mask, ['X_mm', 'Y_mm', 'Z_mm']] = [x, y, 80.0]
+
+        after = app.repack_terminal_cascade_deterministically(before, platform)
+
+        expected_rows = [
+            (['39', '41', '42'], 240.0),
+            (['38', '40'], 520.0),
+            (['36', '37'], 800.0),
+            (['34', '35'], 1080.0),
+            (['32', '33'], 1360.0),
+            (['31'], 1640.0),
+        ]
+        for parts, expected_z in expected_rows:
+            actual = after.loc[
+                after['Bauteile'].astype(str).isin(parts), 'Z_mm'
+            ]
+            self.assertEqual(len(parts), len(actual))
+            self.assertTrue((actual - expected_z).abs().le(0.1).all())
+        self.assertEqual(0, len(app.find_geometry_conflicts(after, platform)))
+
     def test_compact_mode_uses_safe_multilayer_support_floor_only_when_enabled(self):
         self.assertEqual(0.30, app._effective_multilayer_support_ratio(0.30, False))
         self.assertEqual(0.35, app._effective_multilayer_support_ratio(0.30, True))

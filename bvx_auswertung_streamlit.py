@@ -5974,6 +5974,10 @@ def apply_main_loading_postprocess(
             result = _sync_planned_support_rows_to_load(result)
             result = repack_upper_ranked_rows_compactly(result, compaction_platforms)
             result = _sync_planned_support_rows_to_load(result)
+            result = repack_terminal_cascade_deterministically(
+                result, compaction_platforms
+            )
+            result = _sync_planned_support_rows_to_load(result)
     new_summary = recompute_summary_from_placements(result, platforms_local)
     return result, new_summary
 
@@ -6489,6 +6493,167 @@ def repack_upper_ranked_rows_compactly(
                     if 'obere Restgruppe atomar' not in value:
                         result.at[idx, 'Ebene'] = f'{value} / obere Restgruppe atomar'
 
+    return result
+
+
+def repack_terminal_cascade_deterministically(
+    placements_df: pd.DataFrame,
+    platforms_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Rebuild the complete run above terminal six as one validated cascade."""
+    if placements_df is None or placements_df.empty or platforms_df is None or platforms_df.empty:
+        return placements_df.copy() if placements_df is not None else pd.DataFrame()
+    result = placements_df.copy()
+    required = {
+        'Pritsche', 'X_mm', 'Y_mm', 'Z_mm', 'Länge_mm', 'Breite_mm',
+        'Höhe_mm', 'Logische_Reihenfolge_im_Block',
+    }
+    if not required.issubset(result.columns):
+        return result
+    for col in required - {'Pritsche'} | {'Gewicht_kg'}:
+        if col in result.columns:
+            result[col] = pd.to_numeric(result[col], errors='coerce')
+    helpers = {'Unterbau', 'Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz'}
+
+    for _, prow in platforms_df.iterrows():
+        pname = str(prow.get('Pritsche', ''))
+        width = safe_number(prow.get('Breite_mm'), 0.0)
+        mask = (
+            result['Pritsche'].astype(str).eq(pname)
+            & result['X_mm'].notna() & result['Y_mm'].notna() & result['Z_mm'].notna()
+            & ~result.get('Typ', pd.Series('', index=result.index)).astype(str).isin(helpers)
+        )
+        ranked = result.loc[mask].dropna(
+            subset=['Logische_Reihenfolge_im_Block']
+        ).sort_values('Logische_Reihenfolge_im_Block', kind='stable')
+        if len(ranked) < 11 or width <= 0:
+            continue
+
+        terminal = ranked.tail(6)
+        terminal_ranks = terminal['Logische_Reihenfolge_im_Block'].tolist()
+        if (
+            any(abs(terminal_ranks[i + 1] - terminal_ranks[i] - 1.0) > 0.1 for i in range(5))
+            or terminal['Höhe_mm'].max() - terminal['Höhe_mm'].min() > 1.0
+            or (
+                'Profil' in terminal.columns
+                and terminal['Profil'].astype(str).nunique(dropna=False) != 1
+            )
+        ):
+            continue
+
+        terminal_first_rank = float(terminal_ranks[0])
+        preceding = ranked[
+            ranked['Logische_Reihenfolge_im_Block'] < terminal_first_rank - 0.1
+        ]
+        if len(preceding) < 5:
+            continue
+        run_height = float(preceding.iloc[-1]['Höhe_mm'])
+        run_indices: List[Any] = []
+        expected_rank = terminal_first_rank - 1.0
+        for idx, row in preceding.iloc[::-1].iterrows():
+            rank = safe_number(row.get('Logische_Reihenfolge_im_Block'), float('nan'))
+            if (
+                not math.isfinite(rank)
+                or abs(rank - expected_rank) > 0.1
+                or abs(safe_number(row.get('Höhe_mm')) - run_height) > 1.0
+            ):
+                break
+            run_indices.append(idx)
+            expected_rank -= 1.0
+        run_indices.reverse()
+        if len(run_indices) < 5:
+            continue
+        run = result.loc[run_indices].sort_values(
+            'Logische_Reihenfolge_im_Block', kind='stable'
+        )
+        base_five = run.tail(5)
+        narrow = list(base_five.sort_values(
+            ['Breite_mm', 'Logische_Reihenfolge_im_Block'], kind='stable'
+        ).head(2).index)
+        third = next((
+            idx for idx in reversed(list(base_five.index))
+            if idx not in narrow
+            and sum(safe_number(result.loc[i, 'Breite_mm']) for i in narrow + [idx]) <= width + 0.1
+            and sum(
+                safe_number(result.loc[i, 'Breite_mm'])
+                for i in base_five.index if i not in narrow + [idx]
+            ) <= width + 0.1
+        ), None)
+        if third is None:
+            continue
+
+        # Narrowest-latest | narrowest-earliest | latest compatible wide part.
+        lower = [narrow[-1], narrow[0], third]
+        upper = [idx for idx in base_five.index if idx not in lower]
+        earlier = list(run.iloc[:-5].index)
+        top_down: List[List[Any]] = []
+        if len(earlier) % 2:
+            top_down.append([earlier.pop(0)])
+        while earlier:
+            pair, earlier = earlier[:2], earlier[2:]
+            if sum(safe_number(result.loc[idx, 'Breite_mm']) for idx in pair) > width + 0.1:
+                top_down = []
+                break
+            top_down.append(pair)
+        if len(run) > 5 and not top_down:
+            continue
+        rows = [lower, upper] + list(reversed(top_down))
+        base_z = float((terminal['Z_mm'] + terminal['Höhe_mm']).max())
+        before_cog = _load_center_of_gravity_values_for_platform(result, prow)
+        best: Optional[Tuple[float, pd.DataFrame]] = None
+
+        for mirrors in itertools.product(*[
+            (False, True) if len(row) > 1 else (False,) for row in rows
+        ]):
+            candidate = result.copy()
+            for level, (row, mirror) in enumerate(zip(rows, mirrors)):
+                ordered = list(reversed(row)) if mirror else row
+                row_width = sum(safe_number(candidate.loc[idx, 'Breite_mm']) for idx in ordered)
+                cursor = (width - row_width) / 2.0
+                for idx in ordered:
+                    candidate.loc[idx, ['Y_mm', 'Z_mm']] = [
+                        round(cursor, 1), round(base_z + level * run_height, 1)
+                    ]
+                    cursor += safe_number(candidate.loc[idx, 'Breite_mm'])
+            on_platform = candidate[candidate['Pritsche'].astype(str).eq(pname)]
+            if not find_geometry_conflicts(on_platform, pd.DataFrame([prow])).empty:
+                continue
+            minimum = _effective_multilayer_support_ratio(
+                safe_number(
+                    prow.get('Mindest_Stützbreite_%', prow.get('Mindest_Stuetzbreite_%')),
+                    35.0,
+                ) / 100.0,
+                True,
+            )
+            _supports, warnings = calculate_underbau_rows_for_platform(
+                candidate, prow, min_support_ratio=minimum
+            )
+            if warnings is not None and not warnings.empty:
+                continue
+            after_cog = _load_center_of_gravity_values_for_platform(candidate, prow)
+            if (
+                abs(safe_number(after_cog.get('Schwerpunkt_Abstand_X_mm')))
+                > abs(safe_number(before_cog.get('Schwerpunkt_Abstand_X_mm'))) + 1.0
+                or abs(safe_number(after_cog.get('Schwerpunkt_Abstand_Y_mm')))
+                > abs(safe_number(before_cog.get('Schwerpunkt_Abstand_Y_mm'))) + 1.0
+            ):
+                continue
+            score = abs(safe_number(after_cog.get('Schwerpunkt_Abstand_Y_mm')))
+            if best is None or score < best[0]:
+                best = (score, candidate)
+
+        if best is not None:
+            result = best[1]
+            group_col = '_Atomare_Basisgruppe'
+            if group_col not in result.columns:
+                result[group_col] = ''
+            group_id = f'{pname}:deterministic-terminal-cascade'
+            result.loc[run.index, group_col] = group_id
+            if 'Ebene' in result.columns:
+                result.loc[run.index, 'Ebene'] = result.loc[run.index, 'Ebene'].astype(str).apply(
+                    lambda value: value if 'terminale Kaskade atomar' in value
+                    else f'{value} / terminale Kaskade atomar'
+                )
     return result
 
 

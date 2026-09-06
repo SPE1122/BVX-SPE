@@ -75,6 +75,12 @@ When several overlapping five-unit windows are valid in one equal-height logical
 
 **How to apply:** Put descending window rank before height and displacement criteria in the complete-window score. Derive this solely from logical order, never fixed part numbers.
 
+For a homogeneous terminal six followed by a consecutive equal-height run above it, prefer one deterministic whole-cascade rebuild over competing incremental postprocess stages.
+
+**Why:** Individually valid partial states repeatedly left one narrow member at the top because each later heuristic inherited bindings and geometry from an earlier heuristic. Partial-unit tests did not represent that full interaction.
+
+**How to apply:** Atomically set the last five preceding units as a width-valid 3+2 shelf and rebuild the earlier run as bottom-up pairs with an odd earliest singleton on top. Accept only the fully validated final state.
+
 Bound atomic compaction by a small per-platform time budget and a short prioritized candidate list. If the budget expires, retain the last fully validated state rather than continuing exhaustive subset search or accepting an unchecked layout.
 
 **Why:** Independent shelf starts create many combinatorial variants; exhaustive validation can turn an otherwise short app calculation into a run lasting more than 16 minutes.
