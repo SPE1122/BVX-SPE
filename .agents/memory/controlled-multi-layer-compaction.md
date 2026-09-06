@@ -63,6 +63,12 @@ A complete higher-quality atomic window may replace provisional atomic subgroups
 
 **How to apply:** Before evaluating a complete window, compute every bound group it touches. Accept reconsideration only if each touched group is wholly contained in the new window, then replace those bindings with the new complete group.
 
+Only an accepted homogeneous terminal six-unit 3×2 base is immutable. A complete five-unit window may supersede a broad provisional group even when that group extends outside the window; clear the obsolete provisional binding when it does.
+
+**Why:** In the full load, a broad provisional group contained members of the complete five-unit block plus an outside dependent. Requiring full containment kept the middle member at the top, while allowing every overlap would risk tearing apart the terminal 3×2 base.
+
+**How to apply:** Distinguish terminal bindings from ordinary atomic bindings. Reject a five-window only when it would partially intersect a terminal binding; otherwise replace all touched provisional bindings with the validated complete five-unit binding.
+
 Bound atomic compaction by a small per-platform time budget and a short prioritized candidate list. If the budget expires, retain the last fully validated state rather than continuing exhaustive subset search or accepting an unchecked layout.
 
 **Why:** Independent shelf starts create many combinatorial variants; exhaustive validation can turn an otherwise short app calculation into a run lasting more than 16 minutes.

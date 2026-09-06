@@ -558,6 +558,7 @@ class LayerCompactionTest(unittest.TestCase):
             str(row_39['_Atomare_Basisgruppe']),
             str(row_42['_Atomare_Basisgruppe']),
         )
+        self.assertIn(':local:', str(row_39['_Atomare_Basisgruppe']))
         self.assertTrue(
             abs(float(row_39['Y_mm'] + row_39['Breite_mm']) - float(row_42['Y_mm'])) <= 0.1
             or abs(float(row_42['Y_mm'] + row_42['Breite_mm']) - float(row_39['Y_mm'])) <= 0.1
@@ -678,6 +679,7 @@ class LayerCompactionTest(unittest.TestCase):
             'stale-provisional-group',
             str(terminal['_Atomare_Basisgruppe'].iloc[0]),
         )
+        self.assertIn(':terminal:', str(terminal['_Atomare_Basisgruppe'].iloc[0]))
         self.assertEqual(0, len(app.find_geometry_conflicts(after, platform)))
 
     def test_complete_31_to_48_profile_stack_cascades_from_terminal_six_base(self):

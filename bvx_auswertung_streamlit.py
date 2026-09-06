@@ -5240,7 +5240,11 @@ def compact_placements_conservatively(
                         score = (new_top, new_z_sum, group_x_span, len(moved_indices))
                         if atomic_best is None or score < atomic_best[0]:
                             atomic_best = (
-                                score, candidate, moved_indices, set(group_indices)
+                                score,
+                                candidate,
+                                moved_indices,
+                                set(group_indices),
+                                is_terminal_profile_group,
                             )
                             # Jede harte Geometrie-, Tragketten-, Auflage-,
                             # Reihenfolge- und Schwerpunktprüfung ist erfüllt.
@@ -5253,9 +5257,9 @@ def compact_placements_conservatively(
                     break
             if atomic_best is None:
                 break
-            _, result, moved_group, atomic_core_group = atomic_best
+            _, result, moved_group, atomic_core_group, is_terminal_atomic_group = atomic_best
             atomic_group_id = (
-                f'{pname}:atomic:'
+                f"{pname}:{'terminal' if is_terminal_atomic_group else 'atomic'}:"
                 + ','.join(sorted(
                     str(result.loc[idx].get('Einheit_ID', idx))
                     for idx in atomic_core_group
@@ -5302,13 +5306,12 @@ def compact_placements_conservatively(
                     ).tolist()
                     if str(value).strip()
                 }
-                # A complete five-unit window may replace an earlier partial
-                # atomic group only when it contains that whole group.  This
-                # permits 38--42 to supersede a provisional 2+2 subset while
-                # still preventing windows such as 41--45 from tearing apart
-                # the complete terminal 43--48 base.
+                # A complete five-unit window supersedes provisional broad
+                # shelf groups, even if those groups also contain an outside
+                # dependent. Only the accepted terminal 3x2 base is immutable.
                 if any(
-                    not set(current.index[
+                    ':terminal:' in group_id
+                    and not set(current.index[
                         current[atomic_group_column].astype(str).eq(group_id)
                     ]).issubset(window_index_set)
                     for group_id in intersected_group_ids
@@ -5485,11 +5488,30 @@ def compact_placements_conservatively(
                                 )
                                 if local_best is None or score < local_best[0]:
                                     local_best = (
-                                        score, candidate, moved_indices,
+                                        score,
+                                        candidate,
+                                        moved_indices,
                                         set(window_indices),
+                                        set(intersected_group_ids),
                                     )
             if local_best is not None:
-                _, result, moved_indices, atomic_core_group = local_best
+                (
+                    _,
+                    result,
+                    moved_indices,
+                    atomic_core_group,
+                    replaced_group_ids,
+                ) = local_best
+                provisional_group_ids = {
+                    group_id
+                    for group_id in replaced_group_ids
+                    if ':terminal:' not in group_id
+                }
+                if provisional_group_ids:
+                    result.loc[
+                        result[atomic_group_column].astype(str).isin(provisional_group_ids),
+                        atomic_group_column,
+                    ] = ''
                 atomic_group_id = (
                     f'{pname}:local:'
                     + ','.join(sorted(
