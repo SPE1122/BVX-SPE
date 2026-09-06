@@ -5293,10 +5293,26 @@ def compact_placements_conservatively(
             for pos in range(len(ranked_indices) - 4):
                 window_indices = ranked_indices[pos:pos + 5]
                 window = current.loc[window_indices]
-                if window.get(
-                    atomic_group_column,
-                    pd.Series('', index=window.index),
-                ).astype(str).str.strip().ne('').any():
+                window_index_set = set(window_indices)
+                intersected_group_ids = {
+                    str(value).strip()
+                    for value in window.get(
+                        atomic_group_column,
+                        pd.Series('', index=window.index),
+                    ).tolist()
+                    if str(value).strip()
+                }
+                # A complete five-unit window may replace an earlier partial
+                # atomic group only when it contains that whole group.  This
+                # permits 38--42 to supersede a provisional 2+2 subset while
+                # still preventing windows such as 41--45 from tearing apart
+                # the complete terminal 43--48 base.
+                if any(
+                    not set(current.index[
+                        current[atomic_group_column].astype(str).eq(group_id)
+                    ]).issubset(window_index_set)
+                    for group_id in intersected_group_ids
+                ):
                     continue
                 ranks = pd.to_numeric(window['Logische_Reihenfolge_im_Block'], errors='coerce').tolist()
                 heights = pd.to_numeric(window['Höhe_mm'], errors='coerce')

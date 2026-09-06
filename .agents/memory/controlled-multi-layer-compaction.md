@@ -57,6 +57,12 @@ Members of an accepted atomic base shelf remain bound for all later single-unit 
 
 **How to apply:** Rebuild bindings from scratch on every complete postprocess pass. Mark only core members accepted in that pass; exclude them from later individual lowering, filler promotion, and upper-rest repacking, but do not mark transitive dependents.
 
+A complete higher-quality atomic window may replace provisional atomic subgroups only when it contains every member of each subgroup it intersects.
+
+**Why:** Blanket protection let a provisional 2+2 subset block the valid full five-part 3+2 window, leaving its middle member at the top; removing protection entirely would let overlapping windows tear apart a valid terminal 3×2 base.
+
+**How to apply:** Before evaluating a complete window, compute every bound group it touches. Accept reconsideration only if each touched group is wholly contained in the new window, then replace those bindings with the new complete group.
+
 Bound atomic compaction by a small per-platform time budget and a short prioritized candidate list. If the budget expires, retain the last fully validated state rather than continuing exhaustive subset search or accepting an unchecked layout.
 
 **Why:** Independent shelf starts create many combinatorial variants; exhaustive validation can turn an otherwise short app calculation into a run lasting more than 16 minutes.
