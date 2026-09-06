@@ -4748,6 +4748,9 @@ def compact_placements_conservatively(
             if not ordered:
                 return []
             layouts: List[Dict[Any, Tuple[float, float]]] = []
+            seen_layout_signatures = set()
+            anchors = anchor_rows if anchor_rows is not None else group
+            target_z_guess = float(group['Z_mm'].min())
             # The first part is fixed to remove the row-zero/row-one mirror.
             for mask in range(1 << max(0, len(ordered) - 1)):
                 shelves = [[], []]
@@ -4771,7 +4774,6 @@ def compact_placements_conservatively(
                 # ausgerichtet werden. Bei unterschiedlich langen Reihen ist
                 # ein gemeinsamer X-Start unnötig restriktiv und kann die
                 # Auflage eines darüberliegenden Teils verkleinern.
-                anchors = anchor_rows if anchor_rows is not None else group
                 shelf_start_options: List[List[float]] = []
                 for shelf_no, shelf_len in enumerate(shelf_lengths):
                     if not shelves[shelf_no]:
@@ -4784,17 +4786,29 @@ def compact_placements_conservatively(
                         target_center_x - shelf_len / 2.0,
                     }
                     candidates = set(base_candidates)
+                    support_edge_candidates = set()
                     for _, row in anchors.iterrows():
                         row_x0 = safe_number(row.get('X_mm'), 0.0)
                         row_x1 = row_x0 + safe_number(row.get('Länge_mm'), 0.0)
                         candidates.update([row_x0, row_x1 - shelf_len])
+                        if any(
+                            abs(
+                                safe_number(row.get('Z_mm'))
+                                - (
+                                    target_z_guess
+                                    + safe_number(shelf_row.get('Höhe_mm'))
+                                )
+                            ) <= 1.0
+                            for _, shelf_row in shelves[shelf_no]
+                        ):
+                            support_edge_candidates.update([row_x0, row_x1 - shelf_len])
                     normalized = {
                         round(max(0.0, min(max_start, value)), 1)
                         for value in candidates
                     }
                     normalized_base = {
                         round(max(0.0, min(max_start, value)), 1)
-                        for value in base_candidates
+                        for value in base_candidates | support_edge_candidates
                     }
                     # Das kartesische Produkt zweier Reihen darf nicht mit
                     # jeder Kante des gesamten Stapels explodieren. Mitte und
@@ -4832,62 +4846,75 @@ def compact_placements_conservatively(
                                 layout[idx] = (round(cursor, 1), round(y0, 1))
                                 cursor += safe_number(row.get('Länge_mm'))
                             y0 += shelf_widths[shelf_no]
-                        if layout not in layouts:
+                        signature = tuple(
+                            (str(idx), layout[idx][0], layout[idx][1])
+                            for idx in sorted(layout, key=lambda value: str(value))
+                        )
+                        if signature not in seen_layout_signatures:
+                            seen_layout_signatures.add(signature)
                             layouts.append(layout)
+            group_specs = {
+                idx: {
+                    'x': safe_number(row.get('X_mm')),
+                    'y': safe_number(row.get('Y_mm')),
+                    'length': safe_number(row.get('Länge_mm')),
+                    'width': safe_number(row.get('Breite_mm')),
+                    'height': safe_number(row.get('Höhe_mm')),
+                    'weight': max(
+                        safe_number(row.get('Gewicht_kg'), 0.0),
+                        safe_number(row.get('Länge_mm'))
+                        * safe_number(row.get('Breite_mm')),
+                    ),
+                }
+                for idx, row in group.iterrows()
+            }
+            total_weight = sum(spec['weight'] for spec in group_specs.values()) or 1.0
+            old_y_center = sum(
+                spec['weight'] * (spec['y'] + spec['width'] / 2.0)
+                for spec in group_specs.values()
+            ) / total_weight
+            anchor_specs = [
+                (
+                    safe_number(anchor.get('X_mm')),
+                    safe_number(anchor.get('Y_mm')),
+                    safe_number(anchor.get('X_mm')) + safe_number(anchor.get('Länge_mm')),
+                    safe_number(anchor.get('Y_mm')) + safe_number(anchor.get('Breite_mm')),
+                    safe_number(anchor.get('Z_mm')),
+                )
+                for anchor_idx, anchor in anchors.iterrows()
+                if anchor_idx not in group_specs
+            ]
+
             def _layout_priority(layout: Dict[Any, Tuple[float, float]]) -> Tuple[float, float, float, float]:
                 x0 = min(x for x, _ in layout.values())
                 x1 = max(
-                    x + safe_number(group.loc[idx].get('Länge_mm'))
+                    x + group_specs[idx]['length']
                     for idx, (x, _) in layout.items()
                 )
-                weights = {
-                    idx: max(
-                        safe_number(group.loc[idx].get('Gewicht_kg'), 0.0),
-                        safe_number(group.loc[idx].get('Länge_mm'))
-                        * safe_number(group.loc[idx].get('Breite_mm')),
-                    )
-                    for idx in layout
-                }
-                total_weight = sum(weights.values()) or 1.0
-                old_y_center = sum(
-                    weights[idx] * (
-                        safe_number(group.loc[idx].get('Y_mm'))
-                        + safe_number(group.loc[idx].get('Breite_mm')) / 2.0
-                    )
-                    for idx in layout
-                ) / total_weight
                 new_y_center = sum(
-                    weights[idx] * (
-                        y + safe_number(group.loc[idx].get('Breite_mm')) / 2.0
+                    group_specs[idx]['weight'] * (
+                        y + group_specs[idx]['width'] / 2.0
                     )
                     for idx, (_, y) in layout.items()
                 ) / total_weight
-                target_z_guess = float(group['Z_mm'].min())
                 anchor_overlap = 0.0
-                for _, anchor in anchors.iterrows():
-                    if anchor.name in layout:
-                        continue
-                    ax0 = safe_number(anchor.get('X_mm'))
-                    ay0 = safe_number(anchor.get('Y_mm'))
-                    ax1 = ax0 + safe_number(anchor.get('Länge_mm'))
-                    ay1 = ay0 + safe_number(anchor.get('Breite_mm'))
+                for ax0, ay0, ax1, ay1, anchor_z in anchor_specs:
                     for idx, (x, y) in layout.items():
-                        item = group.loc[idx]
                         if abs(
-                            safe_number(anchor.get('Z_mm'))
-                            - (target_z_guess + safe_number(item.get('Höhe_mm')))
+                            anchor_z
+                            - (target_z_guess + group_specs[idx]['height'])
                         ) > 1.0:
                             continue
                         anchor_overlap += max(
                             0.0,
-                            min(ax1, x + safe_number(item.get('Länge_mm'))) - max(ax0, x),
+                            min(ax1, x + group_specs[idx]['length']) - max(ax0, x),
                         ) * max(
                             0.0,
-                            min(ay1, y + safe_number(item.get('Breite_mm'))) - max(ay0, y),
+                            min(ay1, y + group_specs[idx]['width']) - max(ay0, y),
                         )
                 displacement = sum(
-                    abs(x - safe_number(group.loc[idx].get('X_mm')))
-                    + abs(y - safe_number(group.loc[idx].get('Y_mm')))
+                    abs(x - group_specs[idx]['x'])
+                    + abs(y - group_specs[idx]['y'])
                     for idx, (x, y) in layout.items()
                 )
                 return (
@@ -4900,7 +4927,7 @@ def compact_placements_conservatively(
             # Vor der teuren vollständigen Tragkettenvalidierung redundante
             # Kantenkombinationen begrenzen. Kompakte, bewegungsarme Varianten
             # bleiben bevorzugt erhalten.
-            return sorted(layouts, key=_layout_priority)[:12]
+            return sorted(layouts, key=_layout_priority)[:64]
 
         # A one-at-a-time move cannot release the interlocking parts of two
         # neighbouring layers.  Before greedy compaction, try a bounded atomic
@@ -5021,6 +5048,11 @@ def compact_placements_conservatively(
                         continue
                     seen_groups.add(group_indices)
                     group = pool.loc[list(group_indices)]
+                    if 'Logische_Reihenfolge_im_Block' in group.columns:
+                        group = group.sort_values(
+                            ['Logische_Reihenfolge_im_Block', 'Z_mm'],
+                            kind='stable',
+                        )
                     if not (group['Z_mm'] >= target_z - 1.0).all() or not (group['Z_mm'] > target_z + 1.0).any():
                         continue
                     for layout in _atomic_shelf_layouts(group, eff_len, platform_width, platform_center_x, current):

@@ -14,3 +14,9 @@ Bound atomic compaction by a small per-platform time budget and a short prioriti
 **Why:** Independent shelf starts create many combinatorial variants; exhaustive validation can turn an otherwise short app calculation into a run lasting more than 16 minutes.
 
 **How to apply:** Search target-level-plus-nearest-upper groups first, avoid generating layouts once merely to test feasibility and then again for validation, and stop safely at the deadline.
+
+The PDF's reported overhang is the load's actually used overhang, not necessarily the planning coordinate window's allowed overhang. Reconstructing validation with the reported value can shift the apparent platform center and falsely reject a valid layout.
+
+**Why:** The real F02 used less rear overhang than the permitted window; substituting the used value moved the reconstructed center-of-gravity reference even though the app's coordinates were correct.
+
+**How to apply:** For regression fixtures and manual checks, use transport-option limits for the planning platform and derive actual overhang only as an output measurement of the placed load.

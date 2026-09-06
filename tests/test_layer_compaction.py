@@ -34,7 +34,7 @@ def f02_groups_37_to_48() -> pd.DataFrame:
         rows.append({
             'Pritsche': 'F02 Anhänger',
             'Einheit_ID': f'BE{number}',
-            'Typ': 'Bund',
+            'Typ': 'Bauteil',
             'X_mm': (offset % 3) * 2000.0,
             'Y_mm': (offset // 3) * 600.0,
             'Z_mm': 80.0,
@@ -166,6 +166,45 @@ def one_upper_member_after_first_compaction_stage() -> pd.DataFrame:
     return rows
 
 
+def real_f02_intermediate_stack() -> pd.DataFrame:
+    rows = []
+    specs = [
+        ('32', 752.0, 25.0, 2480.0, 11748.0, 1200.0, 280.0, 1),
+        ('33', 752.0, 25.0, 2200.0, 11748.0, 1200.0, 280.0, 2),
+        ('34', 752.0, 25.0, 1920.0, 11748.0, 1200.0, 280.0, 3),
+        ('35', 752.0, 25.0, 1640.0, 11748.0, 1200.0, 280.0, 4),
+        ('36', 752.0, 25.0, 1360.0, 11748.0, 1200.0, 280.0, 5),
+        ('37', 752.0, 25.0, 1080.0, 11748.0, 1200.0, 280.0, 6),
+        ('38', 752.0, 25.0, 800.0, 11748.0, 1200.0, 280.0, 7),
+        ('39', 752.0, 1225.0, 680.0, 11748.0, 413.8, 280.0, 8),
+        ('40', 3632.5, 25.0, 520.0, 7335.0, 1200.0, 280.0, 9),
+        ('41', 3632.5, 1225.0, 400.0, 7335.0, 1200.0, 280.0, 10),
+        ('42', 3910.1, 632.8, 240.0, 7335.0, 592.2, 280.0, 11),
+        ('43', 5206.1, 1225.0, 240.0, 3025.0, 1200.0, 160.0, 12),
+        ('44', 7300.0, 1225.0, 80.0, 3025.0, 1200.0, 160.0, 13),
+        ('45', 7289.0, 25.0, 80.0, 3025.0, 1200.0, 160.0, 14),
+        ('46', 4275.0, 1225.0, 80.0, 3025.0, 1200.0, 160.0, 15),
+        ('47', 4286.0, 25.0, 80.0, 3003.0, 1200.0, 160.0, 16),
+    ]
+    for part, x, y, z, length, width, height, rank in specs:
+        rows.append({
+            'Bauteile': part,
+            'Einheit_ID': f'E{int(part) - 12:04d}',
+            'Typ': 'Bauteil',
+            'Pritsche': 'F02 Anhänger',
+            'X_mm': x,
+            'Y_mm': y,
+            'Z_mm': z,
+            'Länge_mm': length,
+            'Breite_mm': width,
+            'Höhe_mm': height,
+            'Gewicht_kg': length * width * height * 4.5e-7,
+            'Logische_Reihenfolge_im_Block': rank,
+            'Ebene': 'realer F02 Zwischenstand',
+        })
+    return pd.DataFrame(rows)
+
+
 def f02_side_by_side_release_group() -> pd.DataFrame:
     rows = []
     for number, y, z in [(39, 0.0, 80.0), (42, 1200.0, 80.0), (38, 600.0, 280.0)]:
@@ -244,7 +283,7 @@ class LayerCompactionTest(unittest.TestCase):
 
         self.assertTrue((compacted['Z_mm'] == 80.0).all())
         self.assertEqual(0, len(app.find_geometry_conflicts(
-            after[after['Typ'].eq('Bund')], platform
+            after[after['Typ'].eq('Bauteil')], platform
         )))
         self.assertTrue(any(
             app._axis_overlap_mm(
@@ -286,6 +325,26 @@ class LayerCompactionTest(unittest.TestCase):
         after = app.compact_placements_conservatively(before, platform)
 
         self.assertTrue((after.loc[after['Typ'].eq('Bund'), 'Z_mm'] == 80.0).all())
+        self.assertEqual(0, len(app.find_geometry_conflicts(
+            after[after['Typ'].eq('Bund')], platform
+        )))
+
+    def test_real_f02_stack_lowers_43_with_42_still_present(self):
+        before = real_f02_intermediate_stack()
+        platform = f02_platform()
+        platform.loc[0, [
+            'Länge_mm',
+            'Breite_mm',
+            'Überhang_vorne_mm',
+            'Überhang_hinten_mm',
+        ]] = [7600.0, 2450.0, 1400.0, 3500.0]
+
+        after = app.compact_placements_conservatively(before, platform)
+
+        compact_group = after[after['Bauteile'].astype(str).isin(
+            ['43', '44', '45', '46', '47']
+        )]
+        self.assertTrue((compact_group['Z_mm'] == 80.0).all())
         self.assertEqual(0, len(app.find_geometry_conflicts(
             after[after['Typ'].eq('Bund')], platform
         )))
