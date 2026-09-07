@@ -81,6 +81,12 @@ For a homogeneous terminal six followed by a consecutive equal-height run above 
 
 **How to apply:** Atomically set the last five preceding units as a width-valid 3+2 shelf and rebuild the earlier run as bottom-up pairs with an odd earliest singleton on top. Accept only the fully validated final state.
 
+The deterministic whole-cascade result was visually confirmed by the user in a real generated loading-plan PDF.
+
+**Why:** This confirms that rebuilding the complete interacting structure succeeds where incremental competing heuristics repeatedly left the narrow middle member on top.
+
+**How to apply:** Preserve the deterministic whole-cascade approach for this structural pattern; do not replace it with independent incremental moves without equivalent full-output validation.
+
 Bound atomic compaction by a small per-platform time budget and a short prioritized candidate list. If the budget expires, retain the last fully validated state rather than continuing exhaustive subset search or accepting an unchecked layout.
 
 **Why:** Independent shelf starts create many combinatorial variants; exhaustive validation can turn an otherwise short app calculation into a run lasting more than 16 minutes.
