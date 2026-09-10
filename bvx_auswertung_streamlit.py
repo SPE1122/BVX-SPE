@@ -3794,7 +3794,11 @@ def center_placements_geometrically(placements_df: pd.DataFrame, platforms_df: p
     return result
 
 
-def center_length_groups_from_platform_center(placements_df: pd.DataFrame, platforms_df: pd.DataFrame) -> pd.DataFrame:
+def center_length_groups_from_platform_center(
+    placements_df: pd.DataFrame,
+    platforms_df: pd.DataFrame,
+    avoid_unnecessary_overhang: bool = False,
+) -> pd.DataFrame:
     """Richtet Stapelgruppen in X wieder von der Pritschenmitte aus.
 
     V28:
@@ -3942,13 +3946,26 @@ def center_length_groups_from_platform_center(placements_df: pd.DataFrame, platf
                     layer_center_x = float((centers * layer_weights).sum() / weight_sum)
                     desired_shift = platform_center_x - layer_center_x
                 else:
-                    desired_shift = (eff_length - span) / 2.0 - x0
+                    desired_shift = (
+                        platform_center_x - (x0 + x1) / 2.0
+                        if avoid_unnecessary_overhang
+                        else (eff_length - span) / 2.0 - x0
+                    )
             else:
-                desired_shift = (eff_length - span) / 2.0 - x0
+                desired_shift = (
+                    platform_center_x - (x0 + x1) / 2.0
+                    if avoid_unnecessary_overhang
+                    else (eff_length - span) / 2.0 - x0
+                )
 
             # Auch bei einer gewichteten Ausrichtung bleibt die Lage vollständig
             # innerhalb des erlaubten X-Bereichs.
-            shift = max(-x0, min(eff_length - x1, desired_shift))
+            if avoid_unnecessary_overhang and span <= safe_number(prow.get('Länge_mm'), 0.0) + 0.1:
+                deck_x0 = safe_number(prow.get('Überhang_hinten_mm'), 0.0)
+                deck_x1 = deck_x0 + safe_number(prow.get('Länge_mm'), 0.0)
+                shift = max(deck_x0 - x0, min(deck_x1 - x1, desired_shift))
+            else:
+                shift = max(-x0, min(eff_length - x1, desired_shift))
             if abs(shift) < 0.1:
                 continue
 
@@ -5917,6 +5934,7 @@ def apply_main_loading_postprocess(
     center_geometric: bool = True,
     enable_multilayer_compaction: bool = False,
     bundles_only_compaction: bool = False,
+    avoid_unnecessary_overhang: bool = False,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """V124: Gemeinsame Nachlogik für Hauptverladung und selektive Neuberechnung.
 
@@ -5934,7 +5952,11 @@ def apply_main_loading_postprocess(
     platforms_local = platforms_used_df.copy()
     if center_geometric:
         result = center_placements_geometrically(result, platforms_local)
-        result = center_length_groups_from_platform_center(result, platforms_local)
+        result = center_length_groups_from_platform_center(
+            result,
+            platforms_local,
+            avoid_unnecessary_overhang=avoid_unnecessary_overhang,
+        )
         result = resolve_x_collisions_by_layer(result, platforms_local, gap_mm=gap_mm)
         # Schwerpunkt/Gewicht in der Hauptlogik bewerten und zusätzlich konservativ
         # innerhalb gültiger Lagen korrigieren, wenn der Block nicht weiter wandern kann.
@@ -6814,6 +6836,7 @@ def create_variant_a_loading_plan(
     prefer_stable_option: bool = True,
     prefer_support_quality: bool = True,
     enable_multilayer_compaction: bool = False,
+    avoid_unnecessary_overhang: bool = False,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """V22: geprüfte Block-Suche pro Pritsche mit getrennter Sortier- und Anzeige-/Stapelrichtung.
 
@@ -7041,6 +7064,7 @@ def create_variant_a_loading_plan(
                     gap_mm=gap_default, center_geometric=True,
                     enable_multilayer_compaction=True,
                     bundles_only_compaction=bool(use_bundles),
+                    avoid_unnecessary_overhang=avoid_unnecessary_overhang,
                 )
                 loaded_ids = loaded.get('Einheit_ID', pd.Series(dtype=str)).dropna().astype(str).tolist()
                 too_high = (
@@ -7309,6 +7333,7 @@ def create_variant_a_loading_plan(
             placements_df, summary_df, platforms_used_df, gap_mm=gap_default, center_geometric=True,
             enable_multilayer_compaction=enable_multilayer_compaction,
             bundles_only_compaction=bool(use_bundles),
+            avoid_unnecessary_overhang=avoid_unnecessary_overhang,
         )
 
     fuhren_log_df = pd.DataFrame(fuhren_log)
@@ -12782,6 +12807,12 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
         key='enable_multilayer_compaction_v129',
         help='Prüft passende Einzelteile oder vollständige Bunde als sichere 2D-Neupackung. Bunde bleiben ungeteilt. Aus lässt Verladung und Bundbildung unverändert.',
     )
+    avoid_unnecessary_overhang = st.checkbox(
+        'Unnötigen Überhang bei überwiegend pritschenkürzeren Elementen vermeiden',
+        value=False,
+        key='avoid_unnecessary_overhang_v130',
+        help='Kurze Lagen bleiben innerhalb der physischen Pritsche. Längere Elemente dürfen weiterhin den notwendigen Überhang nutzen; Auflage und Stapelstruktur bleiben geschützt.',
+    )
 
     # V111: Arbeitskopie für die eigentliche Verladung.
     # Sie darf zusätzliche Kontroll-/Gruppierungsspalten bekommen; die Original-BVX bleibt unverändert.
@@ -12867,6 +12898,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
     project_meta['Verladegruppen'] = ' | '.join([f"{r['Gruppe']}: {r['Werte gemeinsam']}" for r in loading_group_rows]) if loading_group_rows else ''
     project_meta['Restplatz_mit_naechster_Gruppe_auffuellen'] = bool(fill_remainder_next_group)
     project_meta['Optionale_Mehrlagen_Verdichtung'] = bool(enable_multilayer_compaction)
+    project_meta['Unnoetigen_Ueberhang_vermeiden'] = bool(avoid_unnecessary_overhang)
 
     with st.expander('6c. Verladung mit Runge', expanded=False):
         st.caption('Runge = Wand in der Mitte der Pritschenbreite. Unterhalb der Runge werden Bunde links/rechts davon platziert; oberhalb der Runge darf wieder mittig über die Runge verladen werden.')
@@ -13031,6 +13063,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
             'support_planning_mode': str(support_planning_mode),
             'compact_transport_strategy': bool(compact_transport_strategy),
             'enable_multilayer_compaction': bool(enable_multilayer_compaction),
+            'avoid_unnecessary_overhang': bool(avoid_unnecessary_overhang),
             'effective_fuhre_split_attr': str(effective_fuhre_split_attr),
             'fill_remainder_next_group': bool(fill_remainder_next_group),
             'base_wood_height': float(base_wood_height),
@@ -13092,6 +13125,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                 prefer_stable_option=bool(compact_transport_strategy),
                 prefer_support_quality=bool(prefer_support_quality),
                 enable_multilayer_compaction=bool(enable_multilayer_compaction),
+                avoid_unnecessary_overhang=bool(avoid_unnecessary_overhang),
             )
             st.session_state['automatic_loading_plan_v84'] = {
                 'signature': automatic_input_signature,
@@ -13394,6 +13428,12 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                             key='v116_recalc_multilayer_compaction',
                             help='Verschiebt passende Einzelteile oder vollständige Bunde und übernimmt eine Variante nur nach Höhen-, Auflage-, Kollisions-, Entlade- und Schwerpunktprüfung.',
                         )
+                        recalc_avoid_unnecessary_overhang = st.checkbox(
+                            'Unnötigen Überhang bei überwiegend pritschenkürzeren Elementen vermeiden',
+                            value=bool(avoid_unnecessary_overhang),
+                            key='v116_recalc_avoid_unnecessary_overhang',
+                            help='Kurze Lagen bleiben innerhalb der Pritsche; längere Elemente behalten ihren notwendigen Überhang.',
+                        )
                         if recalc_keep_sort_hint:
                             st.caption('V124: Vorschau nutzt dieselbe Hauptlogik/Nachlogik wie die normale Verladung, aber nur für diese Fuhre. Globale Fuhren davor/danach bleiben fix.')
 
@@ -13433,6 +13473,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                                 center_geometric=True,
                                 enable_multilayer_compaction=bool(recalc_multilayer_compaction),
                                 bundles_only_compaction=bool(target_has_bundles),
+                                avoid_unnecessary_overhang=bool(recalc_avoid_unnecessary_overhang),
                             )
 
                         if st.button('Vorschau neu berechnen', key='v113_recalc_preview_button'):

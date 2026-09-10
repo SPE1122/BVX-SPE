@@ -234,6 +234,37 @@ def f02_side_by_side_release_group() -> pd.DataFrame:
 
 
 class LayerCompactionTest(unittest.TestCase):
+    def test_optional_overhang_avoidance_handles_mixed_short_and_long_layers(self):
+        platform = f02_platform()
+        platform.loc[0, [
+            'Länge_mm', 'Überhang_hinten_mm', 'Überhang_vorne_mm',
+        ]] = [7600.0, 300.0, 500.0]
+        placements = pd.DataFrame([
+            {
+                'Pritsche': 'F02 Anhänger', 'Einheit_ID': 'LONG', 'Typ': 'Bauteil',
+                'X_mm': 0.0, 'Y_mm': 0.0, 'Z_mm': 80.0,
+                'Länge_mm': 8000.0, 'Breite_mm': 2300.0, 'Höhe_mm': 200.0,
+                'Gewicht_kg': 1000.0, 'Ebene': 'unten',
+            },
+            {
+                'Pritsche': 'F02 Anhänger', 'Einheit_ID': 'SHORT', 'Typ': 'Bauteil',
+                'X_mm': 0.0, 'Y_mm': 0.0, 'Z_mm': 280.0,
+                'Länge_mm': 7000.0, 'Breite_mm': 2300.0, 'Höhe_mm': 200.0,
+                'Gewicht_kg': 1000.0, 'Ebene': 'oben',
+            },
+        ])
+
+        after = app.center_length_groups_from_platform_center(
+            placements, platform, avoid_unnecessary_overhang=True,
+        )
+        long_row = after.loc[after['Einheit_ID'].eq('LONG')].iloc[0]
+        short_row = after.loc[after['Einheit_ID'].eq('SHORT')].iloc[0]
+
+        self.assertAlmostEqual(100.0, float(long_row['X_mm']), delta=0.1)
+        self.assertAlmostEqual(600.0, float(short_row['X_mm']), delta=0.1)
+        self.assertGreaterEqual(float(short_row['X_mm']), 300.0)
+        self.assertLessEqual(float(short_row['X_mm'] + short_row['Länge_mm']), 7900.0)
+
     def test_real_terminal_cascade_places_39_in_three_part_base_row(self):
         platform = f02_platform()
         platform.loc[0, [
