@@ -6975,6 +6975,13 @@ def create_variant_a_loading_plan(
         units['Bundbildung'] = 'V21 nach geprüftem Pritschenblock / von oben nach unten'
         return units
 
+    def _loaded_block_unit_ids(placements: pd.DataFrame) -> List[str]:
+        """Auflager gehören zur Geometrie, nicht zur logischen Blockmitgliedschaft."""
+        real_loads = placements
+        if 'Typ' in real_loads.columns:
+            real_loads = real_loads[real_loads['Typ'].apply(_is_real_load_type_value)]
+        return real_loads.get('Einheit_ID', pd.Series(dtype=str)).dropna().astype(str).tolist()
+
     def _pack_block_units_on_platform(block_units_top: pd.DataFrame, platform_row: pd.Series) -> Tuple[bool, pd.DataFrame, pd.DataFrame]:
         if block_units_top is None or block_units_top.empty:
             return False, pd.DataFrame(), pd.DataFrame()
@@ -7004,7 +7011,7 @@ def create_variant_a_loading_plan(
             return False, pd.DataFrame(), pd.DataFrame()
         loaded = placements_try[placements_try['Pritsche'] != 'NICHT VERLADEN'].copy()
         wanted_ids = block_units_top['Einheit_ID'].astype(str).tolist()
-        loaded_ids = loaded.get('Einheit_ID', pd.Series(dtype=str)).dropna().astype(str).tolist()
+        loaded_ids = _loaded_block_unit_ids(loaded)
         ranked_block = block_units_top.copy()
         ranked_block['_terminal_rank'] = pd.to_numeric(
             ranked_block.get('Logische_Reihenfolge_im_Block'), errors='coerce'
@@ -7057,7 +7064,7 @@ def create_variant_a_loading_plan(
                 prefer_support_quality=prefer_support_quality,
             )
             loaded = placements_try[placements_try['Pritsche'] != 'NICHT VERLADEN'].copy()
-            loaded_ids = loaded.get('Einheit_ID', pd.Series(dtype=str)).dropna().astype(str).tolist()
+            loaded_ids = _loaded_block_unit_ids(loaded)
             if set(wanted_ids) == set(loaded_ids):
                 loaded, _summary_try = apply_main_loading_postprocess(
                     loaded, _summary_try, pd.DataFrame([platform_row]),
@@ -7066,7 +7073,7 @@ def create_variant_a_loading_plan(
                     bundles_only_compaction=bool(use_bundles),
                     avoid_unnecessary_overhang=avoid_unnecessary_overhang,
                 )
-                loaded_ids = loaded.get('Einheit_ID', pd.Series(dtype=str)).dropna().astype(str).tolist()
+                loaded_ids = _loaded_block_unit_ids(loaded)
                 too_high = (
                     not loaded.empty
                     and (pd.to_numeric(loaded['Z_mm'], errors='coerce')
@@ -7079,7 +7086,8 @@ def create_variant_a_loading_plan(
                     loaded_ids = []
         if set(wanted_ids) != set(loaded_ids):
             return False, pd.DataFrame(), pd.DataFrame()
-        loaded = loaded[loaded['Einheit_ID'].astype(str).isin(wanted_ids)].copy()
+        # Die vollständige Auflagergeometrie für Nachbearbeitung und
+        # Sicherheitsprüfung erhalten; nur echte Ladungen wurden oben verglichen.
         if 'Ebene' in loaded.columns:
             loaded['Ebene'] = loaded['Ebene'].astype(str).apply(
                 lambda v: v if 'V21 Pritschenblock' in v else f'{v} / V21 Pritschenblock'
