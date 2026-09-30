@@ -8,3 +8,4 @@
 - [Assignment gap validation](assignment-gap-validation.md) — Report platform gaps only for part numbers present in the project; numbering itself may intentionally skip ranges.
 - [Optional post-plan compaction](optional-post-plan-compaction.md) — Keep original part/bundle loading unchanged; expose compaction as an opt-in postprocess in main planning and V116 recalculation.
 - [Avoid unnecessary overhang](avoid-unnecessary-overhang.md) — Keep short layers on the physical deck; long layers may use only necessary overhang, behind an opt-in guard.
+- [Pinned manual placement before global replanning](pinned-manual-replanning.md) — Preserve a validated hand-placed longitudinal pair when replanning remaining trips.
