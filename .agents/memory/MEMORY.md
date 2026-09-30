@@ -9,3 +9,4 @@
 - [Optional post-plan compaction](optional-post-plan-compaction.md) — Keep original part/bundle loading unchanged; expose compaction as an opt-in postprocess in main planning and V116 recalculation.
 - [Avoid unnecessary overhang](avoid-unnecessary-overhang.md) — Keep short layers on the physical deck; long layers may use only necessary overhang, behind an opt-in guard.
 - [Pinned manual placement before global replanning](pinned-manual-replanning.md) — Preserve a validated hand-placed longitudinal pair when replanning remaining trips.
+- [Logical loads and physical supports](logical-loads-and-supports.md) — Generated supports must not change block membership; preserve them separately for safety validation.
