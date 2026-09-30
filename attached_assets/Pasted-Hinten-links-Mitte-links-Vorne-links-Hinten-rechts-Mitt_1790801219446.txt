@@ -1,0 +1,41 @@
+Hinten links      Mitte links       Vorne links       Hinten rechts     Mitte rechts      Vorne rechts
+------------------------------------------------------------------------------------------------------
+                                                                                          DE_0.50/. / DE_0.
+                                                                                          Einlage 0.15
+                                    DE_0.55/ / DE_0.5
+                                    Einlage 0.15
+                                    DE_0.53/ ↔
+                                    Einlage 0.15
+                                    DE_0.35/ / DE_0.5
+                                    Einlage 0.15
+                                    DE_0.49/. ↔
+                                    Einlage 0.15
+                                    DE_0.48/ ↔
+                                    Einlage 0.15
+                                    DE_0.46/. / DE_0.
+                                    Einlage 0.15
+                                    DE_0.40/. / DE_0.
+                                    Einlage 0.15
+                                    DE_0.43/. / DE_0.
+                                    Einlage 0.15
+                                    DE_0.38/ / DE_0.3
+                                    Einlage 0.15
+                                    DE_0.41/. / DE_0.
+                                    Einlage 0.15
+                                    DE_0.36/ / DE_0.3
+                                    Einlage 0.15
+                                    DE_0.32/ / DE_0.3
+                                    Einlage 0.15
+                                    DE_0.26/. / DE_0.
+                                    Einlage 0.15
+                                    DE_0.31/ ↔
+                                    Einlage 0.15
+                                    DE_0.29/. ↔
+                                    Einlage 0.15
+                                    DE_0.25/ / DE_0.3
+                                    Einlage 0.15
+                                    DE_0.27/ / DE_0.2
+                                    Kantholz 80                                           Kantholz 80
+
+Hinweis: Einlage 40 / Lagenholz gemäss Einstellung zwischen den Bunden einlegen.
+BSD ist eine Darstellungs-Matrix. Mittige / breite Elemente werden zusammengefasst.
