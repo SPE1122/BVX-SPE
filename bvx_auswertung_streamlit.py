@@ -12016,6 +12016,28 @@ def _pinned_manual_unloading_issues(
     return pd.DataFrame(issues, columns=['Typ', 'Pritsche', 'Einheit_ID', 'Warnung', 'Details'])
 
 
+def _pinned_manual_classify_issues(
+    issues: pd.DataFrame,
+    target_platform: Optional[str],
+    manual_pair_override: bool = False,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Relax only stability/access gates on the manually adjusted destination.
+
+    Geometry, capacity, identities and all checks on automatic trips stay hard.
+    Advisory acceptance is not a confirmation of transport safety.
+    """
+    if issues is None or issues.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    advisory_mask = (
+        bool(manual_pair_override)
+        & issues.get('Pritsche', pd.Series('', index=issues.index)).astype(str).eq(str(target_platform))
+        & issues.get('Typ', pd.Series('', index=issues.index)).astype(str).isin({
+            'Schwerpunkt längs', 'Schwerpunkt quer', 'Auflagekette', 'Entladereihenfolge',
+        })
+    )
+    return issues.loc[~advisory_mask].copy(), issues.loc[advisory_mask].copy()
+
+
 def _manual_validate_pinned_longitudinal_pair(
     placements_df: pd.DataFrame,
     platforms_df: pd.DataFrame,
@@ -12023,6 +12045,7 @@ def _manual_validate_pinned_longitudinal_pair(
     coordinates: Dict[str, Dict[str, float]],
     target_platform: Optional[str] = None,
     include_destination_loads: bool = True,
+    manual_pair_override: bool = False,
 ) -> Dict[str, Any]:
     """Validate two exact same-layer longitudinal positions without changing the source."""
     issues: List[Dict[str, Any]] = []
@@ -12150,9 +12173,13 @@ def _manual_validate_pinned_longitudinal_pair(
     chain_issues = _pinned_manual_support_chain_issues(candidate, pd.DataFrame([platform]))
     if not chain_issues.empty:
         issues.extend(chain_issues.to_dict('records'))
+    blocking_issues, advisory_issues = _pinned_manual_classify_issues(
+        pd.DataFrame(issues), pname, manual_pair_override
+    )
     return {
-        'ok': not issues,
-        'issues': pd.DataFrame(issues),
+        'ok': blocking_issues.empty,
+        'issues': blocking_issues,
+        'advisory_issues': advisory_issues,
         'pinned_placements_df': pair,
         'support_rows_df': support_rows,
         'coordinates': normalized_coordinates,
@@ -12176,12 +12203,14 @@ def _preview_pinned_manual_replan(
     validation = _manual_validate_pinned_longitudinal_pair(
         source_placements_df, source_platforms_df, unit_ids, coordinates, target_platform,
         include_destination_loads=False,
+        manual_pair_override=bool((settings or {}).get('manual_pair_override', False)),
     )
     source_signature = _pinned_manual_source_signature(
         source_placements_df, source_platforms_df, source_parts_df, options_df, pritschen_df, settings
     )
     result: Dict[str, Any] = {
         'ok': False, 'applied': False, 'stale_source': False, 'issues': validation['issues'],
+        'advisory_issues': validation.get('advisory_issues', pd.DataFrame()),
         'source_signature': source_signature, 'settings': dict(settings or {}),
         '_source_placements_df': source_placements_df.copy(deep=True),
         '_source_platforms_df': source_platforms_df.copy(deep=True),
@@ -12408,10 +12437,16 @@ def _preview_pinned_manual_replan(
                         _pinned_manual_identity_signature(trial_placements)
                         == _pinned_manual_identity_signature(source_placements_df)
                     )
+                    trial_hard_issues, _trial_advisories = _pinned_manual_classify_issues(
+                        pd.concat(
+                            [trial_blocking, trial_support, trial_geometry, trial_physical, trial_unloading],
+                            ignore_index=True, sort=False,
+                        ),
+                        target_platform,
+                        bool((settings or {}).get('manual_pair_override', False)),
+                    )
                     if (
-                        trial_identity and trial_blocking.empty and trial_support.empty
-                        and trial_geometry.empty and trial_physical.empty
-                        and trial_unloading.empty
+                        trial_identity and trial_hard_issues.empty
                     ):
                         candidate = global_candidate
                         candidate['placements'] = pd.concat(
@@ -12489,6 +12524,10 @@ def _preview_pinned_manual_replan(
         ],
         ignore_index=True, sort=False,
     )
+    all_issues, advisory_issues = _pinned_manual_classify_issues(
+        all_issues, target_platform, bool((settings or {}).get('manual_pair_override', False))
+    )
+    result['advisory_issues'] = advisory_issues
     if not identity_ok or not all_issues.empty:
         result['issues'] = all_issues if not all_issues.empty else pd.DataFrame([{
             'Typ': 'Identität',
@@ -12542,6 +12581,7 @@ def _preview_pinned_manual_replan(
         'units_df': candidate_units, 'fuhren_log_df': candidate_log,
         'pinned_placements_df': pair, 'support_rows_df': pinned_supports,
         'issues': pd.DataFrame(), 'identity_conserved': identity_ok,
+        'advisory_issues': advisory_issues,
         'deviation': '',
     })
     result['_preview_artifact_signature'] = _pinned_manual_preview_artifact_signature(result)
@@ -12549,7 +12589,11 @@ def _preview_pinned_manual_replan(
 
 
 def _pinned_manual_preview_artifact_signature(preview: Dict[str, Any]) -> str:
-    return '||'.join(
+    policy_signature = _loading_dataframe_signature(pd.DataFrame([{
+        'manual_pair_override': bool(preview.get('settings', {}).get('manual_pair_override', False)),
+        'target_platform': str(preview.get('target_platform', '')),
+    }]))
+    return policy_signature + '||' + '||'.join(
         _loading_dataframe_signature(preview.get(key))
         for key in ('placements_df', 'summary_df', 'platforms_df', 'units_df', 'fuhren_log_df')
     )
@@ -12621,6 +12665,7 @@ def _apply_pinned_manual_replan(
         result.get('coordinates', {}),
         result.get('target_platform'),
         include_destination_loads=False,
+        manual_pair_override=bool(result.get('settings', {}).get('manual_pair_override', False)),
     )
     safety_issues: List[pd.DataFrame] = []
     if not expected_pair.get('ok'):
@@ -12692,10 +12737,16 @@ def _apply_pinned_manual_replan(
     ):
         if check is not None and not check.empty:
             safety_issues.append(check)
-    if safety_issues:
+    hard_issues, advisory_issues = _pinned_manual_classify_issues(
+        pd.concat(safety_issues, ignore_index=True, sort=False) if safety_issues else pd.DataFrame(),
+        result.get('target_platform'),
+        bool(result.get('settings', {}).get('manual_pair_override', False)),
+    )
+    result['advisory_issues'] = advisory_issues
+    if not hard_issues.empty:
         result.update({
             'ok': False, 'applied': False, 'stale_source': False,
-            'issues': pd.concat(safety_issues, ignore_index=True, sort=False),
+            'issues': hard_issues,
         })
         return result
     result['applied'] = True

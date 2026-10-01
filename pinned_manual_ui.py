@@ -4,6 +4,20 @@ import pandas as pd
 import streamlit as st
 
 
+def _show_advisory_issues(issues):
+    if isinstance(issues, pd.DataFrame) and not issues.empty:
+        st.markdown('**Hinweise zur manuellen Beurteilung (keine Transportfreigabe)**')
+        st.dataframe(issues, use_container_width=True, hide_index=True)
+
+
+def _manual_override_warning():
+    st.error(
+        'Manuelle Beurteilung aktiv: Schwerpunkt, Auflage und Entladung werden nicht '
+        'sicherheitstechnisch bestätigt. Die Transport- und Ladungssicherheit muss '
+        'eigenverantwortlich beurteilt werden.'
+    )
+
+
 def render_pinned_manual_replanning(
     placements, platforms, parts, options, platform_stock, standards, settings,
     *, validate_pair, preview_plan, apply_plan, draw_view, is_real_load,
@@ -14,15 +28,19 @@ def render_pinned_manual_replanning(
             'Zwei bereits verladene Bauteile/Bunde längs hintereinander in derselben Lage '
             'positionieren (z. B. 0.29 und 0.31 auf F01). X ist die Längsrichtung, Y die '
             'Querrichtung, Z die Unterkante. Alle Angaben in mm. Importierte Nr.PL bleiben '
-            'unverändert. Alle anderen Bauteile werden neu geplant; Auflager werden separat geprüft.'
+            'unverändert. Alle anderen Bauteile werden neu geplant. Geometrie- und '
+            'Gewichtsfehler bleiben auch bei manueller Beurteilung Ausschlussgründe.'
         )
         pin = st.session_state.get('pinned_manual_active')
         if isinstance(pin, dict):
+            if pin.get('manual_pair_override', False):
+                _manual_override_warning()
             st.success(
                 f"Fixiertes Paar auf {pin.get('target_platform', '')}: "
                 + ', '.join(pin.get('unit_ids', []))
             )
             st.dataframe(pin.get('pinned_placements_df', pd.DataFrame()), hide_index=True)
+            _show_advisory_issues(pin.get('advisory_issues'))
             st.caption('Andere Planänderungen sind gesperrt, bis die Fixierung ausdrücklich gelöst wird.')
             if st.button('Fixierung lösen (Positionen beibehalten)', key='pinned_manual_release'):
                 st.session_state.pop('pinned_manual_active', None)
@@ -37,6 +55,15 @@ def render_pinned_manual_replanning(
         if len(real) < 2 or platforms.empty:
             st.info('Zuerst mindestens zwei Bauteile verladen und den Ladeplan berechnen.')
             return
+        manual_pair_override = st.checkbox(
+            'Schwerpunkt, Auflage und Entladung manuell beurteilen',
+            value=True,
+            key='pinned_manual_override',
+        )
+        if manual_pair_override:
+            _manual_override_warning()
+        request_settings = dict(settings)
+        request_settings['manual_pair_override'] = bool(manual_pair_override)
         names = platforms['Pritsche'].astype(str).tolist()
         target = st.selectbox('Zielpritsche für das Längspaar', names, key='pinned_manual_target')
         ids = real['Einheit_ID'].astype(str).tolist()
@@ -62,17 +89,28 @@ def render_pinned_manual_replanning(
                 )
         request = {'unit_ids': selected, 'target_platform': target, 'coordinates': coordinates}
         if st.button('Paar prüfen und globale Vorschau berechnen', key='pinned_manual_preview_button'):
-            with st.spinner('Geometrie, Auflagekette, Schwerpunkt und Entladung prüfen; Rest neu planen …'):
+            spinner_text = (
+                'Geometrie und Gewicht prüfen; Schwerpunkt, Auflage und Entladung manuell beurteilen; '
+                'Rest neu planen …'
+                if manual_pair_override else
+                'Geometrie, Gewicht, Auflagekette, Schwerpunkt und Entladung prüfen; Rest neu planen …'
+            )
+            with st.spinner(spinner_text):
                 validation = validate_pair(
                     placements, platforms, selected, coordinates, target,
                     include_destination_loads=False,
+                    manual_pair_override=request_settings['manual_pair_override'],
                 )
                 if not validation['ok']:
-                    st.session_state['pinned_manual_preview'] = {'ok': False, 'issues': validation['issues']}
+                    st.session_state['pinned_manual_preview'] = {
+                        'ok': False,
+                        'issues': validation['issues'],
+                        'advisory_issues': validation.get('advisory_issues', pd.DataFrame()),
+                    }
                 else:
                     st.session_state['pinned_manual_preview'] = preview_plan(
                         placements, platforms, parts, options, platform_stock, standards,
-                        settings, selected, target, coordinates,
+                        request_settings, selected, target, coordinates,
                     )
         preview = st.session_state.get('pinned_manual_preview')
         if not isinstance(preview, dict):
@@ -80,15 +118,25 @@ def render_pinned_manual_replanning(
         if not preview.get('ok'):
             st.error('Keine gültige Fixierung / Neuplanung. Der bisherige Plan bleibt unverändert.')
             st.dataframe(preview.get('issues', pd.DataFrame()), hide_index=True, use_container_width=True)
+            _show_advisory_issues(preview.get('advisory_issues'))
         else:
             same_request = all(preview.get(key) == value for key, value in request.items())
-            checked = apply_plan(preview, placements, platforms, parts, options, platform_stock, settings)
+            checked = apply_plan(
+                preview, placements, platforms, parts, options, platform_stock, request_settings,
+            )
             can_apply = same_request and bool(checked.get('applied'))
-            st.success('Gültige Vorschau. Noch keine Änderungen übernommen.')
+            if manual_pair_override:
+                st.success('Vorschau berechnet. Noch keine Änderungen übernommen.')
+            else:
+                st.success('Geprüfte Vorschau. Noch keine Änderungen übernommen.')
             if not can_apply:
-                st.warning('Auswahl, Koordinaten oder Ausgangsdaten wurden geändert. Bitte Vorschau neu berechnen.')
+                st.warning(
+                    'Auswahl, Koordinaten, Prüfmodus oder Ausgangsdaten wurden geändert. '
+                    'Bitte Vorschau neu berechnen.'
+                )
             if preview.get('deviation'):
                 st.warning(preview['deviation'])
+            _show_advisory_issues(preview.get('advisory_issues'))
             st.markdown('**Fixiertes Paar in der Vorschau**')
             st.dataframe(preview['pinned_placements_df'], use_container_width=True, hide_index=True)
             st.markdown('**Fuhren nach der globalen Neuplanung**')
@@ -126,22 +174,32 @@ def render_pinned_manual_replanning(
                                     use_container_width=True, key='pinned_manual_after')
                 else:
                     st.info('Diese Pritsche entfällt in der Vorschau.')
+            confirmation_text = (
+                'Ich übernehme die manuelle Verantwortung für Schwerpunkt, Auflage und Entladung '
+                'und bestätige: Änderungen aller Fuhren geprüft – Paar fixieren und Vorschau übernehmen'
+                if manual_pair_override else
+                'Änderungen aller Fuhren geprüft – Paar fixieren und Vorschau übernehmen'
+            )
             confirm = st.checkbox(
-                'Änderungen aller Fuhren geprüft – Paar fixieren und Vorschau übernehmen',
+                confirmation_text,
                 value=False, key=f"pinned_manual_confirm_{preview['source_signature']}",
             )
             if st.button('Bestätigte Vorschau übernehmen', disabled=not (can_apply and confirm),
                          key='pinned_manual_apply'):
                 # Recheck directly before the atomic session-state update.
-                accepted = apply_plan(preview, placements, platforms, parts, options, platform_stock, settings)
+                accepted = apply_plan(
+                    preview, placements, platforms, parts, options, platform_stock, request_settings,
+                )
                 if not accepted.get('applied'):
                     st.error('Vorschau ist nicht mehr gültig. Es wurde nichts übernommen.')
                 else:
+                    accepted_pin = dict(accepted)
+                    accepted_pin['manual_pair_override'] = request_settings['manual_pair_override']
                     st.session_state.update({
                         'manual_placements_df': accepted['placements_df'].copy(deep=True),
                         'manual_platforms_df': accepted['platforms_df'].copy(deep=True),
                         'manual_plan_ready_v84': True,
-                        'pinned_manual_active': accepted,
+                        'pinned_manual_active': accepted_pin,
                     })
                     st.session_state.pop('pinned_manual_preview', None)
                     st.session_state.pop('v113_recalc_preview', None)

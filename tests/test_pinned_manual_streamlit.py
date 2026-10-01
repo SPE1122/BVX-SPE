@@ -45,6 +45,61 @@ render_pinned_manual_replanning(
 
 
 class PinnedManualStreamlitTests(unittest.TestCase):
+    def test_manual_override_accepts_real_stability_warnings_with_confirmation(self):
+        # A floating, front-heavy pair exercises the same warnings as the user's
+        # arrangement, without relying on planner mocks or hiding those warnings.
+        script = SCRIPT.replace(
+            "render_pinned_manual_replanning(",
+            """
+parts = parts.iloc[:2].copy()
+parts['Länge_mm'] = 500.0
+parts['Breite_mm'] = 1000.0
+source = st.session_state['source']
+source = source[source['Typ'].eq('Bauteil') & source['Bauteile_Liste'].isin(['0.29', '0.31'])].copy()
+source['Länge_mm'] = 500.0
+source['Breite_mm'] = 1000.0
+st.session_state['source'] = source
+for frame in (stock, st.session_state['source_platforms']):
+    frame['Länge_mm'] = 5000.0
+    frame['Breite_mm'] = 2000.0
+    frame['Max_Höhe_mm'] = 1000.0
+render_pinned_manual_replanning(""",
+        )
+        at = AppTest.from_string(script, default_timeout=60).run()
+        self.assertFalse(at.exception)
+        ids = {
+            str(row['Bauteile_Liste']): str(row['Einheit_ID'])
+            for _, row in at.session_state['source'].iterrows()
+        }
+        at.selectbox(key='pinned_manual_first').set_value(ids['0.29'])
+        at.selectbox(key='pinned_manual_second').set_value(ids['0.31']).run()
+        for which, label, x in [('first', '0.29', 3500.0), ('second', '0.31', 4000.0)]:
+            for axis, value in [('X', x), ('Y', 500.0), ('Z', 320.0)]:
+                at.number_input(key=f'pinned_manual_{which}_{ids[label]}_{axis}').set_value(value)
+        at.button(key='pinned_manual_preview_button').click().run()
+        self.assertFalse(at.exception)
+        preview = at.session_state['pinned_manual_preview']
+        self.assertTrue(preview['ok'], preview['issues'].to_dict('records'))
+        types = set(preview['advisory_issues']['Typ'])
+        self.assertIn('Auflagekette', types)
+        self.assertIn('Schwerpunkt längs', types)
+        self.assertTrue(at.button(key='pinned_manual_apply').disabled)
+        self.assertNotIn('pinned_manual_active', at.session_state)
+        confirm = at.checkbox(key=f"pinned_manual_confirm_{preview['source_signature']}")
+        self.assertIn('manuelle Verantwortung', confirm.label)
+        confirm.check().run()
+        at.button(key='pinned_manual_apply').click().run()
+        self.assertFalse(at.exception)
+        accepted = at.session_state['pinned_manual_active']
+        self.assertTrue(accepted['applied'])
+        self.assertTrue(accepted['settings']['manual_pair_override'])
+        pinned = accepted['pinned_placements_df'].set_index('Einheit_ID')
+        self.assertEqual(pinned.loc[ids['0.29'], 'X_mm'], 3500.0)
+        self.assertEqual(pinned.loc[ids['0.31'], 'X_mm'], 4000.0)
+        self.assertTrue(pinned['Z_mm'].eq(320.0).all())
+        self.assertTrue(any('nicht sicherheitstechnisch bestätigt' in error.value for error in at.error))
+        self.assertIn('Auflagekette', set(accepted['advisory_issues']['Typ']))
+
     def test_real_widgets_validate_preview_confirm_and_release(self):
         at = AppTest.from_string(SCRIPT, default_timeout=60).run()
         self.assertFalse(at.exception)

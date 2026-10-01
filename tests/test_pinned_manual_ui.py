@@ -33,11 +33,17 @@ class FakeStreamlit:
         self.checkboxes = checkboxes or {}
         self.selectboxes = []
         self.button_calls = []
+        self.checkbox_calls = []
+        self.dataframes = []
+        self.errors = []
+        self.successes = []
+        self.warnings = []
 
     def expander(self, *_args, **_kwargs):
         return nullcontext()
 
-    def spinner(self, *_args, **_kwargs):
+    def spinner(self, *args, **_kwargs):
+        self.spinner_text = args[0] if args else ''
         return nullcontext()
 
     def columns(self, count):
@@ -51,23 +57,24 @@ class FakeStreamlit:
         self.button_calls.append((key, disabled))
         return bool(self.buttons.get(key, False)) and not disabled
 
-    def checkbox(self, _label, value=False, key=None, **_kwargs):
+    def checkbox(self, label, value=False, key=None, **_kwargs):
+        self.checkbox_calls.append((label, value, key))
         return self.checkboxes.get(key, value)
 
-    def dataframe(self, *_args, **_kwargs):
-        pass
+    def dataframe(self, frame=None, **_kwargs):
+        self.dataframes.append(frame)
 
     def caption(self, *_args, **_kwargs):
         pass
 
-    def success(self, *_args, **_kwargs):
-        pass
+    def success(self, message, **_kwargs):
+        self.successes.append(message)
 
-    def error(self, *_args, **_kwargs):
-        pass
+    def error(self, message, **_kwargs):
+        self.errors.append(message)
 
-    def warning(self, *_args, **_kwargs):
-        pass
+    def warning(self, message, **_kwargs):
+        self.warnings.append(message)
 
     def info(self, *_args, **_kwargs):
         pass
@@ -93,11 +100,12 @@ def input_frames():
     return placements, platforms, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {}, {}
 
 
-def valid_preview(coordinates=None):
+def valid_preview(coordinates=None, advisory_issues=None):
     return {
         "ok": True,
         "applied": False,
         "source_signature": "source-v1",
+        "advisory_issues": advisory_issues if advisory_issues is not None else pd.DataFrame(),
         "unit_ids": ["A", "B"],
         "target_platform": "F01",
         "coordinates": coordinates or {
@@ -126,10 +134,13 @@ class PinnedManualUiTests(unittest.TestCase):
 
     def validate_pair(
         self, placements, platforms, unit_ids, coordinates, target,
-        include_destination_loads=True,
+        include_destination_loads=True, manual_pair_override=False,
     ):
-        self.validation_calls.append((placements, platforms, unit_ids, coordinates, target))
-        return {"ok": True, "issues": pd.DataFrame()}
+        self.validation_calls.append((
+            placements, platforms, unit_ids, coordinates, target,
+            include_destination_loads, manual_pair_override,
+        ))
+        return {"ok": True, "issues": pd.DataFrame(), "advisory_issues": pd.DataFrame()}
 
     def preview_plan(self, *args):
         self.preview_calls.append(args)
@@ -167,6 +178,13 @@ class PinnedManualUiTests(unittest.TestCase):
         self.assertIn("pinned_manual_preview", state)
         self.assertNotIn("manual_placements_df", state)
         self.assertNotIn("pinned_manual_active", state)
+        self.assertEqual(fake_ui.checkbox_calls[0][1], True)
+        self.assertEqual(self.validation_calls[0][5:], (False, True))
+        preview_settings = self.preview_calls[0][6]
+        self.assertEqual(preview_settings, {"manual_pair_override": True})
+        self.assertIsNot(preview_settings, self.settings)
+        self.assertEqual(self.apply_calls[0][1][-1], {"manual_pair_override": True})
+        self.assertEqual(self.settings, {})
         apply_button = next(
             disabled for key, disabled in fake_ui.button_calls if key == "pinned_manual_apply"
         )
@@ -190,8 +208,9 @@ class PinnedManualUiTests(unittest.TestCase):
             "placements_df": self.placements.copy(deep=True),
             "platforms_df": self.platforms.copy(deep=True),
         }
+        final_apply_settings = []
         self.apply_plan = lambda _preview, *_args: (
-            self.apply_calls.append(_preview) or accepted
+            final_apply_settings.append(_args[-1]) or accepted
         )
         confirmed_ui = FakeStreamlit(
             buttons={"pinned_manual_apply": True},
@@ -201,10 +220,16 @@ class PinnedManualUiTests(unittest.TestCase):
         self.render(confirmed_ui)
 
         self.assertIn("pinned_manual_active", state)
+        self.assertTrue(state["pinned_manual_active"]["manual_pair_override"])
         self.assertTrue(state["manual_plan_ready_v84"])
         self.assertTrue(state["pinned_manual_active"]["applied"])
         self.assertNotIn("pinned_manual_preview", state)
         self.assertIn("manual_placements_df", state)
+        self.assertIn("manuelle Verantwortung", confirmed_ui.checkbox_calls[-1][0])
+        self.assertEqual(final_apply_settings, [
+            {"manual_pair_override": True},
+            {"manual_pair_override": True},
+        ])
 
     def test_discard_removes_preview_without_committing(self):
         state = {"pinned_manual_preview": valid_preview()}
@@ -219,7 +244,8 @@ class PinnedManualUiTests(unittest.TestCase):
 
     def test_invalid_pair_preview_never_reaches_apply_callback(self):
         self.validate_pair = lambda *_args, **_kwargs: {
-            "ok": False, "issues": pd.DataFrame([{"Typ": "Geometrie"}])
+            "ok": False, "issues": pd.DataFrame([{"Typ": "Geometrie"}]),
+            "advisory_issues": pd.DataFrame([{"Typ": "Hinweis"}]),
         }
         fake_ui = FakeStreamlit(
             buttons={"pinned_manual_preview_button": True},
@@ -229,6 +255,7 @@ class PinnedManualUiTests(unittest.TestCase):
         self.assertEqual(len(self.preview_calls), 0)
         self.assertEqual(len(self.apply_calls), 0)
         self.assertFalse(fake_ui.session_state["pinned_manual_preview"]["ok"])
+        self.assertEqual(len(fake_ui.dataframes), 2)
         self.assertNotIn("pinned_manual_active", fake_ui.session_state)
 
     def test_stale_source_preview_cannot_be_applied(self):
@@ -279,6 +306,59 @@ class PinnedManualUiTests(unittest.TestCase):
         self.render(unlocked_ui)
         self.assertIn(("Zielpritsche für das Längspaar", "pinned_manual_target"),
                       unlocked_ui.selectboxes)
+
+    def test_advisory_issues_are_shown_for_preview_and_accepted_pin(self):
+        advisory = pd.DataFrame([{"Typ": "Schwerpunkt", "Hinweis": "Manuell beurteilen"}])
+        state = {}
+        self.preview_plan = lambda *args: valid_preview(args[-1], advisory)
+        preview_ui = FakeStreamlit(
+            buttons={"pinned_manual_preview_button": True},
+            session_state=state,
+        )
+        self.render(preview_ui)
+        self.assertTrue(any(frame is not None and frame.equals(advisory)
+                            for frame in preview_ui.dataframes))
+        self.assertTrue(any("nicht sicherheitstechnisch bestätigt" in message
+                            for message in preview_ui.errors))
+
+        accepted_pin = {
+            "target_platform": "F01",
+            "unit_ids": ["A", "B"],
+            "manual_pair_override": True,
+            "advisory_issues": advisory,
+        }
+        accepted_ui = FakeStreamlit(session_state={"pinned_manual_active": accepted_pin})
+        self.render(accepted_ui)
+        self.assertTrue(any(frame is not None and frame.equals(advisory)
+                            for frame in accepted_ui.dataframes))
+        self.assertTrue(any("nicht sicherheitstechnisch bestätigt" in message
+                            for message in accepted_ui.errors))
+
+    def test_switching_from_override_preview_to_strict_blocks_apply(self):
+        state = {"pinned_manual_preview": valid_preview()}
+        settings_seen = []
+
+        def reject_stale_mode(_preview, *_args):
+            settings_seen.append(_args[-1])
+            return {"applied": False, "stale_source": True}
+
+        self.apply_plan = reject_stale_mode
+        fake_ui = FakeStreamlit(
+            buttons={"pinned_manual_apply": True},
+            checkboxes={
+                "pinned_manual_override": False,
+                "pinned_manual_confirm_source-v1": True,
+            },
+            session_state=state,
+        )
+        self.render(fake_ui)
+        self.assertEqual(settings_seen, [{"manual_pair_override": False}])
+        self.assertNotIn("pinned_manual_active", state)
+        self.assertNotIn("manual_placements_df", state)
+        self.assertTrue(next(
+            disabled for key, disabled in fake_ui.button_calls if key == "pinned_manual_apply"
+        ))
+        self.assertNotIn("manuelle Verantwortung", fake_ui.checkbox_calls[-1][0])
 
 
 if __name__ == "__main__":
