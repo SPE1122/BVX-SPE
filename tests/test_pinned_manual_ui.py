@@ -1,0 +1,285 @@
+import unittest
+from contextlib import nullcontext
+from unittest.mock import patch
+
+import pandas as pd
+
+import pinned_manual_ui
+
+
+class FakeColumn:
+    def __init__(self, ui):
+        self.ui = ui
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def selectbox(self, label, options, index=0, key=None, **_kwargs):
+        self.ui.selectboxes.append((label, key))
+        return self.ui.widget_values.get(key, options[index])
+
+    def number_input(self, _label, value=0.0, key=None, **_kwargs):
+        return self.ui.widget_values.get(key, value)
+
+
+class FakeStreamlit:
+    def __init__(self, *, buttons=None, widgets=None, session_state=None, checkboxes=None):
+        self.session_state = {} if session_state is None else session_state
+        self.buttons = buttons or {}
+        self.widget_values = widgets or {}
+        self.checkboxes = checkboxes or {}
+        self.selectboxes = []
+        self.button_calls = []
+
+    def expander(self, *_args, **_kwargs):
+        return nullcontext()
+
+    def spinner(self, *_args, **_kwargs):
+        return nullcontext()
+
+    def columns(self, count):
+        return [FakeColumn(self) for _ in range(count)]
+
+    def selectbox(self, label, options, index=0, key=None, **_kwargs):
+        self.selectboxes.append((label, key))
+        return self.widget_values.get(key, options[index])
+
+    def button(self, _label, key=None, disabled=False, **_kwargs):
+        self.button_calls.append((key, disabled))
+        return bool(self.buttons.get(key, False)) and not disabled
+
+    def checkbox(self, _label, value=False, key=None, **_kwargs):
+        return self.checkboxes.get(key, value)
+
+    def dataframe(self, *_args, **_kwargs):
+        pass
+
+    def caption(self, *_args, **_kwargs):
+        pass
+
+    def success(self, *_args, **_kwargs):
+        pass
+
+    def error(self, *_args, **_kwargs):
+        pass
+
+    def warning(self, *_args, **_kwargs):
+        pass
+
+    def info(self, *_args, **_kwargs):
+        pass
+
+    def markdown(self, *_args, **_kwargs):
+        pass
+
+    def plotly_chart(self, *_args, **_kwargs):
+        pass
+
+    def rerun(self):
+        pass
+
+
+def input_frames():
+    placements = pd.DataFrame([
+        {"Einheit_ID": unit_id, "Typ": "Bauteil", "Bauteile": unit_id,
+         "Bauteile_Liste": unit_id, "Pritsche": "F01", "X_mm": x,
+         "Y_mm": 0.0, "Z_mm": 0.0}
+        for unit_id, x in (("A", 0.0), ("B", 10.0))
+    ])
+    platforms = pd.DataFrame([{"Pritsche": "F01"}])
+    return placements, platforms, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {}, {}
+
+
+def valid_preview(coordinates=None):
+    return {
+        "ok": True,
+        "applied": False,
+        "source_signature": "source-v1",
+        "unit_ids": ["A", "B"],
+        "target_platform": "F01",
+        "coordinates": coordinates or {
+            "A": {"X_mm": 0.0, "Y_mm": 0.0, "Z_mm": 0.0},
+            "B": {"X_mm": 10.0, "Y_mm": 0.0, "Z_mm": 0.0},
+        },
+        "pinned_placements_df": pd.DataFrame([{"Einheit_ID": "A"}, {"Einheit_ID": "B"}]),
+        "placements_df": pd.DataFrame([
+            {"Einheit_ID": unit_id, "Typ": "Bauteil", "Bauteile_Liste": unit_id,
+             "Pritsche": "F01", "X_mm": x, "Y_mm": 0.0, "Z_mm": 0.0}
+            for unit_id, x in (("A", 0.0), ("B", 10.0))
+        ]),
+        "platforms_df": pd.DataFrame([{"Pritsche": "F01"}]),
+        "summary_df": pd.DataFrame(),
+    }
+
+
+class PinnedManualUiTests(unittest.TestCase):
+    def setUp(self):
+        self.placements, self.platforms, self.parts, self.options, self.stock, self.standards, self.settings = input_frames()
+        self.placements_before = self.placements.copy(deep=True)
+        self.platforms_before = self.platforms.copy(deep=True)
+        self.validation_calls = []
+        self.preview_calls = []
+        self.apply_calls = []
+
+    def validate_pair(
+        self, placements, platforms, unit_ids, coordinates, target,
+        include_destination_loads=True,
+    ):
+        self.validation_calls.append((placements, platforms, unit_ids, coordinates, target))
+        return {"ok": True, "issues": pd.DataFrame()}
+
+    def preview_plan(self, *args):
+        self.preview_calls.append(args)
+        return valid_preview(args[-1])
+
+    def apply_plan(self, preview, *args):
+        self.apply_calls.append((preview, args))
+        return {"applied": True}
+
+    def render(self, fake_ui):
+        with patch.object(pinned_manual_ui, "st", fake_ui):
+            pinned_manual_ui.render_pinned_manual_replanning(
+                self.placements, self.platforms, self.parts, self.options,
+                self.stock, self.standards, self.settings,
+                validate_pair=self.validate_pair,
+                preview_plan=self.preview_plan,
+                apply_plan=self.apply_plan,
+                draw_view=lambda *_args: object(),
+                is_real_load=lambda value: value == "Bauteil",
+            )
+
+    def test_preview_does_not_mutate_or_commit_plan(self):
+        state = {}
+        fake_ui = FakeStreamlit(
+            buttons={"pinned_manual_preview_button": True},
+            session_state=state,
+        )
+        self.render(fake_ui)
+
+        self.assertEqual(len(self.validation_calls), 1)
+        self.assertEqual(len(self.preview_calls), 1)
+        self.assertEqual(len(self.apply_calls), 1)  # validity check only, no commit
+        pd.testing.assert_frame_equal(self.placements, self.placements_before)
+        pd.testing.assert_frame_equal(self.platforms, self.platforms_before)
+        self.assertIn("pinned_manual_preview", state)
+        self.assertNotIn("manual_placements_df", state)
+        self.assertNotIn("pinned_manual_active", state)
+        apply_button = next(
+            disabled for key, disabled in fake_ui.button_calls if key == "pinned_manual_apply"
+        )
+        self.assertTrue(apply_button)
+
+    def test_checkbox_and_apply_button_are_both_required_to_commit(self):
+        state = {"pinned_manual_preview": valid_preview()}
+        confirm_key = "pinned_manual_confirm_source-v1"
+        fake_ui = FakeStreamlit(
+            buttons={"pinned_manual_apply": True},
+            session_state=state,
+        )
+        self.render(fake_ui)
+        self.assertNotIn("pinned_manual_active", state)
+        self.assertTrue(next(
+            disabled for key, disabled in fake_ui.button_calls if key == "pinned_manual_apply"
+        ))
+
+        accepted = {
+            "applied": True,
+            "placements_df": self.placements.copy(deep=True),
+            "platforms_df": self.platforms.copy(deep=True),
+        }
+        self.apply_plan = lambda _preview, *_args: (
+            self.apply_calls.append(_preview) or accepted
+        )
+        confirmed_ui = FakeStreamlit(
+            buttons={"pinned_manual_apply": True},
+            checkboxes={confirm_key: True},
+            session_state=state,
+        )
+        self.render(confirmed_ui)
+
+        self.assertIn("pinned_manual_active", state)
+        self.assertTrue(state["manual_plan_ready_v84"])
+        self.assertTrue(state["pinned_manual_active"]["applied"])
+        self.assertNotIn("pinned_manual_preview", state)
+        self.assertIn("manual_placements_df", state)
+
+    def test_discard_removes_preview_without_committing(self):
+        state = {"pinned_manual_preview": valid_preview()}
+        fake_ui = FakeStreamlit(
+            buttons={"pinned_manual_discard": True},
+            session_state=state,
+        )
+        self.render(fake_ui)
+        self.assertNotIn("pinned_manual_preview", state)
+        self.assertNotIn("pinned_manual_active", state)
+        self.assertNotIn("manual_placements_df", state)
+
+    def test_invalid_pair_preview_never_reaches_apply_callback(self):
+        self.validate_pair = lambda *_args, **_kwargs: {
+            "ok": False, "issues": pd.DataFrame([{"Typ": "Geometrie"}])
+        }
+        fake_ui = FakeStreamlit(
+            buttons={"pinned_manual_preview_button": True},
+            session_state={},
+        )
+        self.render(fake_ui)
+        self.assertEqual(len(self.preview_calls), 0)
+        self.assertEqual(len(self.apply_calls), 0)
+        self.assertFalse(fake_ui.session_state["pinned_manual_preview"]["ok"])
+        self.assertNotIn("pinned_manual_active", fake_ui.session_state)
+
+    def test_stale_source_preview_cannot_be_applied(self):
+        state = {"pinned_manual_preview": valid_preview()}
+        self.apply_plan = lambda *_args: {"applied": False, "stale_source": True}
+        fake_ui = FakeStreamlit(
+            buttons={"pinned_manual_apply": True},
+            checkboxes={"pinned_manual_confirm_source-v1": True},
+            session_state=state,
+        )
+        self.render(fake_ui)
+        self.assertNotIn("pinned_manual_active", state)
+        self.assertNotIn("manual_placements_df", state)
+        self.assertTrue(next(
+            disabled for key, disabled in fake_ui.button_calls if key == "pinned_manual_apply"
+        ))
+
+    def test_edited_coordinate_invalidates_preview_and_blocks_apply(self):
+        state = {"pinned_manual_preview": valid_preview()}
+        fake_ui = FakeStreamlit(
+            buttons={"pinned_manual_apply": True},
+            widgets={"pinned_manual_first_A_X": 1.0},
+            checkboxes={"pinned_manual_confirm_source-v1": True},
+            session_state=state,
+        )
+        self.render(fake_ui)
+        self.assertEqual(len(self.apply_calls), 1)  # preflight only
+        self.assertNotIn("pinned_manual_active", state)
+        self.assertNotIn("manual_placements_df", state)
+        self.assertTrue(next(
+            disabled for key, disabled in fake_ui.button_calls if key == "pinned_manual_apply"
+        ))
+
+    def test_release_clears_lock_and_next_render_shows_controls(self):
+        state = {
+            "pinned_manual_active": {"target_platform": "F01", "unit_ids": ["A", "B"]},
+            "pinned_manual_preview": valid_preview(),
+        }
+        release_ui = FakeStreamlit(
+            buttons={"pinned_manual_release": True},
+            session_state=state,
+        )
+        self.render(release_ui)
+        self.assertNotIn("pinned_manual_active", state)
+        self.assertNotIn("pinned_manual_preview", state)
+
+        unlocked_ui = FakeStreamlit(session_state=state)
+        self.render(unlocked_ui)
+        self.assertIn(("Zielpritsche für das Längspaar", "pinned_manual_target"),
+                      unlocked_ui.selectboxes)
+
+
+if __name__ == "__main__":
+    unittest.main()
