@@ -45,6 +45,54 @@ render_pinned_manual_replanning(
 
 
 class PinnedManualStreamlitTests(unittest.TestCase):
+    def test_unit_warning_and_suggestion_only_change_x_inputs(self):
+        script = SCRIPT.replace(
+            'render_pinned_manual_replanning(',
+            """
+source = st.session_state['source']
+source['Länge_mm'] = 4560.0
+source['Breite_mm'] = 1774.0
+source['Höhe_mm'] = 120.0
+for frame in (stock, st.session_state['source_platforms']):
+    frame['Länge_mm'] = 7600.0
+    frame['Breite_mm'] = 2450.0
+    frame['Max_Höhe_mm'] = 2800.0
+    frame['Überhang_hinten_mm'] = 3500.0
+    frame['Überhang_vorne_mm'] = 1400.0
+render_pinned_manual_replanning(""",
+        )
+        at = AppTest.from_string(script, default_timeout=60).run()
+        self.assertFalse(at.exception)
+        ids = {str(row['Bauteile_Liste']): str(row['Einheit_ID'])
+               for _, row in at.session_state['source'].iterrows() if row['Typ'] == 'Bauteil'}
+        at.selectbox(key='pinned_manual_first').set_value(ids['0.29'])
+        at.selectbox(key='pinned_manual_second').set_value(ids['0.31']).run()
+        for which, label, x in [('first', '0.29', 6.54), ('second', '0.31', 1.98)]:
+            at.number_input(key=f'pinned_manual_{which}_{ids[label]}_X').set_value(x)
+            at.number_input(key=f'pinned_manual_{which}_{ids[label]}_Y').set_value(193.5)
+            at.number_input(key=f'pinned_manual_{which}_{ids[label]}_Z').set_value(350)
+        at.run()
+        self.assertFalse(at.exception)
+        self.assertTrue(any('Keine automatische Umrechnung' in item.value for item in at.warning))
+        self.assertTrue(any('Überlappung in X' in item.value for item in at.error))
+        before = at.session_state['source'].copy(deep=True)
+        at.session_state['pinned_manual_preview'] = {'ok': False}
+        at.button(key='pinned_manual_suggestion_front_flush').click().run()
+        self.assertFalse(at.exception)
+        self.assertEqual(at.number_input(key=f"pinned_manual_first_{ids['0.29']}_X").value, 6540)
+        self.assertEqual(at.number_input(key=f"pinned_manual_second_{ids['0.31']}_X").value, 1980)
+        for which, label in [('first', '0.29'), ('second', '0.31')]:
+            self.assertEqual(at.number_input(key=f'pinned_manual_{which}_{ids[label]}_Y').value, 193.5)
+            self.assertEqual(at.number_input(key=f'pinned_manual_{which}_{ids[label]}_Z').value, 350)
+        self.assertNotIn('pinned_manual_preview', at.session_state)
+        self.assertNotIn('pinned_manual_active', at.session_state)
+        self.assertTrue(before.equals(at.session_state['source']))
+        at.button(key='pinned_manual_suggestion_centered').click().run()
+        self.assertFalse(at.exception)
+        self.assertEqual(at.number_input(key=f"pinned_manual_first_{ids['0.29']}_X").value, 7300)
+        self.assertEqual(at.number_input(key=f"pinned_manual_second_{ids['0.31']}_X").value, 2740)
+        self.assertTrue(before.equals(at.session_state['source']))
+
     def test_manual_override_accepts_real_stability_warnings_with_confirmation(self):
         # A floating, front-heavy pair exercises the same warnings as the user's
         # arrangement, without relying on planner mocks or hiding those warnings.

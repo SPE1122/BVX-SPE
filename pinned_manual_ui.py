@@ -2,6 +2,7 @@
 
 import pandas as pd
 import streamlit as st
+from pinned_pair_guidance import mm_text, render_pair_guidance
 
 
 def _show_advisory_issues(issues):
@@ -62,6 +63,8 @@ def render_pinned_manual_replanning(
         request_settings['manual_pair_override'] = True
         names = platforms['Pritsche'].astype(str).tolist()
         target = st.selectbox('Zielpritsche für das Längspaar', names, key='pinned_manual_target')
+        st.info('Eingabe in Millimetern: 6,54 m = 6540 mm · 1,98 m = 1980 mm. '
+                'Bitte 6540 beziehungsweise 1980 eingeben, nicht 6,54 oder 1,98.')
         ids = real['Einheit_ID'].astype(str).tolist()
         labels = {
             str(row['Einheit_ID']): f"{row['Einheit_ID']} | {row.get('Bauteile', '')} | {row.get('Pritsche', '')}"
@@ -73,16 +76,33 @@ def render_pinned_manual_replanning(
             cols[1].selectbox('Zweites Bauteil / Bund', ids, index=1, format_func=labels.get, key='pinned_manual_second'),
         ]
         coordinates = {}
+        selected_rows = {}
+        x_widget_keys = {}
         for col, unit_id, position in zip(cols, selected, ('first', 'second')):
             row = real[real['Einheit_ID'].astype(str).eq(unit_id)].iloc[0]
+            selected_rows[unit_id] = row
+            col.caption(
+                f"Länge {mm_text(float(row['Länge_mm']))} mm · "
+                f"Breite {mm_text(float(row['Breite_mm']))} mm · "
+                f"Höhe {mm_text(float(row['Höhe_mm']))} mm"
+            )
             coordinates[unit_id] = {}
+            x_widget_keys[unit_id] = f'pinned_manual_{position}_{unit_id}_X'
             for axis in ('X', 'Y', 'Z'):
                 raw = pd.to_numeric(row.get(f'{axis}_mm'), errors='coerce')
                 default = float(raw) if pd.notna(raw) else 0.0
                 coordinates[unit_id][f'{axis}_mm'] = col.number_input(
                     f'{axis} mm – {labels[unit_id]}', value=default, step=10.0,
                     key=f'pinned_manual_{position}_{unit_id}_{axis}',
+                    help={
+                        'X': 'Millimeter eingeben: z. B. 6540 für 6,54 m. '
+                             'X ist der Anfang des Elements im Ladebereich inklusive Überhang.',
+                        'Y': 'Linke Elementkante in mm, von hinten in Fahrtrichtung gesehen.',
+                        'Z': 'Unterkante des Elements in mm; erforderliche Auflager prüfen.',
+                    }[axis],
                 )
+        target_row = platforms.loc[platforms['Pritsche'].astype(str).eq(str(target))].iloc[0]
+        render_pair_guidance(target_row, selected_rows, coordinates, labels, x_widget_keys)
         request = {'unit_ids': selected, 'target_platform': target, 'coordinates': coordinates}
         if st.button('Paar prüfen und globale Vorschau berechnen', key='pinned_manual_preview_button'):
             spinner_text = (

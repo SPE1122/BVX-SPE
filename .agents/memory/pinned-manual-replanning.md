@@ -26,3 +26,9 @@ For manually adjusted longitudinal pairs, allow manual assessment of center of g
 **Why:** On 2026-10-01 the user explicitly requested that manual positioning not be blocked by center-of-gravity and similar stability checks. Pair-only checks can reject a position before other loads are planned, and inherited elevated positions may depend on support not retained with the pair.
 
 **How to apply:** Scope this exception to the manual-pair flow, including preview and final apply. Manual assessment is fixed in this UI, not an optional checkbox whose retained value can silently restore strict stability gates. Automation remains strict. Invalidate obsolete previews, including failed previews, when their request changes. Do not describe an override-accepted plan as transport-safe.
+
+Do not silently interpret small millimetre entries as metres; explain the reference and offer explicit corrections instead.
+
+**Why:** Metre-style entries such as 6.54 and 1.98 in millimetre fields caused an almost fully overlapping pair. Users also understood X = 0 as the physical rear deck edge, while the planner includes the configured rear-overhang area in its origin. Guessing units would make exact manual placement unreliable.
+
+**How to apply:** Show millimetres alongside metre equivalents, the physical deck boundaries, and gap/overlap before planning. Suggestions may update input fields only after an explicit click; they are geometric starting points, not load-security approval or permission to move an accepted pin.
