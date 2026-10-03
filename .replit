@@ -6,10 +6,6 @@ packages = ["freetype", "glibcLocales", "gumbo", "harfbuzz", "jbig2dec", "libjpe
 
 [[ports]]
 localPort = 5000
-externalPort = 5000
-
-[[ports]]
-localPort = 8080
 externalPort = 80
 
 [workflows]

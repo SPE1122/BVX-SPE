@@ -87,11 +87,11 @@ The deterministic whole-cascade result was visually confirmed by the user in a r
 
 **How to apply:** Preserve the deterministic whole-cascade approach for this structural pattern; do not replace it with independent incremental moves without equivalent full-output validation.
 
-Bound atomic compaction by a small per-platform time budget and a short prioritized candidate list. If the budget expires, retain the last fully validated state rather than continuing exhaustive subset search or accepting an unchecked layout.
+Bound every optional compaction stage by a shared per-platform and overall request budget, plus short prioritized candidate lists. Repeated candidate plans must not restart their allowance. If the budget expires, retain the last fully validated state rather than accepting an unchecked layout.
 
-**Why:** Independent shelf starts create many combinatorial variants; exhaustive validation can turn an otherwise short app calculation into a run lasting more than 16 minutes.
+**Why:** Independent shelf starts create many combinatorial variants; exhaustive validation can turn an otherwise short app calculation into a run lasting more than 16 minutes. A live sample confirmed that late single-unit search continued after the atomic stage's timer had expired, with repeated pairwise geometry checks consuming substantial time.
 
-**How to apply:** Search target-level-plus-nearest-upper groups first, avoid generating layouts once merely to test feasibility and then again for validation, and stop safely at the deadline.
+**How to apply:** Search target-level-plus-nearest-upper groups first, avoid duplicate generation and immutable per-pair geometry reconstruction, and stop safely at the deadline. Budgets must be calculation-local, not shared across concurrent Streamlit sessions. Fully finish any already-started safety validation; a deadline is not permission to accept a partially checked candidate.
 
 The PDF's reported overhang is the load's actually used overhang, not necessarily the planning coordinate window's allowed overhang. Reconstructing validation with the reported value can shift the apparent platform center and falsely reject a valid layout.
 

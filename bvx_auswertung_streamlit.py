@@ -24,6 +24,7 @@ import base64
 import copy
 import itertools
 import time
+from compaction_runtime import compaction_budget, with_compaction_budget
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Tuple
 from collections import Counter
@@ -1460,16 +1461,13 @@ def find_geometry_conflicts(placements_df: pd.DataFrame, platforms_df: Optional[
             platform_width_lookup[str(pr.get('Pritsche', ''))] = safe_number(pr.get('Breite_mm'), 0.0)
     warnings: List[Dict[str, Any]] = []
     for pname, grp in rows.groupby(rows['Pritsche'].astype(str), sort=False):
-        idxs = grp.index.tolist()
-        for pos_i in range(len(idxs)):
-            i = idxs[pos_i]
-            row_i = rows.loc[i]
-            box_i = _row_box_values(row_i)
+        # Each box is immutable within this check. Avoid pandas .loc and box
+        # reconstruction for every pair; the same exact overlap rules apply.
+        entries = [(row, _row_box_values(row)) for row in grp.to_dict('records')]
+        for pos_i, (row_i, box_i) in enumerate(entries):
             if box_i is None:
                 continue
-            for j in idxs[pos_i + 1:]:
-                row_j = rows.loc[j]
-                box_j = _row_box_values(row_j)
+            for row_j, box_j in entries[pos_i + 1:]:
                 if box_j is None:
                     continue
                 if not _boxes_overlap_3d(box_i, box_j, tol=1.0):
@@ -4279,6 +4277,7 @@ def improve_longitudinal_weight_balance(
 
     return result
 
+@with_compaction_budget
 def compact_adjacent_loading_layers(
     placements_df: pd.DataFrame,
     platforms_df: pd.DataFrame,
@@ -4478,6 +4477,9 @@ def compact_adjacent_loading_layers(
         return True
 
     for pname, prow in p_lookup.items():
+        budget = compaction_budget()
+        if budget.expired(pname):
+            continue
         initial = real_rows(result, pname)
         if len(initial) < 2:
             continue
@@ -4495,6 +4497,8 @@ def compact_adjacent_loading_layers(
 
         move_limit = min(max(1, int(max_moves_per_platform)), max(1, len(initial)))
         for _ in range(move_limit):
+            if budget.expired(pname):
+                break
             real = real_rows(result, pname)
             current_helpers = result[
                 result['Pritsche'].astype(str).eq(pname)
@@ -4511,6 +4515,8 @@ def compact_adjacent_loading_layers(
             current_z_sum = float(real['Z_mm'].sum())
             best = None
             for idx, row in real.sort_values('Z_mm', ascending=False, kind='stable').iterrows():
+                if budget.expired(pname):
+                    break
                 if bundles_only and str(row.get('Typ', '')).strip() != 'Bund':
                     continue
                 if str(row.get('Einheit_ID', idx)) in supported_parent_ids:
@@ -4550,8 +4556,14 @@ def compact_adjacent_loading_layers(
                     key=lambda y: (abs(y - old_y), abs((y + width / 2.0) - platform_width / 2.0)),
                 )[:10]
                 for z in sorted(target_zs):
+                    if budget.expired(pname):
+                        break
                     for x in x_values:
+                        if budget.expired(pname):
+                            break
                         for y in y_values:
+                            if budget.expired(pname):
+                                break
                             if z >= old_z - 1.0:
                                 continue
                             if candidate_checks >= max(1, int(max_candidate_checks_per_platform)):
@@ -4594,6 +4606,7 @@ def compact_adjacent_loading_layers(
     return result
 
 
+@with_compaction_budget
 def compact_placements_conservatively(
     placements_df: pd.DataFrame,
     platforms_df: pd.DataFrame,
@@ -4636,7 +4649,10 @@ def compact_placements_conservatively(
         # Die atomare Nachverdichtung ist eine Zusatzoptimierung. Sie darf die
         # Gesamtberechnung nicht minutenlang blockieren. Nach Ablauf bleibt
         # ausschließlich der letzte vollständig validierte Zustand erhalten.
-        compaction_deadline = time.monotonic() + 20.0
+        budget = compaction_budget()
+        compaction_deadline = budget.deadline(pname)
+        if budget.expired(pname):
+            continue
         fixed_parent_ids = set()
         generated_only_parent_ids = set()
         if 'Auflager_fuer' in result.columns and 'Typ' in result.columns:
@@ -4680,6 +4696,8 @@ def compact_placements_conservatively(
             moved_idx: Any,
             baseline_edges: Optional[set] = None,
         ) -> bool:
+            if budget.expired(pname):
+                return False
             # ``moved_idx`` is normally one index, but an atomic repack passes
             # a complete set.  Every member of that set may legitimately trade
             # its former support for the configured minimum support; all other
@@ -4719,8 +4737,9 @@ def compact_placements_conservatively(
                     support_box = _row_box_values(support)
                     if parent_box is not None and support_box is not None and _boxes_overlap_3d(parent_box, support_box, tol=1.0):
                         return False
+            current_entries = list(zip(current.index, current.to_dict('records')))
             edges = {
-                (u, l) for u, upper in current.iterrows() for l, lower in current.iterrows() if u != l
+                (u, l) for u, upper in current_entries for l, lower in current_entries if u != l
                 and _xy_overlap(upper, lower) and upper['Z_mm'] >= lower['Z_mm'] + lower['Höhe_mm'] - 1.0
             }
             new_edges = edges - (
@@ -4791,6 +4810,8 @@ def compact_placements_conservatively(
             target_z_guess = float(group['Z_mm'].min())
             # The first part is fixed to remove the row-zero/row-one mirror.
             for mask in range(1 << max(0, len(ordered) - 1)):
+                if budget.expired(pname):
+                    break
                 shelves = [[], []]
                 shelves[0].append(ordered[0])
                 for pos, item in enumerate(ordered[1:]):
@@ -4864,6 +4885,8 @@ def compact_placements_conservatively(
                         normalized_base | set(nearest[:max(0, 10 - len(normalized_base))])
                     ))
                 for shelf_starts in itertools.product(*shelf_start_options):
+                    if budget.expired(pname):
+                        break
                     shelf_orders = [(0, 1)]
                     if shelves[0] and shelves[1]:
                         # Links/rechts ist bei asymmetrischer Gesamtladung
@@ -5154,6 +5177,8 @@ def compact_placements_conservatively(
                     if not (group['Z_mm'] >= target_z - 1.0).all() or not (group['Z_mm'] > target_z + 1.0).any():
                         continue
                     for layout in _atomic_shelf_layouts(group, eff_len, platform_width, platform_center_x, current):
+                        if budget.expired(pname):
+                            break
                         candidate = result.copy()
                         for idx, (x, y) in layout.items():
                             candidate.loc[idx, ['X_mm', 'Y_mm', 'Z_mm']] = [x, y, round(target_z, 1)]
@@ -5296,7 +5321,8 @@ def compact_placements_conservatively(
         # are partitioned into a lower lateral three-pack and an upper lateral
         # two-pack, then their dependent chain is settled atomically.
         current = result.loc[_real_mask(result, pname)].copy()
-        if 'Logische_Reihenfolge_im_Block' in current.columns and len(current) >= 5:
+        if (not budget.expired(pname)
+                and 'Logische_Reihenfolge_im_Block' in current.columns and len(current) >= 5):
             current_top = float((current['Z_mm'] + current['Höhe_mm']).max())
             current_z_sum = float(current['Z_mm'].sum())
             ranked = current.assign(_rank=pd.to_numeric(
@@ -5312,6 +5338,8 @@ def compact_placements_conservatively(
             local_best = None
             ranked_indices = list(ranked.index)
             for pos in range(len(ranked_indices) - 4):
+                if budget.expired(pname):
+                    break
                 window_indices = ranked_indices[pos:pos + 5]
                 window = current.loc[window_indices]
                 window_index_set = set(window_indices)
@@ -5444,6 +5472,8 @@ def compact_placements_conservatively(
                             if not x_options:
                                 continue
                             for x_values in itertools.product(*x_options):
+                                if budget.expired(pname):
+                                    break
                                 candidate = result.copy()
                                 for idx, x in zip(window_indices, x_values):
                                     y = lower_y[idx] if idx in lower_y else upper_y[idx]
@@ -5828,12 +5858,16 @@ def compact_placements_conservatively(
                     result.loc[moved, 'Ebene'] = f'{value} / quer verdichtet'
 
         for _ in range(max_moves_per_platform):
+            if budget.expired(pname):
+                break
             current = result.loc[_real_mask(result, pname)].copy()
             state = init_platform_state(prow, base_z, safe_number(prow.get('Einlage_zwischen_Lagen_mm'), 0.0), 0.0)
             state['placements'] = result[result['Pritsche'].astype(str).eq(pname)].to_dict('records')
             ratios = {i: _support_area_ratio_for_candidate(state, r['X_mm'], r['Y_mm'], r['Z_mm'], r['Länge_mm'], r['Breite_mm']) for i, r in current.iterrows()}
             best = None
             for idx, row in current.sort_values('Z_mm', ascending=False, kind='stable').iterrows():
+                if budget.expired(pname):
+                    break
                 if bundles_only and str(row.get('Typ', '')).strip() != 'Bund':
                     continue
                 if str(row.get(atomic_group_column, '')).strip():
@@ -5848,6 +5882,8 @@ def compact_placements_conservatively(
                 old_span = ((old_layer['X_mm'] + old_layer['Länge_mm']).max() - old_layer['X_mm'].min()) * ((old_layer['Y_mm'] + old_layer['Breite_mm']).max() - old_layer['Y_mm'].min())
                 max_x = safe_number(prow.get('Länge_mm'), 0.0) + safe_number(prow.get('Überhang_vorne_mm'), 0.0) + safe_number(prow.get('Überhang_hinten_mm'), 0.0) - row['Länge_mm']
                 for z in zs:
+                    if budget.expired(pname):
+                        break
                     if best is not None and z > best[0][0] + 0.1:
                         break
                     # Nur Kanten von Teilen berücksichtigen, die auf der
@@ -5871,7 +5907,11 @@ def compact_placements_conservatively(
                     ys = sorted({round(float(y), 1) for y in ys if -0.1 <= float(y) <= max_y + 0.1})
                     found_at_z = False
                     for x in xs:
+                        if budget.expired(pname):
+                            break
                         for y in ys:
+                            if budget.expired(pname):
+                                break
                             candidate_box = (float(x), float(x) + row['Länge_mm'], float(y), float(y) + row['Breite_mm'],
                                              float(z), float(z) + row['Höhe_mm'])
                             if any(
@@ -5926,6 +5966,7 @@ def _effective_multilayer_support_ratio(
     return max(requested, 0.35) if enable_multilayer_compaction else requested
 
 
+@with_compaction_budget
 def apply_main_loading_postprocess(
     placements_df: pd.DataFrame,
     summary_df: Optional[pd.DataFrame],
@@ -6068,6 +6109,7 @@ def normalize_y_from_platform_center(placements_df: pd.DataFrame, platforms_df: 
     return result
 
 
+@with_compaction_budget
 def center_upper_single_stacks_laterally(
     placements_df: pd.DataFrame,
     platforms_df: pd.DataFrame,
@@ -6103,6 +6145,8 @@ def center_upper_single_stacks_laterally(
         )
 
     for pname, prow in platform_lookup.items():
+        if compaction_budget().expired(pname):
+            continue
         platform_width = safe_number(prow.get('Breite_mm'), 0.0)
         if platform_width <= 0:
             continue
@@ -6219,6 +6263,7 @@ def center_upper_single_stacks_laterally(
     return result
 
 
+@with_compaction_budget
 def promote_early_narrow_fillers_to_top(
     placements_df: pd.DataFrame,
     platforms_df: pd.DataFrame,
@@ -6246,6 +6291,8 @@ def promote_early_narrow_fillers_to_top(
 
     for _, prow in platforms_df.iterrows():
         pname = str(prow.get('Pritsche', ''))
+        if compaction_budget().expired(pname):
+            continue
         platform_width = safe_number(prow.get('Breite_mm'), 0.0)
         if not pname or platform_width <= 0:
             continue
@@ -6279,6 +6326,8 @@ def promote_early_narrow_fillers_to_top(
         ].sort_values(['_part_number', 'Z_mm'], kind='stable')
 
         for narrow_idx, narrow in narrow_rows.iterrows():
+            if compaction_budget().expired(pname):
+                break
             narrow_number = float(narrow['_part_number'])
             later_above = real[
                 (real['Z_mm'] > safe_number(narrow.get('Z_mm')) + 1.0)
@@ -6333,6 +6382,7 @@ def promote_early_narrow_fillers_to_top(
     return result
 
 
+@with_compaction_budget
 def repack_upper_ranked_rows_compactly(
     placements_df: pd.DataFrame,
     platforms_df: pd.DataFrame,
@@ -6359,6 +6409,8 @@ def repack_upper_ranked_rows_compactly(
 
     for _, prow in platforms_df.iterrows():
         pname = str(prow.get('Pritsche', ''))
+        if compaction_budget().expired(pname):
+            continue
         platform_width = safe_number(prow.get('Breite_mm'), 0.0)
         if not pname or platform_width <= 0:
             continue
@@ -6463,12 +6515,14 @@ def repack_upper_ranked_rows_compactly(
         target_bottom_z = min(float(z) for z, _layer in layer_list[anchor_pos + 1:])
         height = float(heights.iloc[0])
         old_top = float((upper['Z_mm'] + upper['Höhe_mm']).max())
-        mirror_choices = list(itertools.product(
+        mirror_choices = itertools.product(
             *[(False, True) if len(row_indices) > 1 else (False,)
               for row_indices in top_down_rows]
-        ))
+        )
         best: Optional[Tuple[float, pd.DataFrame]] = None
         for mirrors in mirror_choices:
+            if compaction_budget().expired(pname):
+                break
             candidate = result.copy()
             bottom_up_rows = list(reversed(top_down_rows))
             for level, row_indices in enumerate(bottom_up_rows):
@@ -6518,6 +6572,7 @@ def repack_upper_ranked_rows_compactly(
     return result
 
 
+@with_compaction_budget
 def repack_terminal_cascade_deterministically(
     placements_df: pd.DataFrame,
     platforms_df: pd.DataFrame,
@@ -6539,6 +6594,8 @@ def repack_terminal_cascade_deterministically(
 
     for _, prow in platforms_df.iterrows():
         pname = str(prow.get('Pritsche', ''))
+        if compaction_budget().expired(pname):
+            continue
         width = safe_number(prow.get('Breite_mm'), 0.0)
         mask = (
             result['Pritsche'].astype(str).eq(pname)
@@ -6627,6 +6684,8 @@ def repack_terminal_cascade_deterministically(
         for mirrors in itertools.product(*[
             (False, True) if len(row) > 1 else (False,) for row in rows
         ]):
+            if compaction_budget().expired(pname):
+                break
             candidate = result.copy()
             for level, (row, mirror) in enumerate(zip(rows, mirrors)):
                 ordered = list(reversed(row)) if mirror else row
@@ -6803,6 +6862,7 @@ def build_trip_platforms(pritschen_df: pd.DataFrame, fuhrenoption: str, fuhre_nr
     return rows
 
 
+@with_compaction_budget
 def create_variant_a_loading_plan(
     sorted_parts: pd.DataFrame,
     options_df: pd.DataFrame,
@@ -14001,7 +14061,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
         'Optionale Mehrlagen-Verdichtung versuchen',
         value=False,
         key='enable_multilayer_compaction_v129',
-        help='Prüft passende Einzelteile oder vollständige Bunde als sichere 2D-Neupackung. Bunde bleiben ungeteilt. Aus lässt Verladung und Bundbildung unverändert.',
+        help='Prüft passende Einzelteile oder vollständige Bunde als sichere 2D-Neupackung. Bunde bleiben ungeteilt. Die Zusatzsuche teilt sich 20 Sekunden je Pritsche und insgesamt 60 Sekunden Zeitbudget; eine begonnene Sicherheitsprüfung wird vollständig abgeschlossen. Aus lässt Verladung und Bundbildung unverändert.',
     )
     avoid_unnecessary_overhang = st.checkbox(
         'Unnötigen Überhang bei überwiegend pritschenkürzeren Elementen vermeiden',
@@ -14363,6 +14423,13 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
     if plan_is_stale:
         st.warning('Eingaben wurden geändert. Der angezeigte automatische Plan bleibt unverändert. Für eine neue Berechnung bitte „Verladung starten / neu berechnen“ drücken.')
 
+    if placements_df.attrs.get('Verdichtungsbudget_erreicht'):
+        st.warning(
+            'Die optionale Verdichtung hat ihr Zeitbudget erreicht. Weitere '
+            'Verbesserungsversuche wurden beendet; nur vollständig geprüfte '
+            'Anordnungen wurden übernommen. Der Plan kann dadurch weniger kompakt sein.'
+        )
+
     # Manueller Planstand:
     # Die Automatik erzeugt den Vorschlag. Danach arbeiten Tabelle, Ansichten und Export
     # mit dem manuellen Planstand aus st.session_state, bis bewusst zurückgesetzt wird.
@@ -14715,6 +14782,12 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                             loaded_preview = preview_placements[preview_placements.get('Pritsche', pd.Series(dtype=str)).astype(str).ne('NICHT VERLADEN')].copy() if not preview_placements.empty else pd.DataFrame()
                             rest_preview = preview_placements[preview_placements.get('Pritsche', pd.Series(dtype=str)).astype(str).eq('NICHT VERLADEN')].copy() if not preview_placements.empty else pd.DataFrame()
                             st.markdown('**Vorschau Ergebnis**')
+                            if preview_placements.attrs.get('Verdichtungsbudget_erreicht'):
+                                st.warning(
+                                    'Die optionale Verdichtung hat ihr Zeitbudget erreicht. '
+                                    'Nur vollständig geprüfte Anordnungen wurden übernommen; '
+                                    'die Vorschau kann weniger kompakt sein.'
+                                )
                             if preview_summary is not None and not preview_summary.empty:
                                 st.dataframe(preview_summary, use_container_width=True, hide_index=True)
                             if recalc_check_center and not loaded_preview.empty:
