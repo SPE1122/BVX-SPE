@@ -9,11 +9,17 @@ Offer a way to position two parts longitudinally on the same layer in a single t
 
 **How to apply:** When implementing a manual placement feature or global optimization around a selected trip, preserve exact pin coordinates and make the rest of the plan eligible for replanning. Search with the pin already present as occupied geometry; do not discard an entire refill attempt just because an empty-deck proposal intersects it. Show additional loads on the destination and total trips before/after. Distinguish geometric acceptance from transport-safety confirmation; never silently force an unsafe pair.
 
-Accepted pins must remain authoritative across input changes and other editing paths until explicitly released. Support cumulative pairs on the same or different platforms; adding a pair must not release earlier pairs. Releasing one pin keeps its accepted positions but removes only its protection; it does not undo the accepted global plan. Reject an invalid automatic remainder rather than silently freezing additional loads.
+Accepted pins must remain authoritative across input changes and other editing paths until explicitly released. Support cumulative single positions and pairs on the same or different platforms; adding a pin must not release earlier pins. Releasing one pin keeps its accepted positions but removes only its protection; it does not undo the accepted global plan. Reject an invalid automatic remainder rather than silently freezing additional loads.
 
 **Why:** A protected planner path alone is insufficient if a separate manual edit, selective recalculation, or mode change can move the pair. Freezing other loads as a fallback would also contradict the agreed global remainder planning. The user requested multiple adjustments without sacrificing earlier confirmed positions.
 
-**How to apply:** Guard unrelated plan-changing controls while any accepted pin is active, allow additional pairs and explicit individual/all release actions, and keep preview state separate from accepted state. Invalidate previews when their source inputs change.
+**How to apply:** Guard unrelated plan-changing controls while any accepted pin is active, allow additional single positions or pairs and explicit individual/all release actions, and keep preview state separate from accepted state. Invalidate previews when their source inputs change.
+
+Single-element adjustments are horizontal X/Y moves independent of longitudinal pairing. They may affect X only, Y only or both; keep height and destination unchanged.
+
+**Why:** The user requested an additional way to shift elements in X and/or Y without forming a pair. Limiting this flow to horizontal displacement makes it distinct from changing layer or platform.
+
+**How to apply:** Offer signed millimetre offsets with before/after coordinates, then explicit preview and acceptance. Retain linked supports as translated physical rows. Single positions and pairs share cumulative protection, geometry/capacity checks and the existing manual-assessment scope. Reset offsets when the source position changes to avoid applying a released displacement twice.
 
 Count retained distinct trips when calculating remaining trip capacity; trip identifiers do not consume capacity.
 

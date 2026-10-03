@@ -12132,14 +12132,18 @@ def _manual_validate_pinned_longitudinal_pair(
     target_platform: Optional[str] = None,
     include_destination_loads: bool = True,
     manual_pair_override: bool = False,
+    placement_mode: str = 'pair',
 ) -> Dict[str, Any]:
-    """Validate two exact same-layer longitudinal positions without changing the source."""
+    """Validate a longitudinal pair or one horizontal move without changing the source."""
     issues: List[Dict[str, Any]] = []
     ids = [str(value) for value in unit_ids]
-    if len(ids) != 2 or ids[0] == ids[1]:
+    required_count = 1 if placement_mode == 'single' else 2
+    if (placement_mode not in {'pair', 'single'} or len(ids) != required_count
+            or len(set(ids)) != required_count):
         return {'ok': False, 'issues': pd.DataFrame([{
             'Typ': 'Manuelle Paarung', 'Einheit_ID': ', '.join(ids),
-            'Warnung': 'Genau zwei unterschiedliche Verladeeinheiten auswählen', 'Details': '',
+            'Warnung': ('Genau eine Verladeeinheit auswählen' if placement_mode == 'single'
+                        else 'Genau zwei unterschiedliche Verladeeinheiten auswählen'), 'Details': '',
         }]), 'pinned_placements_df': pd.DataFrame(), 'support_rows_df': pd.DataFrame()}
     if placements_df is None or placements_df.empty or platforms_df is None or platforms_df.empty:
         issues.append({'Typ': 'Manuelle Paarung', 'Einheit_ID': ', '.join(ids), 'Warnung': 'Ausgangsplan oder Pritschendaten fehlen', 'Details': ''})
@@ -12157,7 +12161,7 @@ def _manual_validate_pinned_longitudinal_pair(
             issues.append({'Typ': 'Manuelle Paarung', 'Einheit_ID': unit_id, 'Warnung': 'Nicht verladenes Element kann nicht fixiert werden', 'Details': ''})
             continue
         rows.append(found.iloc[0].copy())
-    if len(rows) != 2:
+    if len(rows) != required_count:
         return {'ok': False, 'issues': pd.DataFrame(issues), 'pinned_placements_df': pd.DataFrame(), 'support_rows_df': pd.DataFrame()}
     pname = str(target_platform or rows[0].get('Pritsche', ''))
     platform_rows = platforms_df[platforms_df.get('Pritsche', pd.Series(dtype=str)).astype(str).eq(pname)]
@@ -12178,6 +12182,15 @@ def _manual_validate_pinned_longitudinal_pair(
         if not all(math.isfinite(value) for value in xyz.values()):
             issues.append({'Typ': 'Position', 'Pritsche': pname, 'Einheit_ID': unit_id, 'Warnung': 'Koordinaten müssen endlich sein', 'Details': ''})
             continue
+        if placement_mode == 'single' and (
+            abs(xyz['Z'] - float(row['Z_mm'])) > 1e-9
+            or pname != str(row['Pritsche'])
+        ):
+            issues.append({
+                'Typ': 'Einzelverschiebung', 'Pritsche': pname, 'Einheit_ID': unit_id,
+                'Warnung': 'Einzelverschiebung ändert nur X/Y; Z und Pritsche müssen unverändert bleiben',
+                'Details': '',
+            })
         clone = row.copy()
         clone['Pritsche'] = pname
         for col in ('Fuhre_Nr', 'Fuhrenoption', 'Pritschenname'):
@@ -12186,31 +12199,32 @@ def _manual_validate_pinned_longitudinal_pair(
             clone[f'{axis}_mm'] = value
         normalized_coordinates[unit_id] = {f'{axis}_mm': value for axis, value in xyz.items()}
         pinned_rows.append(clone)
-    if len(pinned_rows) != 2:
+    if len(pinned_rows) != required_count:
         return {'ok': False, 'issues': pd.DataFrame(issues), 'pinned_placements_df': pd.DataFrame(), 'support_rows_df': pd.DataFrame()}
     pair = pd.DataFrame(pinned_rows).reset_index(drop=True)
-    first, second = pair.iloc[0], pair.iloc[1]
-    if abs(safe_number(first.get('Z_mm')) - safe_number(second.get('Z_mm'))) > 1.0:
-        issues.append({'Typ': 'Lage', 'Pritsche': pname, 'Einheit_ID': ', '.join(ids), 'Warnung': 'Beide Einheiten müssen auf derselben Höhenlage liegen', 'Details': ''})
-    x0s = sorted((safe_number(row.get('X_mm')), safe_number(row.get('X_mm')) + safe_number(row.get('Länge_mm'))) for _, row in pair.iterrows())
-    if x0s[1][0] < x0s[0][1] - 1.0:
-        issues.append({'Typ': 'Längspaar', 'Pritsche': pname, 'Einheit_ID': ', '.join(ids), 'Warnung': 'Längs positionierte Einheiten dürfen sich in X nicht überlappen', 'Details': ''})
-    y_intersection = min(
-        safe_number(first.get('Y_mm')) + safe_number(first.get('Breite_mm')),
-        safe_number(second.get('Y_mm')) + safe_number(second.get('Breite_mm')),
-    ) - max(safe_number(first.get('Y_mm')), safe_number(second.get('Y_mm')))
-    if y_intersection <= 1.0:
-        issues.append({
-            'Typ': 'Längspaar', 'Pritsche': pname, 'Einheit_ID': ', '.join(ids),
-            'Warnung': 'Die Y-Fussabdrücke müssen sich für dieselbe Längsspur überlappen',
-            'Details': f'Y-Überdeckung {max(0.0, y_intersection):.1f} mm',
-        })
+    if placement_mode == 'pair':
+        first, second = pair.iloc[0], pair.iloc[1]
+        if abs(safe_number(first.get('Z_mm')) - safe_number(second.get('Z_mm'))) > 1.0:
+            issues.append({'Typ': 'Lage', 'Pritsche': pname, 'Einheit_ID': ', '.join(ids), 'Warnung': 'Beide Einheiten müssen auf derselben Höhenlage liegen', 'Details': ''})
+        x0s = sorted((safe_number(row.get('X_mm')), safe_number(row.get('X_mm')) + safe_number(row.get('Länge_mm'))) for _, row in pair.iterrows())
+        if x0s[1][0] < x0s[0][1] - 1.0:
+            issues.append({'Typ': 'Längspaar', 'Pritsche': pname, 'Einheit_ID': ', '.join(ids), 'Warnung': 'Längs positionierte Einheiten dürfen sich in X nicht überlappen', 'Details': ''})
+        y_intersection = min(
+            safe_number(first.get('Y_mm')) + safe_number(first.get('Breite_mm')),
+            safe_number(second.get('Y_mm')) + safe_number(second.get('Breite_mm')),
+        ) - max(safe_number(first.get('Y_mm')), safe_number(second.get('Y_mm')))
+        if y_intersection <= 1.0:
+            issues.append({
+                'Typ': 'Längspaar', 'Pritsche': pname, 'Einheit_ID': ', '.join(ids),
+                'Warnung': 'Die Y-Fussabdrücke müssen sich für dieselbe Längsspur überlappen',
+                'Details': f'Y-Überdeckung {max(0.0, y_intersection):.1f} mm',
+            })
     eff_length = safe_number(platform.get('Länge_mm')) + safe_number(platform.get('Überhang_vorne_mm')) + safe_number(platform.get('Überhang_hinten_mm'))
     for _, row in pair.iterrows():
         x, y, z = (safe_number(row.get(f'{axis}_mm')) for axis in ('X', 'Y', 'Z'))
         length, width, height = (safe_number(row.get(col)) for col in ('Länge_mm', 'Breite_mm', 'Höhe_mm'))
         if min(x, y, z) < -0.1 or x + length > eff_length + 0.1 or y + width > safe_number(platform.get('Breite_mm')) + 0.1:
-            issues.append({'Typ': 'Geometrie', 'Pritsche': pname, 'Einheit_ID': str(row.get('Einheit_ID')), 'Warnung': 'Paarposition liegt ausserhalb der Pritsche', 'Details': ''})
+            issues.append({'Typ': 'Geometrie', 'Pritsche': pname, 'Einheit_ID': str(row.get('Einheit_ID')), 'Warnung': 'Position liegt ausserhalb der Pritsche', 'Details': ''})
         if z + height > safe_number(platform.get('Max_Höhe_mm')) + 0.1:
             issues.append({'Typ': 'Höhe', 'Pritsche': pname, 'Einheit_ID': str(row.get('Einheit_ID')), 'Warnung': 'Maximale Ladehöhe überschritten', 'Details': ''})
     support_rows = _pinned_manual_pair_support_rows(placements_df, pair, normalized_coordinates)
@@ -12399,6 +12413,7 @@ def _preview_pinned_manual_replan(
         source_placements_df, source_platforms_df, unit_ids, coordinates, target_platform,
         include_destination_loads=False,
         manual_pair_override=bool((settings or {}).get('manual_pair_override', False)),
+        placement_mode=(settings or {}).get('manual_placement_mode', 'pair'),
     )
     source_signature = _pinned_manual_source_signature(
         source_placements_df, source_platforms_df, source_parts_df, options_df, pritschen_df, settings
@@ -12422,6 +12437,8 @@ def _preview_pinned_manual_replan(
         'unit_ids': [str(value) for value in unit_ids],
         'target_platform': str(target_platform), 'coordinates': validation['coordinates'],
     }]
+    if (settings or {}).get('manual_placement_mode') == 'single':
+        requests[-1]['mode'] = 'single'
     validations = [validation]
     seen_ids = set(str(value) for value in unit_ids)
     for request in requests[:-1]:
@@ -12438,6 +12455,7 @@ def _preview_pinned_manual_replan(
             request['coordinates'], request['target_platform'],
             include_destination_loads=False,
             manual_pair_override=bool((settings or {}).get('manual_pair_override', False)),
+            placement_mode=request.get('mode', 'pair'),
         )
         if not checked['ok']:
             result['issues'] = checked['issues']
@@ -12919,6 +12937,8 @@ def _apply_pinned_manual_replan(
         'unit_ids': result.get('unit_ids', []), 'coordinates': result.get('coordinates', {}),
         'target_platform': result.get('target_platform'),
     }]
+    if result.get('settings', {}).get('manual_placement_mode') == 'single':
+        requests[-1]['mode'] = 'single'
     safety_issues: List[pd.DataFrame] = []
     if result.get('pin_requests', requests) != requests:
         safety_issues.append(pd.DataFrame([{
@@ -12933,6 +12953,7 @@ def _apply_pinned_manual_replan(
             request['coordinates'], request['target_platform'],
             include_destination_loads=False,
             manual_pair_override=bool(result.get('settings', {}).get('manual_pair_override', False)),
+            placement_mode=request.get('mode', 'pair'),
         )
         if not expected_pair.get('ok'):
             safety_issues.append(expected_pair.get('issues', pd.DataFrame()))
@@ -15130,8 +15151,8 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
             draw_view=draw_loading_view, is_real_load=_is_real_load_type_value,
         )
         if pin_active:
-            st.info('Die bestätigten Fixierungen schützen alle Paare und ihre Auflager. '
-                    'Weitere Paare können ergänzt werden; andere Planänderungen bleiben gesperrt.')
+            st.info('Die bestätigten Fixierungen schützen Einzelpositionen, Paare und ihre Auflager. '
+                    'Weitere Fixierungen können ergänzt werden; andere Planänderungen bleiben gesperrt.')
             st.dataframe(edited_placements_df, use_container_width=True, hide_index=True)
         elif verladeart == 'Automatisch':
             st.markdown('**Automatik-Modus**')

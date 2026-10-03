@@ -45,6 +45,77 @@ render_pinned_manual_replanning(
 
 
 class PinnedManualStreamlitTests(unittest.TestCase):
+    def test_single_shift_widgets_preview_apply_release_and_mixed_pair(self):
+        script = """
+import streamlit as st
+import bvx_auswertung_streamlit as app
+from pinned_manual_ui import render_pinned_manual_replanning
+from test_pinned_multi_replanning import multi_fixture
+loads, decks, parts, options, stock, standards, settings = multi_fixture()
+render_pinned_manual_replanning(
+    st.session_state.get('manual_placements_df', loads),
+    st.session_state.get('manual_platforms_df', decks),
+    parts, options, stock, standards, settings,
+    validate_pair=app._manual_validate_pinned_longitudinal_pair,
+    preview_plan=app._preview_pinned_manual_replan,
+    apply_plan=app._apply_pinned_manual_replan,
+    draw_view=app.draw_loading_view, is_real_load=app._is_real_load_type_value,
+)
+"""
+        at = AppTest.from_string(script, default_timeout=60).run()
+        at.selectbox(key='pinned_manual_mode').set_value('single').run()
+        self.assertFalse(at.exception)
+        at.selectbox(key='pinned_manual_single').set_value('A').run()
+        inputs = {item.label: item for item in at.number_input}
+        self.assertEqual(set(inputs), {'Versatz X (mm)', 'Versatz Y (mm)'})
+        inputs['Versatz X (mm)'].set_value(20.0)
+        inputs['Versatz Y (mm)'].set_value(3.0).run()
+        self.assertNotIn('manual_placements_df', at.session_state)
+        at.button(key='pinned_manual_preview_button').click().run()
+        self.assertFalse(at.exception)
+        preview = at.session_state['pinned_manual_preview']
+        self.assertTrue(preview['ok'], preview['issues'].to_dict('records'))
+        self.assertEqual(preview['coordinates']['A'], {'X_mm': 20.0, 'Y_mm': 3.0, 'Z_mm': 2.0})
+        self.assertTrue(at.button(key='pinned_manual_apply').disabled)
+        # Editing either offset makes the existing preview unusable.
+        next(item for item in at.number_input if item.label == 'Versatz Y (mm)').set_value(4.0).run()
+        self.assertTrue(at.button(key='pinned_manual_apply').disabled)
+        next(item for item in at.number_input if item.label == 'Versatz Y (mm)').set_value(3.0).run()
+        at.button(key='pinned_manual_preview_button').click().run()
+        at.checkbox[0].check().run()
+        at.button(key='pinned_manual_apply').click().run()
+        self.assertFalse(at.exception)
+        accepted = at.session_state['pinned_manual_active']
+        self.assertEqual(accepted['pin_requests'][0]['mode'], 'single')
+        old_single = accepted['pinned_placements_df'].iloc[0].copy()
+        at.selectbox(key='pinned_manual_mode').set_value('pair').run()
+        loads = at.session_state['manual_placements_df']
+        ids = [str(loads.loc[loads['Bauteile_Liste'].eq(label), 'Einheit_ID'].iloc[0])
+               for label in ('E', 'F')]
+        at.selectbox(key='pinned_manual_target').set_value('F02 Deck')
+        at.selectbox(key='pinned_manual_first').set_value(ids[0])
+        at.selectbox(key='pinned_manual_second').set_value(ids[1]).run()
+        for position, uid, x in zip(('first', 'second'), ids, (0.0, 5.0)):
+            for axis, value in (('X', x), ('Y', 0.0), ('Z', 2.0)):
+                at.number_input(key=f'pinned_manual_{position}_{uid}_{axis}').set_value(value)
+        at.button(key='pinned_manual_preview_button').click().run()
+        self.assertFalse(at.exception)
+        self.assertTrue(at.session_state['pinned_manual_preview']['ok'])
+        at.checkbox[0].check().run()
+        at.button(key='pinned_manual_apply').click().run()
+        self.assertFalse(at.exception)
+        pin = at.session_state['pinned_manual_active']
+        self.assertEqual(len(pin['pin_requests']), 2)
+        actual = pin['pinned_placements_df'].loc[pin['pinned_placements_df']['Einheit_ID'].eq('A')].iloc[0]
+        for axis in ('X_mm', 'Y_mm', 'Z_mm'):
+            self.assertEqual(actual[axis], old_single[axis])
+        at.button(key='pinned_manual_release_pair_0').click().run()
+        at.selectbox(key='pinned_manual_mode').set_value('single').run()
+        at.selectbox(key='pinned_manual_single').set_value('A').run()
+        # Offsets reset to zero after releasing, not relative to the old pre-move source.
+        self.assertTrue(all(item.value == 0.0 for item in at.number_input))
+        self.assertEqual(len(at.session_state['pinned_manual_active']['pin_requests']), 1)
+
     def test_add_pairs_without_unlocking_and_release_one_keeps_other_pins(self):
         script = """
 import streamlit as st
