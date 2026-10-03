@@ -3,11 +3,11 @@ name: Pinned manual placement before global replanning
 description: Agreed direction for a manual placement preview followed by global optimization.
 ---
 
-Offer a way to position two parts longitudinally on the same layer in a single trip and keep that placement fixed while replanning the remaining loads globally. Preview changes to other trips before applying. Keep the imported Nr.PL values unchanged rather than using decimal renumbering to imply placement.
+Offer a way to position two parts longitudinally on the same layer in a single trip and keep that placement fixed while replanning the remaining loads globally. Include free space on the pinned destination, not only new trips for the remainder, and consider the resulting utilization and trip count elsewhere. Preview changes to other trips before applying. Keep the imported Nr.PL values unchanged rather than using decimal renumbering to imply placement.
 
-**Why:** Changing sort numbers only changes order; a global recomputation from scratch could undo the manual arrangement, so any gained capacity would not reliably carry through.
+**Why:** Changing sort numbers only changes order; a global recomputation from scratch could undo the manual arrangement, so any gained capacity would not reliably carry through. The user reiterated that the manually set elements must stay exactly as placed while the rest is checked again for more loading capacity or fewer trips.
 
-**How to apply:** When implementing a manual placement feature or global optimization around a selected trip, preserve exact pin coordinates and make the rest of the plan eligible for replanning. Distinguish geometric acceptance from transport-safety confirmation; never silently force an unsafe pair.
+**How to apply:** When implementing a manual placement feature or global optimization around a selected trip, preserve exact pin coordinates and make the rest of the plan eligible for replanning. Search with the pin already present as occupied geometry; do not discard an entire refill attempt just because an empty-deck proposal intersects it. Show additional loads on the destination and total trips before/after. Distinguish geometric acceptance from transport-safety confirmation; never silently force an unsafe pair.
 
 An accepted pin must remain authoritative across input changes and other editing paths until explicitly released. Releasing a pin keeps the accepted positions; it does not undo the accepted global plan. Reject an invalid automatic remainder rather than silently freezing additional loads.
 

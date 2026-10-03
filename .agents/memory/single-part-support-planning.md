@@ -26,3 +26,9 @@ Any centering or center-of-gravity post-processing must preserve or improve the 
 **Why:** Independent layer centering can undo a support-oriented placement and recreate a visible overhang even though a better shared position exists over the lower stack.
 
 **How to apply:** Compare direct support before and after an upper-layer shift, retain the better-supported position, and restrict unconstrained center-of-gravity swaps to the first layer.
+
+Use the same declared-insert model in automatic placement and subsequent support-chain validation. A configured layer insert may bridge its specified thickness between grounded bearing surfaces; it is not permission to accept an arbitrary vertical gap or a floating helper.
+
+**Why:** Automatic stacks were rejected during manual-pair global replanning because the planner counted normal inserts in Z positions while the subsequent checker assumed every bearing surface must touch the next load directly.
+
+**How to apply:** Check exact configured insert thickness alongside real overlap area and a continuous path to the physical deck. Cover individual-part and bundle transitions, and keep insufficient overlap, undeclared gaps and unsupported lower layers blocking.

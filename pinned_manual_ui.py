@@ -150,6 +150,25 @@ def render_pinned_manual_replanning(
             st.markdown('**Fixiertes Paar in der Vorschau**')
             st.dataframe(preview['pinned_placements_df'], use_container_width=True, hide_index=True)
             st.markdown('**Fuhren nach der globalen Neuplanung**')
+            target_real = preview['placements_df'].loc[
+                preview['placements_df']['Typ'].apply(is_real_load)
+                & preview['placements_df']['Pritsche'].astype(str).eq(str(target))
+                & ~preview['placements_df']['Einheit_ID'].astype(str).isin(selected)
+            ]
+            before_trips = platforms['Fuhre_Nr'].nunique() if 'Fuhre_Nr' in platforms else len(platforms)
+            after_platforms = preview['platforms_df']
+            after_trips = (
+                after_platforms['Fuhre_Nr'].nunique()
+                if 'Fuhre_Nr' in after_platforms else len(after_platforms)
+            )
+            additional_parts = sum(
+                len(str(value).split('|')) for value in target_real['Bauteile_Liste']
+            ) if not target_real.empty else 0
+            st.caption(
+                f'{target}: {additional_parts} weitere Bauteile zusätzlich zum fixierten Paar. '
+                f'Fuhren bisher: {before_trips} · Vorschau: {after_trips}. '
+                'Die Suche prüft freie Plätze; eine global minimale Fuhrenzahl ist nicht garantiert.'
+            )
             st.dataframe(preview['summary_df'], use_container_width=True, hide_index=True)
             st.markdown('**Bauteil-Zuordnung bisher / Vorschau**')
             before = placements[placements['Typ'].apply(is_real_load)]

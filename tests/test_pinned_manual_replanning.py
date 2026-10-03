@@ -247,7 +247,7 @@ class PinnedManualReplanningTests(unittest.TestCase):
             self.assertEqual(remaining["Bauteilnummer"].tolist(), ["C"])
             return planned_load.copy(), pd.DataFrame(), planned_platform.copy(), pd.DataFrame(), pd.DataFrame()
 
-        with patch.object(app, "create_loading_plan", return_value=(pd.DataFrame(), pd.DataFrame())), \
+        with patch.object(app, "_pinned_manual_plan_around_pair", return_value=(pd.DataFrame(), pd.DataFrame())), \
              patch.object(app, "create_variant_a_loading_plan", side_effect=plan_remaining):
             preview = app._preview_pinned_manual_replan(
                 placements, used_platforms, parts, options, stock, standards,
@@ -389,7 +389,7 @@ class PinnedManualReplanningTests(unittest.TestCase):
             self.assertEqual(remaining["Bauteilnummer"].tolist(), ["C"])
             return new_load.copy(), pd.DataFrame(), new_platform.copy(), pd.DataFrame(), pd.DataFrame()
 
-        with patch.object(app, "create_loading_plan", return_value=(pd.DataFrame(), pd.DataFrame())), \
+        with patch.object(app, "_pinned_manual_plan_around_pair", return_value=(pd.DataFrame(), pd.DataFrame())), \
              patch.object(app, "create_variant_a_loading_plan", side_effect=capture_limit):
             result = app._preview_pinned_manual_replan(
                 placements, used_platforms, parts, options, stock,
@@ -462,7 +462,7 @@ class PinnedManualReplanningTests(unittest.TestCase):
         def no_remaining_load(*_args, **_kwargs):
             return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-        with patch.object(app, "create_loading_plan", return_value=(pd.DataFrame(), pd.DataFrame())), \
+        with patch.object(app, "_pinned_manual_plan_around_pair", return_value=(pd.DataFrame(), pd.DataFrame())), \
              patch.object(app, "create_variant_a_loading_plan", side_effect=no_remaining_load):
             missing = app._preview_pinned_manual_replan(
                 placements, used_platforms, parts, options, stock, standards,
@@ -482,7 +482,7 @@ class PinnedManualReplanningTests(unittest.TestCase):
         def floating_remaining(*_args, **_kwargs):
             return floating_load.copy(), pd.DataFrame(), floating_platform.copy(), pd.DataFrame(), pd.DataFrame()
 
-        with patch.object(app, "create_loading_plan", return_value=(pd.DataFrame(), pd.DataFrame())), \
+        with patch.object(app, "_pinned_manual_plan_around_pair", return_value=(pd.DataFrame(), pd.DataFrame())), \
              patch.object(app, "create_variant_a_loading_plan", side_effect=floating_remaining):
             floating = app._preview_pinned_manual_replan(
                 placements, used_platforms, parts, options, stock, standards,

@@ -11949,7 +11949,7 @@ def _pinned_manual_support_chain_issues(
     platforms_df: pd.DataFrame,
     min_support_ratio: float = 0.65,
 ) -> pd.DataFrame:
-    """Validate actual contact geometry and its continuous support path to the deck."""
+    """Validate support paths, including the planner's declared layer inserts."""
     issues: List[Dict[str, Any]] = []
     helper_types = {'Unterbau', 'Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz'}
     if placements_df is None or placements_df.empty or platforms_df is None or platforms_df.empty:
@@ -11974,6 +11974,30 @@ def _pinned_manual_support_chain_issues(
             box = _row_box_values(row)
             if box is not None:
                 geometry.append((idx, row, box))
+        bundle_layer_bottoms = [
+            box[4] for _idx, row, box in geometry
+            if str(row.get('Typ', '')).strip() == 'Bund'
+        ]
+
+        def has_contact(upper: pd.Series, lower: pd.Series, lower_box: Tuple[float, ...], z0: float) -> bool:
+            gap = z0 - lower_box[5]
+            if -1.0 <= gap < 3.0:
+                return True
+            # Automatic placements store normal inserts as layer-height offsets,
+            # not separate helper rows. Only the declared thickness can bridge
+            # a gap; an arbitrary air gap or a floating helper remains invalid.
+            if not _is_real_load_type_value(upper.get('Typ', '')):
+                return False
+            explicit_spacer = safe_number(upper.get('Einlage_unten_mm'), 0.0)
+            bundle_layer = (
+                str(upper.get('Typ', '')).strip() == 'Bund'
+                or any(abs(lower_box[4] - bottom) <= 1.0 for bottom in bundle_layer_bottoms)
+            )
+            spacer = explicit_spacer if explicit_spacer > 0.0 else safe_number(
+                platform.get('Einlage_zwischen_Lagen_mm' if bundle_layer else 'Einlage_allgemein_mm'),
+                0.0,
+            )
+            return spacer > 0.0 and abs(gap - spacer) <= 1.0
 
         def covered_ratio(x0: float, y0: float, x1: float, y1: float, supports: List[Tuple[Any, pd.Series, Tuple[float, ...]]]) -> float:
             rectangles = []
@@ -12003,17 +12027,14 @@ def _pinned_manual_support_chain_issues(
             below = [
                 item for item in geometry
                 if item[0] != idx
-                and item[2][5] <= z0 + 1.0
-                and item[2][5] > z0 - 3.0
+                and has_contact(row, item[1], item[2], z0)
                 and min(x1, item[2][1]) > max(x0, item[2][0])
                 and min(y1, item[2][3]) > max(y0, item[2][2])
             ]
             if not below or covered_ratio(x0, y0, x1, y1, below) + 1e-6 < ratio_required:
                 return False
             # Every contacting physical support must itself have a continuous path to the deck.
-            contact_top = max(item[2][5] for item in below)
-            contacts = [item for item in below if abs(item[2][5] - contact_top) <= 2.0]
-            return all(chain_is_grounded(item[0], set(seen)) for item in contacts)
+            return all(chain_is_grounded(item[0], set(seen)) for item in below)
 
         for idx, row, _box in geometry:
             if not _is_real_load_type_value(row.get('Typ', '')):
@@ -12247,6 +12268,51 @@ def _manual_validate_pinned_longitudinal_pair(
     }
 
 
+def _pinned_manual_plan_around_pair(
+    units: pd.DataFrame, platforms: pd.DataFrame, *,
+    fixed_placements_df: pd.DataFrame, search_deadline: Optional[float] = None,
+    **planner_settings,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Use existing placement gates with immutable geometry already on the deck."""
+    from pinned_space_search import place_around_fixed_loads
+    state = init_platform_state(
+        platforms.iloc[0],
+        planner_settings['base_wood_height'],
+        planner_settings['layer_spacer_height'],
+        planner_settings['gap_length'],
+    )
+    for key in (
+        'prevent_wide_on_narrow', 'min_support_width_ratio',
+        'max_unsupported_length_mm', 'max_unsupported_side_mm',
+        'max_unsupported_length_percent', 'max_unsupported_side_percent',
+        'prefer_length_before_stack', 'prefer_support_quality',
+    ):
+        if key in planner_settings:
+            state[key] = planner_settings[key]
+    fixed = fixed_placements_df.copy(deep=True)
+    state['placements'] = fixed.to_dict('records')
+    state['_pinned_search_deadline'] = search_deadline
+    state['total_weight'] = float(pd.to_numeric(fixed['Gewicht_kg'], errors='coerce').fillna(0).sum())
+    state['used_length'] = float((fixed['X_mm'] + fixed['Länge_mm']).max())
+    state['used_width'] = float((fixed['Y_mm'] + fixed['Breite_mm']).max())
+    state['used_height'] = float((fixed['Z_mm'] + fixed['Höhe_mm']).max())
+    for _, unit in units.iterrows():
+        placed = place_around_fixed_loads(
+            state, unit, planner_settings['allow_beside'],
+            planner_settings['allow_stack'], planner_settings['allow_rotation'],
+            orientations=_unit_orientations_for_state,
+            candidate_x_values=_sp_candidate_x_values_for_unit,
+            can_place_stable=can_place_stable, commit_place=commit_place,
+            support_metrics=_support_metrics_for_candidate,
+            planned_supports=_planned_support_rows_for_candidate,
+            row_box=_row_box_values, boxes_overlap=_boxes_overlap_3d,
+            is_real_load=_is_real_load_type_value,
+        )
+        if placed is None:
+            break
+    return pd.DataFrame(state['placements']), pd.DataFrame()
+
+
 def _preview_pinned_manual_replan(
     source_placements_df: pd.DataFrame,
     source_platforms_df: pd.DataFrame,
@@ -12391,17 +12457,26 @@ def _preview_pinned_manual_replan(
     pinned_pair_supports = pd.concat([pair, pinned_supports], ignore_index=True, sort=False)
     candidate = None
 
-    # First try to use free capacity on the destination trip around the pin.
-    # The standard single-platform planner proposes the remainder; the complete
-    # merged geometry is accepted only after the pin-aware safety checks below.
+    # Search with the pair already present, never plan an empty deck and discard
+    # the whole fill attempt afterwards because it happens to intersect the pin.
     target_row = source_platforms_df[
         source_platforms_df.get('Pritsche', pd.Series(dtype=str)).astype(str).eq(str(target_platform))
     ]
     if not remaining_parts.empty and not target_row.empty:
         unit_settings = dict(settings or {})
         try:
+            eligible_parts = remaining_parts
+            split_attr = str(unit_settings.get('fuhre_split_attr') or '')
+            if split_attr and split_attr in source_parts_df.columns:
+                pair_groups = source_parts_df.loc[
+                    source_parts_df['Bauteilnummer'].astype(str).str.strip().isin(pair_labels),
+                    split_attr,
+                ].fillna('').astype(str)
+                eligible_parts = remaining_parts.loc[
+                    remaining_parts[split_attr].fillna('').astype(str).isin(set(pair_groups))
+                ].copy()
             target_units = build_loading_units(
-                remaining_parts,
+                eligible_parts,
                 use_bundles=bool(unit_settings.get('use_bundles', True)),
                 max_bundle_weight=safe_number(unit_settings.get('max_bundle_weight'), 1000.0),
                 bundle_spacer_height=safe_number(unit_settings.get('bundle_spacer_height'), 40.0),
@@ -12428,17 +12503,17 @@ def _preview_pinned_manual_replan(
                 standards.get('Standard_Einlage_allgemein'),
                 safe_number(unit_settings.get('general_spacer_height'), 0.0),
             )
-            physical_units = target_units.iloc[::-1].copy().reset_index(drop=True)
-            target_loads, _target_summary = create_loading_plan(
-                physical_units,
-                trip_platform,
+            from pinned_space_search import largest_fitting_prefix
+            target_loads, search_timed_out = largest_fitting_prefix(
+                target_units, pinned_pair_supports, trip_platform, _pinned_manual_plan_around_pair,
+                dict(
                 base_wood_height=safe_number(trip_platform.iloc[0].get('Kantholz_erste_Lage_mm')),
                 layer_spacer_height=safe_number(trip_platform.iloc[0].get('Einlage_zwischen_Lagen_mm')),
                 gap_length=safe_number(standards.get('Längenversatz_je_Lage'), 100.0),
                 allow_beside=bool(unit_settings.get('allow_beside', True)),
                 allow_stack=bool(unit_settings.get('allow_stack', True)),
                 allow_rotation=bool(unit_settings.get('allow_rotation', False)),
-                bundle_order_flex_percent=safe_number(unit_settings.get('bundle_order_flex_percent'), 0.0),
+                bundle_order_flex_percent=0.0,
                 prevent_wide_on_narrow=bool(unit_settings.get('prevent_wide_on_narrow', True)),
                 min_support_width_ratio=safe_number(unit_settings.get('min_support_width_ratio'), 0.80),
                 max_unsupported_length_mm=safe_number(unit_settings.get('max_unsupported_length_mm'), 0.0),
@@ -12447,10 +12522,13 @@ def _preview_pinned_manual_replan(
                 max_unsupported_side_percent=safe_number(unit_settings.get('max_unsupported_side_percent'), 0.0),
                 prefer_length_before_stack=bool(unit_settings.get('prefer_length_before_stack', False)),
                 prefer_support_quality=bool(unit_settings.get('prefer_support_quality', True)),
+                ),
             )
-            target_loads = target_loads[
-                target_loads.get('Pritsche', pd.Series(dtype=str)).astype(str).ne('NICHT VERLADEN')
-            ].copy()
+            if search_timed_out:
+                result['deviation'] = (
+                    'Die Freiraumsuche auf der fixierten Pritsche hat ihr Zeitbudget erreicht. '
+                    'Der übrige Plan wird geprüft, eine optimale Platzausnutzung ist nicht bestätigt.'
+                )
             target_loads, target_units = _pinned_manual_namespace_replanned_ids(
                 target_loads, target_units, pair, f'T{retained_trip_number:02d}'
             )
@@ -12529,6 +12607,10 @@ def _preview_pinned_manual_replan(
             # The target-trip attempt is opportunistic. The normal global path
             # below remains authoritative if this optional trial cannot be built.
             candidate = None
+            result['deviation'] = (
+                'Die Freiraumsuche auf der fixierten Pritsche konnte nicht abgeschlossen werden. '
+                'Die übrigen Fuhren werden weiterhin vollständig geprüft.'
+            )
     if candidate is None:
         candidate = run_global(remaining_parts, pinned_pair_supports)
     if candidate is None:
@@ -12642,7 +12724,7 @@ def _preview_pinned_manual_replan(
         'pinned_placements_df': pair, 'support_rows_df': pinned_supports,
         'issues': pd.DataFrame(), 'identity_conserved': identity_ok,
         'advisory_issues': advisory_issues,
-        'deviation': '',
+        'deviation': result.get('deviation', ''),
     })
     result['_preview_artifact_signature'] = _pinned_manual_preview_artifact_signature(result)
     return result
