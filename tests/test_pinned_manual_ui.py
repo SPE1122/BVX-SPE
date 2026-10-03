@@ -24,6 +24,9 @@ class FakeColumn:
     def number_input(self, _label, value=0.0, key=None, **_kwargs):
         return self.ui.widget_values.get(key, value)
 
+    def caption(self, *_args, **_kwargs):
+        pass
+
 
 class FakeStreamlit:
     def __init__(self, *, buttons=None, widgets=None, session_state=None, checkboxes=None):
@@ -93,7 +96,7 @@ def input_frames():
     placements = pd.DataFrame([
         {"Einheit_ID": unit_id, "Typ": "Bauteil", "Bauteile": unit_id,
          "Bauteile_Liste": unit_id, "Pritsche": "F01", "X_mm": x,
-         "Y_mm": 0.0, "Z_mm": 0.0}
+             "Y_mm": 0.0, "Z_mm": 0.0, "Länge_mm": 10.0, "Breite_mm": 2.0, "Höhe_mm": 1.0}
         for unit_id, x in (("A", 0.0), ("B", 10.0))
     ])
     platforms = pd.DataFrame([{"Pritsche": "F01"}])
@@ -151,7 +154,8 @@ class PinnedManualUiTests(unittest.TestCase):
         return {"applied": True}
 
     def render(self, fake_ui):
-        with patch.object(pinned_manual_ui, "st", fake_ui):
+        with patch.object(pinned_manual_ui, "st", fake_ui), \
+             patch.object(pinned_manual_ui, "render_pair_guidance"):
             pinned_manual_ui.render_pinned_manual_replanning(
                 self.placements, self.platforms, self.parts, self.options,
                 self.stock, self.standards, self.settings,

@@ -45,6 +45,72 @@ render_pinned_manual_replanning(
 
 
 class PinnedManualStreamlitTests(unittest.TestCase):
+    def test_add_pairs_without_unlocking_and_release_one_keeps_other_pins(self):
+        script = """
+import streamlit as st
+import bvx_auswertung_streamlit as app
+from pinned_manual_ui import render_pinned_manual_replanning
+from test_pinned_multi_replanning import multi_fixture
+loads, decks, parts, options, stock, standards, settings = multi_fixture()
+render_pinned_manual_replanning(
+    st.session_state.get('manual_placements_df', loads),
+    st.session_state.get('manual_platforms_df', decks),
+    parts, options, stock, standards, settings,
+    validate_pair=app._manual_validate_pinned_longitudinal_pair,
+    preview_plan=app._preview_pinned_manual_replan,
+    apply_plan=app._apply_pinned_manual_replan,
+    draw_view=app.draw_loading_view, is_real_load=app._is_real_load_type_value,
+)
+"""
+        at = AppTest.from_string(script, default_timeout=60).run()
+        self.assertFalse(at.exception)
+
+        def accept(labels, destination, xs):
+            if 'manual_placements_df' in at.session_state:
+                loads = at.session_state['manual_placements_df']
+                ids = [str(loads.loc[loads['Bauteile_Liste'].eq(label), 'Einheit_ID'].iloc[0])
+                       for label in labels]
+            else:
+                ids = list(labels)
+            at.selectbox(key='pinned_manual_target').set_value(destination)
+            at.selectbox(key='pinned_manual_first').set_value(ids[0])
+            at.selectbox(key='pinned_manual_second').set_value(ids[1]).run()
+            for position, uid, x in zip(('first', 'second'), ids, xs):
+                for axis, value in (('X', x), ('Y', 0.0), ('Z', 2.0)):
+                    at.number_input(key=f'pinned_manual_{position}_{uid}_{axis}').set_value(value)
+            at.button(key='pinned_manual_preview_button').click().run()
+            self.assertFalse(at.exception)
+            preview = at.session_state['pinned_manual_preview']
+            self.assertTrue(preview['ok'], preview['issues'].to_dict('records'))
+            self.assertTrue(at.button(key='pinned_manual_apply').disabled)
+            at.checkbox[0].check().run()
+            at.button(key='pinned_manual_apply').click().run()
+            self.assertFalse(at.exception)
+
+        accept(['A', 'B'], 'F01 Deck', [0.0, 5.0])
+        self.assertNotEqual(at.selectbox(key='pinned_manual_first').value, 'A')
+        accept(['C', 'D'], 'F01 Deck', [10.0, 15.0])
+        accept(['E', 'F'], 'F02 Deck', [0.0, 5.0])
+        pin = at.session_state['pinned_manual_active']
+        self.assertEqual(len(pin['pin_requests']), 3)
+        self.assertEqual(len(pin['pinned_placements_df']), 6)
+        before = pin['placements_df'].copy(deep=True)
+        at.button(key='pinned_manual_release_pair_1').click().run()
+        self.assertFalse(at.exception)
+        pin = at.session_state['pinned_manual_active']
+        self.assertEqual(len(pin['pin_requests']), 2)
+        self.assertTrue(before.equals(at.session_state['manual_placements_df']))
+        self.assertEqual(set(pin['pinned_placements_df']['Bauteile_Liste']), {'A', 'B', 'E', 'F'})
+        # Releasing only C/D permits changing them without moving either retained pair.
+        accept(['C', 'D'], 'F01 Deck', [20.0, 25.0])
+        pin = at.session_state['pinned_manual_active']
+        self.assertEqual(len(pin['pin_requests']), 3)
+        self.assertEqual(set(pin['platforms_df']['Pritsche']), {'F01 Deck', 'F02 Deck'})
+        rows = pin['pinned_placements_df'].set_index('Bauteile_Liste')
+        self.assertEqual(rows.loc['A', 'X_mm'], 0.0)
+        self.assertEqual(rows.loc['E', 'X_mm'], 0.0)
+        self.assertEqual(rows.loc['C', 'X_mm'], 20.0)
+
     def test_unit_warning_and_suggestion_only_change_x_inputs(self):
         script = SCRIPT.replace(
             'render_pinned_manual_replanning(',
@@ -135,7 +201,7 @@ render_pinned_manual_replanning(""",
         self.assertIn('Schwerpunkt längs', types)
         self.assertTrue(at.button(key='pinned_manual_apply').disabled)
         self.assertNotIn('pinned_manual_active', at.session_state)
-        confirm = at.checkbox(key=f"pinned_manual_confirm_{preview['source_signature']}")
+        confirm = at.checkbox[0]
         self.assertIn('manuelle Verantwortung', confirm.label)
         confirm.check().run()
         at.button(key='pinned_manual_apply').click().run()
@@ -167,7 +233,7 @@ render_pinned_manual_replanning(""",
         self.assertTrue(preview['ok'], preview['issues'].to_dict('records'))
         self.assertNotIn('pinned_manual_active', at.session_state)
         self.assertTrue(at.button(key='pinned_manual_apply').disabled)
-        at.checkbox(key=f"pinned_manual_confirm_{preview['source_signature']}").check().run()
+        at.checkbox[0].check().run()
         at.button(key='pinned_manual_apply').click().run()
         self.assertFalse(at.exception)
         self.assertIn('pinned_manual_active', at.session_state)

@@ -24,6 +24,8 @@ import base64
 import copy
 import itertools
 import time
+import json
+import hashlib
 from compaction_runtime import compaction_budget, with_compaction_budget
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Tuple
@@ -12111,7 +12113,10 @@ def _pinned_manual_classify_issues(
         return pd.DataFrame(), pd.DataFrame()
     advisory_mask = (
         bool(manual_pair_override)
-        & issues.get('Pritsche', pd.Series('', index=issues.index)).astype(str).eq(str(target_platform))
+        & issues.get('Pritsche', pd.Series('', index=issues.index)).astype(str).isin(
+            [str(value) for value in target_platform]
+            if isinstance(target_platform, (list, tuple, set)) else [str(target_platform)]
+        )
         & issues.get('Typ', pd.Series('', index=issues.index)).astype(str).isin({
             'Schwerpunkt längs', 'Schwerpunkt quer', 'Auflagekette', 'Entladereihenfolge',
         })
@@ -12313,6 +12318,70 @@ def _pinned_manual_plan_around_pair(
     return pd.DataFrame(state['placements']), pd.DataFrame()
 
 
+def _pinned_manual_fill_destination(parts, source_parts, fixed, platforms, standards, settings):
+    """Refill a retained destination with the same immutable-geometry search."""
+    from pinned_space_search import largest_fitting_prefix
+    if parts.empty or fixed.empty or platforms.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    options = dict(settings or {})
+    eligible = parts
+    split_attr = str(options.get('fuhre_split_attr') or '')
+    if split_attr and split_attr in source_parts:
+        fixed_labels = set(_pinned_manual_identity_labels(fixed))
+        groups = source_parts.loc[
+            source_parts['Bauteilnummer'].astype(str).str.strip().isin(fixed_labels), split_attr
+        ].fillna('').astype(str)
+        eligible = parts[parts[split_attr].fillna('').astype(str).isin(set(groups))]
+    units = build_loading_units(
+        eligible, use_bundles=bool(options.get('use_bundles', True)),
+        max_bundle_weight=safe_number(options.get('max_bundle_weight'), 1000.0),
+        bundle_spacer_height=safe_number(options.get('bundle_spacer_height'), 40.0),
+        general_spacer_height=safe_number(options.get('general_spacer_height'), 0.0),
+        same_height=bool(options.get('same_height', True)),
+        same_width=bool(options.get('same_width', False)),
+        same_quality=bool(options.get('same_quality', False)),
+        same_profile=bool(options.get('same_profile', False)),
+        label_attr=str(options.get('label_attr', 'Bauteilnummer')),
+        same_attrs=options.get('same_attrs'),
+    ).copy().reset_index(drop=True)
+    units['Einheit_ID'] = [f'PMX{i:04d}' for i in range(len(units))]
+    deck = platforms.iloc[[0]].copy()
+    deck['Freigabe'] = True
+    planner = dict(
+        base_wood_height=safe_number(standards.get('Standard_Kantholz_erste_Lage'), 80.0),
+        layer_spacer_height=safe_number(standards.get('Standard_Einlage_zwischen_Lagen'),
+                                      safe_number(options.get('bundle_spacer_height'), 40.0)),
+        gap_length=safe_number(standards.get('Längenversatz_je_Lage'), 100.0),
+        allow_beside=bool(options.get('allow_beside', True)),
+        allow_stack=bool(options.get('allow_stack', True)),
+        allow_rotation=bool(options.get('allow_rotation', False)),
+        bundle_order_flex_percent=0.0,
+        prevent_wide_on_narrow=bool(options.get('prevent_wide_on_narrow', True)),
+        min_support_width_ratio=safe_number(options.get('min_support_width_ratio'), 0.80),
+        max_unsupported_length_mm=safe_number(options.get('max_unsupported_length_mm'), 0.0),
+        max_unsupported_side_mm=safe_number(options.get('max_unsupported_side_mm'), 0.0),
+        max_unsupported_length_percent=safe_number(options.get('max_unsupported_length_percent'), 0.0),
+        max_unsupported_side_percent=safe_number(options.get('max_unsupported_side_percent'), 0.0),
+        prefer_length_before_stack=bool(options.get('prefer_length_before_stack', False)),
+        prefer_support_quality=bool(options.get('prefer_support_quality', True)),
+    )
+    loads, timed_out = largest_fitting_prefix(
+        units, fixed, deck, _pinned_manual_plan_around_pair, planner
+    )
+    if timed_out:
+        # Do not silently claim a completed search on retained destinations.
+        raise RuntimeError('Freiraumsuche auf einer bereits fixierten Pritsche hat ihr Zeitbudget erreicht.')
+    if loads.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    prefix = 'K' + hashlib.sha256(str(deck.iloc[0]['Pritsche']).encode()).hexdigest()[:10]
+    loads, units = _pinned_manual_namespace_replanned_ids(loads, units, fixed, prefix)
+    additional = loads[~loads['Einheit_ID'].astype(str).isin(set(fixed['Einheit_ID'].astype(str)))]
+    loaded_ids = set(additional.loc[
+        additional['Typ'].apply(_is_real_load_type_value), 'Einheit_ID'
+    ].astype(str))
+    return additional, units[units['Einheit_ID'].astype(str).isin(loaded_ids)]
+
+
 def _preview_pinned_manual_replan(
     source_placements_df: pd.DataFrame,
     source_platforms_df: pd.DataFrame,
@@ -12325,7 +12394,7 @@ def _preview_pinned_manual_replan(
     target_platform: str,
     coordinates: Dict[str, Dict[str, float]],
 ) -> Dict[str, Any]:
-    """Preview a validated pinned pair and globally replan every other source part."""
+    """Preview cumulative validated pairs and globally replan unfixed source parts."""
     validation = _manual_validate_pinned_longitudinal_pair(
         source_placements_df, source_platforms_df, unit_ids, coordinates, target_platform,
         include_destination_loads=False,
@@ -12349,6 +12418,45 @@ def _preview_pinned_manual_replan(
     }
     if not validation['ok']:
         return result
+    requests = list((settings or {}).get('retained_pairs', [])) + [{
+        'unit_ids': [str(value) for value in unit_ids],
+        'target_platform': str(target_platform), 'coordinates': validation['coordinates'],
+    }]
+    validations = [validation]
+    seen_ids = set(str(value) for value in unit_ids)
+    for request in requests[:-1]:
+        previous_ids = set(str(value) for value in request['unit_ids'])
+        if seen_ids & previous_ids:
+            result['issues'] = pd.DataFrame([{
+                'Typ': 'Fixierung', 'Warnung': 'Bereits fixierte Einheit erneut ausgewählt',
+                'Details': 'Zuerst die betreffende Fixierung ausdrücklich lösen.',
+            }])
+            return result
+        seen_ids.update(previous_ids)
+        checked = _manual_validate_pinned_longitudinal_pair(
+            source_placements_df, source_platforms_df, request['unit_ids'],
+            request['coordinates'], request['target_platform'],
+            include_destination_loads=False,
+            manual_pair_override=bool((settings or {}).get('manual_pair_override', False)),
+        )
+        if not checked['ok']:
+            result['issues'] = checked['issues']
+            return result
+        validations.append(checked)
+    fixed_destinations = list(dict.fromkeys(request['target_platform'] for request in requests))
+    retained_platform_rows = source_platforms_df[
+        source_platforms_df['Pritsche'].astype(str).isin(fixed_destinations)
+    ].copy()
+    validation['pinned_placements_df'] = pd.concat(
+        [checked['pinned_placements_df'] for checked in validations], ignore_index=True, sort=False
+    )
+    validation['support_rows_df'] = pd.concat(
+        [checked['support_rows_df'] for checked in validations], ignore_index=True, sort=False
+    ).drop_duplicates(subset=['Einheit_ID']) if any(
+        not checked['support_rows_df'].empty for checked in validations
+    ) else pd.DataFrame()
+    result['pin_requests'] = requests
+    result['fixed_unit_ids'] = sorted(seen_ids)
     pair = validation['pinned_placements_df'].copy()
     pair_labels = set(_pinned_manual_identity_labels(pair))
     labels_col = 'Bauteilnummer' if 'Bauteilnummer' in source_parts_df.columns else None
@@ -12394,14 +12502,43 @@ def _preview_pinned_manual_replan(
         # Original trips other than the selected pin destination are discarded
         # by the global replan. Capacity is based on retained distinct trips,
         # never on the retained trip's possibly-large numeric label (e.g. F05).
-        retained_trip_count = 1
+        retained_trip_count = retained_platform_rows['Fuhre_Nr'].nunique()
+        if retained_trip_count > configured_max_trips:
+            result['issues'] = pd.DataFrame([{
+                'Typ': 'Fuhrenlimit', 'Warnung': 'Fixierte Fuhren überschreiten das eingestellte Maximum',
+                'Details': f'{retained_trip_count} fixierte Fuhren / Maximum {configured_max_trips}',
+            }])
+            return None
         available_trip_slots = max(0, configured_max_trips - retained_trip_count)
         planner_settings['max_fuhren'] = available_trip_slots
+        extra_loads = []
+        extra_units = []
+        for destination in fixed_destinations:
+            if destination == str(target_platform) or parts.empty:
+                continue
+            fixed_here = pinned_frame[pinned_frame['Pritsche'].astype(str).eq(destination)]
+            platform_here = retained_platform_rows[
+                retained_platform_rows['Pritsche'].astype(str).eq(destination)
+            ]
+            try:
+                filled, filled_units = _pinned_manual_fill_destination(
+                    parts, source_parts_df, fixed_here, platform_here, standards, settings
+                )
+            except Exception as exc:
+                result['issues'] = pd.DataFrame([{
+                    'Typ': 'Neuberechnung', 'Warnung': 'Freiraumsuche für bestehende Fixierung fehlgeschlagen',
+                    'Details': str(exc),
+                }])
+                return None
+            if not filled.empty:
+                extra_loads.append(filled)
+                extra_units.append(filled_units)
+                labels = set(_pinned_manual_identity_labels(filled))
+                parts = parts[~parts['Bauteilnummer'].astype(str).str.strip().isin(labels)].copy()
         if not parts.empty and available_trip_slots <= 0:
             result['issues'] = pd.DataFrame([{
-                'Typ': 'Fuhrenlimit',
-                'Warnung': 'Kein Fuhrenplatz mehr für die global neu zu planenden Einheiten',
-                'Details': f'Fixierte Fuhre {retained_trip_number} / Maximum {configured_max_trips}',
+                'Typ': 'Fuhrenlimit', 'Warnung': 'Kein Fuhrenplatz mehr für die übrigen Einheiten',
+                'Details': f'{retained_trip_count} fixierte Fuhren / Maximum {configured_max_trips}',
             }])
             return None
         try:
@@ -12414,35 +12551,20 @@ def _preview_pinned_manual_replan(
             }])
             return None
         placements, summary, used_platforms, log, units = planned
-        trip_offset = retained_trip_number
-        if not placements.empty and 'Fuhre_Nr' in placements.columns:
-            for frame in (placements, summary, used_platforms, log, units):
-                if frame is None or frame.empty or 'Fuhre_Nr' not in frame.columns:
-                    continue
-                original_numbers = pd.to_numeric(frame['Fuhre_Nr'], errors='coerce')
-                frame.loc[original_numbers.notna(), 'Fuhre_Nr'] = original_numbers[original_numbers.notna()] + trip_offset
-            if not used_platforms.empty:
-                name_map = {}
-                for _, pr in used_platforms.iterrows():
-                    old_name = str(pr.get('Pritsche', ''))
-                    new_name = f"F{int(safe_number(pr.get('Fuhre_Nr'))):02d} {pr.get('Pritschenname', old_name)}"
-                    name_map[old_name] = new_name
-                for frame in (placements, summary, used_platforms):
-                    if frame is not None and not frame.empty and 'Pritsche' in frame.columns:
-                        frame['Pritsche'] = frame['Pritsche'].astype(str).map(lambda value: name_map.get(value, value))
-                if not log.empty and 'Pritschen' in log.columns:
-                    log['Pritschen'] = log['Pritschen'].astype(str).map(
-                        lambda value: ', '.join(
-                            name_map.get(name.strip(), name.strip())
-                            for name in value.split(',')
-                        )
-                    )
+        from pinned_plan_identity import restore_trip_names
+        restore_trip_names(
+            (placements, summary, used_platforms, log, units),
+            source_platforms_df, retained_platform_rows,
+        )
         placements, units = _pinned_manual_namespace_replanned_ids(
             placements,
             units,
             pinned_frame,
             f'R{retained_trip_number + 1:02d}',
         )
+        if extra_loads:
+            placements = pd.concat([placements] + extra_loads, ignore_index=True, sort=False)
+            units = pd.concat([units] + extra_units, ignore_index=True, sort=False)
         return {
             'placements': placements, 'summary': summary, 'used_platforms': used_platforms,
             'log': log, 'units': units, 'pinned': pinned_frame,
@@ -12469,7 +12591,11 @@ def _preview_pinned_manual_replan(
             split_attr = str(unit_settings.get('fuhre_split_attr') or '')
             if split_attr and split_attr in source_parts_df.columns:
                 pair_groups = source_parts_df.loc[
-                    source_parts_df['Bauteilnummer'].astype(str).str.strip().isin(pair_labels),
+                    source_parts_df['Bauteilnummer'].astype(str).str.strip().isin(
+                        set(_pinned_manual_identity_labels(
+                            pair[pair['Pritsche'].astype(str).eq(str(target_platform))]
+                        ))
+                    ),
                     split_attr,
                 ].fillna('').astype(str)
                 eligible_parts = remaining_parts.loc[
@@ -12505,7 +12631,9 @@ def _preview_pinned_manual_replan(
             )
             from pinned_space_search import largest_fitting_prefix
             target_loads, search_timed_out = largest_fitting_prefix(
-                target_units, pinned_pair_supports, trip_platform, _pinned_manual_plan_around_pair,
+                target_units,
+                pinned_pair_supports[pinned_pair_supports['Pritsche'].astype(str).eq(str(target_platform))],
+                trip_platform, _pinned_manual_plan_around_pair,
                 dict(
                 base_wood_height=safe_number(trip_platform.iloc[0].get('Kantholz_erste_Lage_mm')),
                 layer_spacer_height=safe_number(trip_platform.iloc[0].get('Einlage_zwischen_Lagen_mm')),
@@ -12551,7 +12679,7 @@ def _preview_pinned_manual_replan(
                     )
                     trial_platforms = global_candidate['used_platforms'].copy()
                     trial_platforms = pd.concat(
-                        [trial_platforms, target_row.iloc[[0]]], ignore_index=True, sort=False
+                        [trial_platforms, retained_platform_rows], ignore_index=True, sort=False
                     )
                     trial_warnings = compute_loading_warnings(trial_placements, trial_platforms)
                     trial_blocking = trial_warnings[
@@ -12569,7 +12697,7 @@ def _preview_pinned_manual_replan(
                     trial_physical = _pinned_manual_physical_conflicts(trial_placements)
                     trial_unloading = _pinned_manual_unloading_issues(
                         trial_placements, source_placements_df,
-                        [str(value) for value in unit_ids],
+                        sorted(seen_ids),
                     )
                     trial_identity = (
                         _pinned_manual_identity_signature(trial_placements)
@@ -12580,7 +12708,7 @@ def _preview_pinned_manual_replan(
                             [trial_blocking, trial_support, trial_geometry, trial_physical, trial_unloading],
                             ignore_index=True, sort=False,
                         ),
-                        target_platform,
+                        fixed_destinations,
                         bool((settings or {}).get('manual_pair_override', False)),
                     )
                     if (
@@ -12630,14 +12758,9 @@ def _preview_pinned_manual_replan(
         source_platforms_df.get('Pritsche', pd.Series(dtype=str)).astype(str).eq(str(target_platform))
     ]
     used_candidate_platforms = candidate['used_platforms'].copy()
-    has_target_platform = (
-        not used_candidate_platforms.empty
-        and used_candidate_platforms.get('Pritsche', pd.Series(dtype=str)).astype(str).eq(str(target_platform)).any()
-    )
-    if not target_platform_row.empty and not has_target_platform:
-        used_candidate_platforms = pd.concat(
-            [used_candidate_platforms, target_platform_row.iloc[[0]]], ignore_index=True, sort=False
-        )
+    used_candidate_platforms = pd.concat(
+        [used_candidate_platforms, retained_platform_rows], ignore_index=True, sort=False
+    ).drop_duplicates(subset=['Pritsche'])
     target_summary = recompute_summary_from_placements(
         candidate_placements, used_candidate_platforms
     )
@@ -12651,7 +12774,7 @@ def _preview_pinned_manual_replan(
     )
     physical_conflicts = _pinned_manual_physical_conflicts(candidate_placements)
     unloading_issues = _pinned_manual_unloading_issues(
-        candidate_placements, source_placements_df, [str(value) for value in unit_ids]
+        candidate_placements, source_placements_df, sorted(seen_ids)
     )
     identity_ok = _pinned_manual_identity_signature(candidate_placements) == _pinned_manual_identity_signature(source_placements_df)
     blocking_types = {
@@ -12667,7 +12790,7 @@ def _preview_pinned_manual_replan(
         ignore_index=True, sort=False,
     )
     all_issues, advisory_issues = _pinned_manual_classify_issues(
-        all_issues, target_platform, bool((settings or {}).get('manual_pair_override', False))
+        all_issues, fixed_destinations, bool((settings or {}).get('manual_pair_override', False))
     )
     result['advisory_issues'] = advisory_issues
     if not identity_ok or not all_issues.empty:
@@ -12678,44 +12801,35 @@ def _preview_pinned_manual_replan(
         }])
         return result
     candidate_placements = _pinned_manual_preserve_nr_pl(
-        candidate_placements, source_parts_df, [str(value) for value in unit_ids]
+        candidate_placements, source_parts_df, sorted(seen_ids)
     )
     candidate_units = _pinned_manual_preserve_nr_pl(
         pd.concat([candidate['units'], pair], ignore_index=True, sort=False),
         source_parts_df,
-        [str(value) for value in unit_ids],
+        sorted(seen_ids),
     )
     candidate_log = candidate['log'].copy()
-    if not target_platform_row.empty:
-        target_trip_number = target_platform_row.iloc[0].get('Fuhre_Nr')
-        has_target_log = (
-            not candidate_log.empty
-            and pd.to_numeric(candidate_log.get('Fuhre_Nr', pd.Series(dtype=float)), errors='coerce')
-            .eq(safe_number(target_trip_number)).any()
-        )
-        if not has_target_log:
-            target_real_rows = candidate_placements[
-                candidate_placements.get('Pritsche', pd.Series(dtype=str)).astype(str).eq(str(target_platform))
-                & candidate_placements.get('Typ', pd.Series(dtype=str)).apply(_is_real_load_type_value)
-            ]
-            target_labels = _pinned_manual_identity_labels(target_real_rows)
-            candidate_log = pd.concat([
-                candidate_log,
-                pd.DataFrame([{
-                    'Fuhre_Nr': target_trip_number,
-                    'Fuhrenoption': target_platform_row.iloc[0].get('Fuhrenoption', ''),
-                    'Bauteile': len(target_labels),
-                    'Verladeeinheiten': len(target_real_rows),
-                    'Gewicht_kg': round(
-                        float(pd.to_numeric(target_real_rows.get('Gewicht_kg'), errors='coerce').fillna(0).sum()),
-                        2,
-                    ),
-                    'Pritschen': str(target_platform),
-                    'Reihenfolge': 'Manuelles Längspaar fixiert; übrige Einheiten global neu berechnet',
-                    'Erste_Bauteilnummer': target_labels[0] if target_labels else '',
-                    'Letzte_Bauteilnummer': target_labels[-1] if target_labels else '',
-                }]),
-            ], ignore_index=True, sort=False)
+    for trip_number, decks in retained_platform_rows.groupby('Fuhre_Nr'):
+        trip_decks = used_candidate_platforms[
+            pd.to_numeric(used_candidate_platforms['Fuhre_Nr']).eq(float(trip_number))
+        ]
+        trip_real = candidate_placements[
+            candidate_placements['Pritsche'].astype(str).isin(set(trip_decks['Pritsche'].astype(str)))
+            & candidate_placements['Typ'].apply(_is_real_load_type_value)
+        ]
+        trip_labels = _pinned_manual_identity_labels(trip_real)
+        candidate_log = pd.concat([
+            candidate_log,
+            pd.DataFrame([{
+                'Fuhre_Nr': trip_number, 'Fuhrenoption': decks.iloc[0].get('Fuhrenoption', ''),
+                'Bauteile': len(trip_labels), 'Verladeeinheiten': len(trip_real),
+                'Gewicht_kg': round(float(pd.to_numeric(trip_real['Gewicht_kg']).fillna(0).sum()), 2),
+                'Pritschen': ', '.join(trip_decks['Pritsche'].astype(str)),
+                'Reihenfolge': 'Manuelle Paare fixiert; übrige Einheiten global neu berechnet',
+                'Erste_Bauteilnummer': trip_labels[0] if trip_labels else '',
+                'Letzte_Bauteilnummer': trip_labels[-1] if trip_labels else '',
+            }]),
+        ], ignore_index=True, sort=False)
     # Existing supports are kept as independent rows. Never treat them as logical identities.
     result.update({
         'ok': True, 'placements_df': candidate_placements,
@@ -12734,6 +12848,7 @@ def _pinned_manual_preview_artifact_signature(preview: Dict[str, Any]) -> str:
     policy_signature = _loading_dataframe_signature(pd.DataFrame([{
         'manual_pair_override': bool(preview.get('settings', {}).get('manual_pair_override', False)),
         'target_platform': str(preview.get('target_platform', '')),
+        'pin_requests': json.dumps(preview.get('pin_requests', []), sort_keys=True),
     }]))
     return policy_signature + '||' + '||'.join(
         _loading_dataframe_signature(preview.get(key))
@@ -12800,26 +12915,38 @@ def _apply_pinned_manual_replan(
     source_platforms = result.get('_source_platforms_df', pd.DataFrame())
     final_placements = result.get('placements_df', pd.DataFrame())
     final_platforms = result.get('platforms_df', pd.DataFrame())
-    expected_pair = _manual_validate_pinned_longitudinal_pair(
-        source_placements,
-        source_platforms,
-        result.get('unit_ids', []),
-        result.get('coordinates', {}),
-        result.get('target_platform'),
-        include_destination_loads=False,
-        manual_pair_override=bool(result.get('settings', {}).get('manual_pair_override', False)),
-    )
+    requests = list(result.get('settings', {}).get('retained_pairs', [])) + [{
+        'unit_ids': result.get('unit_ids', []), 'coordinates': result.get('coordinates', {}),
+        'target_platform': result.get('target_platform'),
+    }]
     safety_issues: List[pd.DataFrame] = []
-    if not expected_pair.get('ok'):
-        safety_issues.append(expected_pair.get('issues', pd.DataFrame()))
-    expected_rows = expected_pair.get('pinned_placements_df', pd.DataFrame())
+    if result.get('pin_requests', requests) != requests:
+        safety_issues.append(pd.DataFrame([{
+            'Typ': 'Fixierung', 'Warnung': 'Fixierungen stimmen nicht mit den geprüften Eingaben überein',
+            'Details': 'Bitte Vorschau erneut berechnen.',
+        }]))
+    expected_frames = []
+    fixed_ids = []
+    for request in requests:
+        expected_pair = _manual_validate_pinned_longitudinal_pair(
+            source_placements, source_platforms, request['unit_ids'],
+            request['coordinates'], request['target_platform'],
+            include_destination_loads=False,
+            manual_pair_override=bool(result.get('settings', {}).get('manual_pair_override', False)),
+        )
+        if not expected_pair.get('ok'):
+            safety_issues.append(expected_pair.get('issues', pd.DataFrame()))
+        expected_frames.append(expected_pair.get('pinned_placements_df', pd.DataFrame()))
+        fixed_ids.extend(str(value) for value in request['unit_ids'])
+    expected_rows = pd.concat(expected_frames, ignore_index=True, sort=False)
     actual_rows = final_placements[
         final_placements.get('Einheit_ID', pd.Series(dtype=str)).astype(str).isin(
-            set(str(value) for value in result.get('unit_ids', []))
+            set(fixed_ids)
         )
         & final_placements.get('Typ', pd.Series(dtype=str)).apply(_is_real_load_type_value)
     ].copy() if not final_placements.empty else pd.DataFrame()
-    if len(actual_rows) != 2 or len(expected_rows) != 2:
+    if (len(actual_rows) != len(fixed_ids) or len(expected_rows) != len(fixed_ids)
+            or len(set(fixed_ids)) != len(fixed_ids)):
         safety_issues.append(pd.DataFrame([{
             'Typ': 'Fixiertes Paar', 'Warnung': 'Fixierte Einheiten fehlen oder sind nicht eindeutig im finalen Plan',
             'Details': '',
@@ -12874,14 +13001,14 @@ def _apply_pinned_manual_replan(
             safe_number(result.get('settings', {}).get('min_support_width_ratio'), 0.65),
         ),
         _pinned_manual_unloading_issues(
-            final_placements, source_placements, result.get('unit_ids', [])
+            final_placements, source_placements, fixed_ids
         ),
     ):
         if check is not None and not check.empty:
             safety_issues.append(check)
     hard_issues, advisory_issues = _pinned_manual_classify_issues(
         pd.concat(safety_issues, ignore_index=True, sort=False) if safety_issues else pd.DataFrame(),
-        result.get('target_platform'),
+        [request['target_platform'] for request in requests],
         bool(result.get('settings', {}).get('manual_pair_override', False)),
     )
     result['advisory_issues'] = advisory_issues
@@ -15003,7 +15130,8 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
             draw_view=draw_loading_view, is_real_load=_is_real_load_type_value,
         )
         if pin_active:
-            st.info('Die bestätigte Fixierung schützt das Paar und seine Auflager vor weiteren Planänderungen.')
+            st.info('Die bestätigten Fixierungen schützen alle Paare und ihre Auflager. '
+                    'Weitere Paare können ergänzt werden; andere Planänderungen bleiben gesperrt.')
             st.dataframe(edited_placements_df, use_container_width=True, hide_index=True)
         elif verladeart == 'Automatisch':
             st.markdown('**Automatik-Modus**')

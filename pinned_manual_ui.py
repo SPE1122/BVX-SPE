@@ -2,7 +2,9 @@
 
 import pandas as pd
 import streamlit as st
+import hashlib
 from pinned_pair_guidance import mm_text, render_pair_guidance
+from pinned_plan_identity import pin_requests, platform_changes
 
 
 def _show_advisory_issues(issues):
@@ -29,38 +31,67 @@ def render_pinned_manual_replanning(
             'Zwei bereits verladene Bauteile/Bunde längs hintereinander in derselben Lage '
             'positionieren (z. B. 0.29 und 0.31 auf F01). X ist die Längsrichtung, Y die '
             'Querrichtung, Z die Unterkante. Alle Angaben in mm. Importierte Nr.PL bleiben '
-            'unverändert. Alle anderen Bauteile werden neu geplant. Geometrie- und '
+            'unverändert. Alle nicht fixierten Bauteile werden neu geplant. Bereits bestätigte '
+            'Paare bleiben exakt an ihrer Position. Geometrie- und '
             'Gewichtsfehler bleiben auch bei manueller Beurteilung Ausschlussgründe.'
         )
         pin = st.session_state.get('pinned_manual_active')
+        retained_pairs = pin_requests(pin)
         if isinstance(pin, dict):
             if pin.get('manual_pair_override', False):
                 _manual_override_warning()
             st.success(
-                f"Fixiertes Paar auf {pin.get('target_platform', '')}: "
-                + ', '.join(pin.get('unit_ids', []))
+                f"{len(retained_pairs)} fixierte(s) Paar(e) – bestätigte Positionen bleiben geschützt."
             )
             st.dataframe(pin.get('pinned_placements_df', pd.DataFrame()), hide_index=True)
             _show_advisory_issues(pin.get('advisory_issues'))
-            st.caption('Andere Planänderungen sind gesperrt, bis die Fixierung ausdrücklich gelöst wird.')
-            if st.button('Fixierung lösen (Positionen beibehalten)', key='pinned_manual_release'):
+            st.caption('Weitere Paare können unten ergänzt werden. Andere Planänderungen bleiben gesperrt. '
+                       'Lösen behält Positionen bei, hebt aber ihren Schutz bei der nächsten Neuplanung auf.')
+            if len(retained_pairs) > 1:
+                for index, request in enumerate(retained_pairs):
+                    if st.button(
+                        f"Fixierung lösen: {request['target_platform']} – {', '.join(request['unit_ids'])}",
+                        key=f'pinned_manual_release_pair_{index}',
+                    ):
+                        remaining = retained_pairs[:index] + retained_pairs[index + 1:]
+                        updated = dict(pin)
+                        updated['pin_requests'] = remaining
+                        keep_ids = {uid for item in remaining for uid in item['unit_ids']}
+                        updated['pinned_placements_df'] = pin['pinned_placements_df'][
+                            pin['pinned_placements_df']['Einheit_ID'].astype(str).isin(keep_ids)
+                        ].copy()
+                        st.session_state['pinned_manual_active'] = updated
+                        st.session_state.pop('pinned_manual_preview', None)
+                        st.rerun()
+                        return
+            if st.button(
+                'Alle Fixierungen lösen (Positionen beibehalten)' if len(retained_pairs) > 1
+                else 'Fixierung lösen (Positionen beibehalten)',
+                key='pinned_manual_release',
+            ):
                 st.session_state.pop('pinned_manual_active', None)
                 st.session_state.pop('pinned_manual_preview', None)
                 st.rerun()
-            return
+                return
 
         real = placements[
             placements.get('Typ', pd.Series(index=placements.index, dtype=str)).apply(is_real_load)
             & placements.get('Pritsche', pd.Series(index=placements.index, dtype=str)).astype(str).ne('NICHT VERLADEN')
         ].copy()
+        fixed_ids = {str(uid) for request in retained_pairs for uid in request['unit_ids']}
+        real = real[~real['Einheit_ID'].astype(str).isin(fixed_ids)]
         if len(real) < 2 or platforms.empty:
-            st.info('Zuerst mindestens zwei Bauteile verladen und den Ladeplan berechnen.')
+            st.info('Keine zwei weiteren unfixierten Bauteile verfügbar.' if retained_pairs
+                    else 'Zuerst mindestens zwei Bauteile verladen und den Ladeplan berechnen.')
             return
         # This is an explicitly manual flow. Do not let a retained widget value
         # silently restore the strict stability gates requested for automation.
-        _manual_override_warning()
+        if not isinstance(pin, dict) or not pin.get('manual_pair_override', False):
+            _manual_override_warning()
         request_settings = dict(settings)
         request_settings['manual_pair_override'] = True
+        if retained_pairs:
+            request_settings['retained_pairs'] = retained_pairs
         names = platforms['Pritsche'].astype(str).tolist()
         target = st.selectbox('Zielpritsche für das Längspaar', names, key='pinned_manual_target')
         st.info('Eingabe in Millimetern: 6,54 m = 6540 mm · 1,98 m = 1980 mm. '
@@ -167,7 +198,7 @@ def render_pinned_manual_replanning(
             if preview.get('deviation'):
                 st.warning(preview['deviation'])
             _show_advisory_issues(preview.get('advisory_issues'))
-            st.markdown('**Fixiertes Paar in der Vorschau**')
+            st.markdown('**Alle fixierten Paare in der Vorschau**')
             st.dataframe(preview['pinned_placements_df'], use_container_width=True, hide_index=True)
             st.markdown('**Fuhren nach der globalen Neuplanung**')
             target_real = preview['placements_df'].loc[
@@ -189,6 +220,13 @@ def render_pinned_manual_replanning(
                 f'Fuhren bisher: {before_trips} · Vorschau: {after_trips}. '
                 'Die Suche prüft freie Plätze; eine global minimale Fuhrenzahl ist nicht garantiert.'
             )
+            st.caption(
+                f'Pritschen bisher: {len(platforms)} · Vorschau: {len(after_platforms)}. '
+                'Eine höhere Fuhrennummer allein bedeutet keine zusätzliche Fuhre. '
+                'Vorhandene Nummern werden wiederverwendet; bei anderem Pritschentyp kann sich der Name ändern.'
+            )
+            st.dataframe(platform_changes(platforms, after_platforms),
+                         use_container_width=True, hide_index=True)
             st.dataframe(preview['summary_df'], use_container_width=True, hide_index=True)
             st.markdown('**Bauteil-Zuordnung bisher / Vorschau**')
             before = placements[placements['Typ'].apply(is_real_load)]
@@ -227,10 +265,12 @@ def render_pinned_manual_replanning(
                 'Ich übernehme die manuelle Verantwortung für Schwerpunkt, Auflage und Entladung '
                 'und bestätige: Änderungen aller Fuhren geprüft – Paar fixieren und Vorschau übernehmen'
             )
-            confirm = st.checkbox(
-                confirmation_text,
-                value=False, key=f"pinned_manual_confirm_{preview['source_signature']}",
-            )
+            confirmation_key = f"pinned_manual_confirm_{preview['source_signature']}"
+            if preview.get('_preview_artifact_signature'):
+                confirmation_key += '_' + hashlib.sha256(
+                    preview['_preview_artifact_signature'].encode()
+                ).hexdigest()[:12]
+            confirm = st.checkbox(confirmation_text, value=False, key=confirmation_key)
             if st.button('Bestätigte Vorschau übernehmen', disabled=not (can_apply and confirm),
                          key='pinned_manual_apply'):
                 # Recheck directly before the atomic session-state update.
