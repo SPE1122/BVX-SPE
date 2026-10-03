@@ -25,4 +25,4 @@ For manually adjusted longitudinal pairs, allow manual assessment of center of g
 
 **Why:** On 2026-10-01 the user explicitly requested that manual positioning not be blocked by center-of-gravity and similar stability checks. Pair-only checks can reject a position before other loads are planned, and inherited elevated positions may depend on support not retained with the pair.
 
-**How to apply:** Scope this exception to the manual-pair flow, including preview and final apply. Keep strict checking available and invalidate previews when the assessment mode changes. Do not describe an override-accepted plan as transport-safe.
+**How to apply:** Scope this exception to the manual-pair flow, including preview and final apply. Manual assessment is fixed in this UI, not an optional checkbox whose retained value can silently restore strict stability gates. Automation remains strict. Invalidate obsolete previews, including failed previews, when their request changes. Do not describe an override-accepted plan as transport-safe.

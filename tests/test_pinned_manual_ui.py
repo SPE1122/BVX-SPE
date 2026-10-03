@@ -178,7 +178,8 @@ class PinnedManualUiTests(unittest.TestCase):
         self.assertIn("pinned_manual_preview", state)
         self.assertNotIn("manual_placements_df", state)
         self.assertNotIn("pinned_manual_active", state)
-        self.assertEqual(fake_ui.checkbox_calls[0][1], True)
+        self.assertFalse(fake_ui.checkbox_calls[0][1])  # explicit confirmation starts unchecked
+        self.assertNotIn("pinned_manual_override", [key for _, _, key in fake_ui.checkbox_calls])
         self.assertEqual(self.validation_calls[0][5:], (False, True))
         preview_settings = self.preview_calls[0][6]
         self.assertEqual(preview_settings, {"manual_pair_override": True})
@@ -319,7 +320,7 @@ class PinnedManualUiTests(unittest.TestCase):
         self.assertTrue(any(frame is not None and frame.equals(advisory)
                             for frame in preview_ui.dataframes))
         self.assertTrue(any("nicht sicherheitstechnisch bestätigt" in message
-                            for message in preview_ui.errors))
+                            for message in preview_ui.warnings))
 
         accepted_pin = {
             "target_platform": "F01",
@@ -332,33 +333,64 @@ class PinnedManualUiTests(unittest.TestCase):
         self.assertTrue(any(frame is not None and frame.equals(advisory)
                             for frame in accepted_ui.dataframes))
         self.assertTrue(any("nicht sicherheitstechnisch bestätigt" in message
-                            for message in accepted_ui.errors))
+                            for message in accepted_ui.warnings))
 
-    def test_switching_from_override_preview_to_strict_blocks_apply(self):
-        state = {"pinned_manual_preview": valid_preview()}
-        settings_seen = []
-
-        def reject_stale_mode(_preview, *_args):
-            settings_seen.append(_args[-1])
-            return {"applied": False, "stale_source": True}
-
-        self.apply_plan = reject_stale_mode
+    def test_retained_false_widget_value_cannot_restore_strict_stability_gates(self):
+        state = {"pinned_manual_override": False}
         fake_ui = FakeStreamlit(
-            buttons={"pinned_manual_apply": True},
-            checkboxes={
-                "pinned_manual_override": False,
-                "pinned_manual_confirm_source-v1": True,
-            },
+            buttons={"pinned_manual_preview_button": True},
+            checkboxes={"pinned_manual_override": False},
             session_state=state,
         )
         self.render(fake_ui)
-        self.assertEqual(settings_seen, [{"manual_pair_override": False}])
+        self.assertEqual(self.validation_calls[0][5:], (False, True))
+        self.assertEqual(self.preview_calls[0][6], {"manual_pair_override": True})
+        self.assertEqual(self.apply_calls[0][1][-1], {"manual_pair_override": True})
+        self.assertNotIn("pinned_manual_override", [key for _, _, key in fake_ui.checkbox_calls])
+
+    def test_legacy_failed_center_of_gravity_preview_is_discarded_without_mutating_plan(self):
+        issues = pd.DataFrame([{"Typ": "Schwerpunkt längs", "Pritsche": "F01"}])
+        state = {"pinned_manual_preview": {"ok": False, "issues": issues}}
+        fake_ui = FakeStreamlit(session_state=state)
+        self.render(fake_ui)
+        self.assertNotIn("pinned_manual_preview", state)
+        self.assertEqual(fake_ui.errors, [])
+        self.assertEqual(fake_ui.dataframes, [])
         self.assertNotIn("pinned_manual_active", state)
         self.assertNotIn("manual_placements_df", state)
-        self.assertTrue(next(
-            disabled for key, disabled in fake_ui.button_calls if key == "pinned_manual_apply"
+        pd.testing.assert_frame_equal(self.placements, self.placements_before)
+        pd.testing.assert_frame_equal(self.platforms, self.platforms_before)
+
+    def test_changed_coordinates_discard_an_obsolete_failed_preview(self):
+        self.validate_pair = lambda *_args, **_kwargs: {
+            "ok": False, "issues": pd.DataFrame([{"Typ": "Geometrie"}]),
+        }
+        state = {}
+        self.render(FakeStreamlit(
+            buttons={"pinned_manual_preview_button": True}, session_state=state,
         ))
-        self.assertNotIn("manuelle Verantwortung", fake_ui.checkbox_calls[-1][0])
+        self.assertFalse(state["pinned_manual_preview"]["ok"])
+        changed_ui = FakeStreamlit(
+            widgets={"pinned_manual_first_A_X": 1.0}, session_state=state,
+        )
+        self.render(changed_ui)
+        self.assertNotIn("pinned_manual_preview", state)
+        self.assertEqual(changed_ui.errors, [])
+        self.assertNotIn("pinned_manual_active", state)
+
+    def test_previous_successful_strict_preview_cannot_be_applied_as_manual(self):
+        preview = valid_preview()
+        preview["settings"] = {"manual_pair_override": False}
+        state = {"pinned_manual_preview": preview}
+        fake_ui = FakeStreamlit(
+            buttons={"pinned_manual_apply": True},
+            checkboxes={"pinned_manual_confirm_source-v1": True},
+            session_state=state,
+        )
+        self.render(fake_ui)
+        self.assertNotIn("pinned_manual_preview", state)
+        self.assertEqual(self.apply_calls, [])
+        self.assertNotIn("pinned_manual_active", state)
 
 
 if __name__ == "__main__":

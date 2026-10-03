@@ -67,6 +67,8 @@ render_pinned_manual_replanning(""",
         )
         at = AppTest.from_string(script, default_timeout=60).run()
         self.assertFalse(at.exception)
+        # A previous session's unchecked override must not restore strict gates.
+        at.session_state['pinned_manual_override'] = False
         ids = {
             str(row['Bauteile_Liste']): str(row['Einheit_ID'])
             for _, row in at.session_state['source'].iterrows()
@@ -97,7 +99,7 @@ render_pinned_manual_replanning(""",
         self.assertEqual(pinned.loc[ids['0.29'], 'X_mm'], 3500.0)
         self.assertEqual(pinned.loc[ids['0.31'], 'X_mm'], 4000.0)
         self.assertTrue(pinned['Z_mm'].eq(320.0).all())
-        self.assertTrue(any('nicht sicherheitstechnisch bestätigt' in error.value for error in at.error))
+        self.assertTrue(any('nicht sicherheitstechnisch bestätigt' in warning.value for warning in at.warning))
         self.assertIn('Auflagekette', set(accepted['advisory_issues']['Typ']))
 
     def test_real_widgets_validate_preview_confirm_and_release(self):

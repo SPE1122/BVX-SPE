@@ -11,7 +11,7 @@ def _show_advisory_issues(issues):
 
 
 def _manual_override_warning():
-    st.error(
+    st.warning(
         'Manuelle Beurteilung aktiv: Schwerpunkt, Auflage und Entladung werden nicht '
         'sicherheitstechnisch bestätigt. Die Transport- und Ladungssicherheit muss '
         'eigenverantwortlich beurteilt werden.'
@@ -55,15 +55,11 @@ def render_pinned_manual_replanning(
         if len(real) < 2 or platforms.empty:
             st.info('Zuerst mindestens zwei Bauteile verladen und den Ladeplan berechnen.')
             return
-        manual_pair_override = st.checkbox(
-            'Schwerpunkt, Auflage und Entladung manuell beurteilen',
-            value=True,
-            key='pinned_manual_override',
-        )
-        if manual_pair_override:
-            _manual_override_warning()
+        # This is an explicitly manual flow. Do not let a retained widget value
+        # silently restore the strict stability gates requested for automation.
+        _manual_override_warning()
         request_settings = dict(settings)
-        request_settings['manual_pair_override'] = bool(manual_pair_override)
+        request_settings['manual_pair_override'] = True
         names = platforms['Pritsche'].astype(str).tolist()
         target = st.selectbox('Zielpritsche für das Längspaar', names, key='pinned_manual_target')
         ids = real['Einheit_ID'].astype(str).tolist()
@@ -92,8 +88,6 @@ def render_pinned_manual_replanning(
             spinner_text = (
                 'Geometrie und Gewicht prüfen; Schwerpunkt, Auflage und Entladung manuell beurteilen; '
                 'Rest neu planen …'
-                if manual_pair_override else
-                'Geometrie, Gewicht, Auflagekette, Schwerpunkt und Entladung prüfen; Rest neu planen …'
             )
             with st.spinner(spinner_text):
                 validation = validate_pair(
@@ -112,8 +106,27 @@ def render_pinned_manual_replanning(
                         placements, platforms, parts, options, platform_stock, standards,
                         request_settings, selected, target, coordinates,
                     )
+            st.session_state['pinned_manual_preview']['_manual_ui_request'] = {
+                **request, 'settings': request_settings,
+            }
         preview = st.session_state.get('pinned_manual_preview')
         if not isinstance(preview, dict):
+            return
+        current_request = {**request, 'settings': request_settings}
+        stale_failure = (
+            not preview.get('ok')
+            and preview.get('_manual_ui_request') != current_request
+        )
+        strict_preview = (
+            'settings' in preview
+            and not preview['settings'].get('manual_pair_override', False)
+        )
+        if stale_failure or strict_preview:
+            st.session_state.pop('pinned_manual_preview', None)
+            st.info(
+                'Die frühere Vorschau gehört nicht zur aktuellen manuellen Eingabe. '
+                'Bitte „Paar prüfen und globale Vorschau berechnen“ erneut drücken.'
+            )
             return
         if not preview.get('ok'):
             st.error('Keine gültige Fixierung / Neuplanung. Der bisherige Plan bleibt unverändert.')
@@ -125,10 +138,7 @@ def render_pinned_manual_replanning(
                 preview, placements, platforms, parts, options, platform_stock, request_settings,
             )
             can_apply = same_request and bool(checked.get('applied'))
-            if manual_pair_override:
-                st.success('Vorschau berechnet. Noch keine Änderungen übernommen.')
-            else:
-                st.success('Geprüfte Vorschau. Noch keine Änderungen übernommen.')
+            st.success('Vorschau berechnet. Noch keine Änderungen übernommen.')
             if not can_apply:
                 st.warning(
                     'Auswahl, Koordinaten, Prüfmodus oder Ausgangsdaten wurden geändert. '
@@ -177,8 +187,6 @@ def render_pinned_manual_replanning(
             confirmation_text = (
                 'Ich übernehme die manuelle Verantwortung für Schwerpunkt, Auflage und Entladung '
                 'und bestätige: Änderungen aller Fuhren geprüft – Paar fixieren und Vorschau übernehmen'
-                if manual_pair_override else
-                'Änderungen aller Fuhren geprüft – Paar fixieren und Vorschau übernehmen'
             )
             confirm = st.checkbox(
                 confirmation_text,
