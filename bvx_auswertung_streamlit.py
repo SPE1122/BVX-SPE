@@ -27,6 +27,7 @@ import time
 import json
 import hashlib
 from compaction_runtime import compaction_budget, with_compaction_budget
+from pdf_bundle_display import expand_bundle_display_rows, bundle_spacer_pdf_note
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Tuple
 from collections import Counter
@@ -9708,7 +9709,7 @@ def _pdf_add_visible_spacer_rows(rows: pd.DataFrame, platform: pd.Series, view: 
     In der Draufsicht werden sie nicht gezeichnet, weil sie von oben nicht
     sichtbar sind, sobald Bauteile darüber liegen.
     """
-    if rows is None or rows.empty or view == 'top':
+    if rows is None or rows.empty or view in ('top', 'top_rotated'):
         return rows
 
     base_height = safe_number(platform.get('Kantholz_erste_Lage_mm'), 0.0)
@@ -10209,6 +10210,11 @@ def _pdf_draw_view(c, placements: pd.DataFrame, platform: pd.Series, x: float, y
         rows = rows.copy()
 
     rows = _pdf_add_visible_spacer_rows(rows, platform, view)
+    # Nur Zeichenkopien auflösen; Einlagen vorher aus den unveränderten Bunden
+    # ableiten, damit keine zusätzlichen Zwischenhölzer im Bund entstehen.
+    if not bundle_overview_only:
+        rows = expand_bundle_display_rows(rows)
+        ghost_rows = expand_bundle_display_rows(ghost_rows)
 
     c.setStrokeColor(colors.black)
     c.setFillColor(colors.white)
@@ -10954,7 +10960,7 @@ def _pdf_draw_bsd_matrix_page(c, page_w: float, page_h: float, margin: float, pl
 
     c.setFillColor(colors.black)
     c.setFont('Helvetica', 6.4)
-    c.drawString(margin, 24, 'Hinweis: Einlage 40 / Lagenholz gemäss Einstellung zwischen den Bunden einlegen.')
+    c.drawString(margin, 24, bundle_spacer_pdf_note(platform.get('Einlage_zwischen_Lagen_mm')))
     c.drawString(margin, 14, 'BSD ist eine Darstellungs-Matrix. Mittige / breite Elemente werden nicht doppelt links/rechts geführt.')
 
 def _pdf_draw_logo(c, logo_bytes: Optional[bytes], x: float, y: float, max_w: float = 90, max_h: float = 55) -> None:
@@ -11236,6 +11242,10 @@ def create_loading_pdf(
         _pdf_draw_view(c, placements_df, platform, margin + 780, 125, 220, 205, 'front', 'Stirnansicht vorne', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=False, scale_context=pdf_scale_context)
         _pdf_draw_view(c, placements_df, platform, margin + 1025, 165, 140, 435, 'top_rotated', 'Draufsicht', front_at_x_max=pdf_front_at_x_max, left_at_y_max=pdf_left_at_y_max, bundle_overview_only=bundle_overview_only, show_dimensions=True, scale_context=pdf_scale_context)
 
+        if not bundle_overview_only and (placements_df.get('Typ', pd.Series(dtype=str)) == 'Bund').any():
+            c.setFont('Helvetica', 7)
+            c.setFillColor(colors.black)
+            c.drawString(margin, 24, 'Darstellung: Einzelteile im Bund am Bundursprung bündig; individuelle Innenversätze sind nicht hinterlegt.')
         c.showPage()
 
         # Zweite Seite: Ladeplan BSD Matrix je Pritsche, exakt gleicher Bezug wie PDF-Ansichten.
