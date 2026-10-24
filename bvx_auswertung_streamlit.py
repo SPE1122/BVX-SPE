@@ -7045,6 +7045,185 @@ def create_variant_a_loading_plan(
             real_loads = real_loads[real_loads['Typ'].apply(_is_real_load_type_value)]
         return real_loads.get('Einheit_ID', pd.Series(dtype=str)).dropna().astype(str).tolist()
 
+    def _try_two_longitudinal_stacks(
+        physical_units: pd.DataFrame, platform_row: pd.Series
+    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """V132: zusätzliche, explizit geprüfte Verladung mit zwei Längsstapeln.
+
+        Nur im optionalen Hintereinander-Vergleich. Jeder Bund bleibt ganz und
+        die Reihenfolge innerhalb der beiden Stapel wird beibehalten.
+        Die Positionsprüfung läuft über dieselben can_place_stable/commit_place
+        Funktionen wie die bestehende Hauptverladung.
+        """
+        if not bool(prefer_length_before_stack) or not bool(allow_stack):
+            return pd.DataFrame(), pd.DataFrame()
+        if physical_units is None or len(physical_units) < 3:
+            return pd.DataFrame(), pd.DataFrame()
+        deck_length = safe_number(platform_row.get('Länge_mm'), 0.0)
+        deck_width = safe_number(platform_row.get('Breite_mm'), 0.0)
+        deck_height = safe_number(platform_row.get('Max_Höhe_mm'), 0.0)
+        deck_back = safe_number(platform_row.get('Überhang_hinten_mm'), 0.0)
+        effective_length = (
+            deck_length + deck_back
+            + safe_number(platform_row.get('Überhang_vorne_mm'), 0.0)
+        )
+        base_z = safe_number(platform_row.get('Kantholz_erste_Lage_mm'), base_default)
+        gap = max(0.0, float(gap_default))
+        if deck_width <= 0 or deck_height <= base_z or effective_length <= 0:
+            return pd.DataFrame(), pd.DataFrame()
+
+        records = [row for _, row in physical_units.iterrows()]
+        # Ein schmaler Einzelstapel benötigt eine andere 2D-Suche. Nur breite
+        # Elemente/Bunde als zwei getrennte Stapel hintereinander prüfen.
+        if any(
+            safe_number(u.get('Länge_mm'), 0.0) <= 0.0
+            or safe_number(u.get('Breite_mm'), 0.0) < 0.75 * deck_width
+            or safe_number(u.get('Breite_mm'), 0.0) > deck_width
+            or safe_number(u.get('Höhe_mm'), 0.0) <= 0.0
+            for u in records
+        ):
+            return pd.DataFrame(), pd.DataFrame()
+        if sum(safe_number(u.get('Gewicht_kg'), 0.0) for u in records) + safe_number(
+            platform_row.get('Eigengewicht_Pritsche_kg'), 0.0
+        ) > safe_number(platform_row.get('Max_Gewicht_kg'), 0.0) + 0.01:
+            return pd.DataFrame(), pd.DataFrame()
+
+        def spacer_between(prev: pd.Series, current: pd.Series) -> float:
+            if str(prev.get('Typ', '')).strip() == 'Bund' or str(current.get('Typ', '')).strip() == 'Bund':
+                return max(0.0, float(layer_default))
+            return max(0.0, float(general_default))
+
+        def stack_height(group: List[pd.Series]) -> float:
+            height = base_z
+            prev = None
+            for item in group:
+                if prev is not None:
+                    height += spacer_between(prev, item)
+                height += safe_number(item.get('Höhe_mm'), 0.0)
+                prev = item
+            return height
+
+        splits = []
+        for split in range(1, len(records)):
+            a, b = records[:split], records[split:]
+            length_a = max(safe_number(u.get('Länge_mm'), 0.0) for u in a)
+            length_b = max(safe_number(u.get('Länge_mm'), 0.0) for u in b)
+            span = length_a + gap + length_b
+            if span > effective_length + 0.1:
+                continue
+            height_a, height_b = stack_height(a), stack_height(b)
+            if max(height_a, height_b) > deck_height + 0.1:
+                continue
+            splits.append((abs(height_a - height_b), split, length_a, length_b, span))
+        if not splits:
+            return pd.DataFrame(), pd.DataFrame()
+        # Keine unbegrenzte Kombinatorik bei grossen Aufträgen.
+        splits.sort(key=lambda item: (item[0], -min(item[1], len(records) - item[1])))
+        selected_splits = splits[:12]
+        center = deck_back + deck_length / 2.0
+        best_score = None
+        best_df = pd.DataFrame()
+        best_summary = pd.DataFrame()
+
+        for _balance, split, length_a, length_b, span in selected_splits:
+            centered_start = center - span / 2.0
+            max_start = effective_length - span
+            starts = [
+                centered_start, 0.0, deck_back,
+                max(0.0, deck_back - 500.0),
+                centered_start - 300.0, centered_start + 300.0,
+            ]
+            for raw_start in starts:
+                start = round(min(max(0.0, raw_start), max_start), 1)
+                state = init_platform_state(
+                    platform_row, base_default, layer_default, gap_default
+                )
+                state['prevent_wide_on_narrow'] = bool(prevent_wide_on_narrow)
+                state['min_support_width_ratio'] = max(
+                    0.0, min(1.0, float(compaction_planning_support_ratio))
+                )
+                state['max_unsupported_length_mm'] = max(
+                    0.0, float(max_unsupported_length_mm)
+                )
+                state['max_unsupported_side_mm'] = max(
+                    0.0, float(max_unsupported_side_mm)
+                )
+                state['max_unsupported_length_percent'] = max(
+                    0.0, float(max_unsupported_length_percent)
+                )
+                state['max_unsupported_side_percent'] = max(
+                    0.0, float(max_unsupported_side_percent)
+                )
+                state['prefer_support_quality'] = bool(prefer_support_quality)
+                ok = True
+                for group, stack_x, stack_length in (
+                    (records[:split], start, length_a),
+                    (records[split:], start + length_a + gap, length_b),
+                ):
+                    z = base_z
+                    previous = None
+                    for unit in group:
+                        if previous is not None:
+                            z += spacer_between(previous, unit)
+                        length = float(unit['Länge_mm'])
+                        width = float(unit['Breite_mm'])
+                        height = float(unit['Höhe_mm'])
+                        weight = float(unit['Gewicht_kg'])
+                        # Kürzere Bauteile innerhalb der eigenen Stapelbreite
+                        # zentrieren; keine Verschiebung in den anderen Stapel.
+                        x = round(stack_x + (stack_length - length) / 2.0, 1)
+                        y = round((deck_width - width) / 2.0, 1)
+                        if not can_place_stable(
+                            state, unit, x, y, z, length, width, height, weight
+                        ):
+                            ok = False
+                            break
+                        commit_place(
+                            state, unit, x, y, z, length, width, height, 0,
+                            'Zwei Längsstapel / hintereinander'
+                        )
+                        z += height
+                        previous = unit
+                    if not ok:
+                        break
+                if not ok:
+                    continue
+                candidate_df = pd.DataFrame(state['placements'])
+                if candidate_df.empty:
+                    continue
+                candidate_platform = pd.DataFrame([platform_row])
+                if not find_geometry_conflicts(candidate_df, candidate_platform).empty:
+                    continue
+                # Auch die komplette Auflagekette nachweisen, nicht nur jeden
+                # einzelnen Kandidaten beim schrittweisen Platzieren prüfen.
+                if not _pinned_manual_support_chain_issues(
+                    candidate_df, candidate_platform
+                ).empty:
+                    continue
+                center_metrics = _load_center_of_gravity_values_for_platform(
+                    candidate_df, platform_row
+                )
+                sp_deviation = abs(safe_number(
+                    center_metrics.get('Schwerpunkt_Abstand_X_mm'), 0.0
+                ))
+                used_height = max(
+                    safe_number(row.get('Z_mm'), 0.0)
+                    + safe_number(row.get('Höhe_mm'), 0.0)
+                    for _, row in candidate_df.iterrows()
+                )
+                score = (
+                    sp_deviation * 10.0
+                    + abs(stack_height(records[:split]) - stack_height(records[split:]))
+                    + max(0.0, used_height - deck_height) * 100000.0
+                )
+                if best_score is None or score < best_score:
+                    best_score = score
+                    best_df = candidate_df
+                    best_summary = recompute_summary_from_placements(
+                        candidate_df, candidate_platform
+                    )
+        return best_df, best_summary
+
     def _pack_block_units_on_platform(block_units_top: pd.DataFrame, platform_row: pd.Series) -> Tuple[bool, pd.DataFrame, pd.DataFrame]:
         if block_units_top is None or block_units_top.empty:
             return False, pd.DataFrame(), pd.DataFrame()
@@ -7075,6 +7254,18 @@ def create_variant_a_loading_plan(
         loaded = placements_try[placements_try['Pritsche'] != 'NICHT VERLADEN'].copy()
         wanted_ids = block_units_top['Einheit_ID'].astype(str).tolist()
         loaded_ids = _loaded_block_unit_ids(loaded)
+        # Zuerst unverändert die bisherige Platzierung. Erst wenn nicht
+        # alle Einheiten passen, wird die echte Zweistapel-Variante geprüft.
+        if bool(prefer_length_before_stack) and set(wanted_ids) != set(loaded_ids):
+            two_stacks, two_stack_summary = _try_two_longitudinal_stacks(
+                physical_order, platform_row
+            )
+            if not two_stacks.empty:
+                candidate_ids = _loaded_block_unit_ids(two_stacks)
+                if set(wanted_ids) == set(candidate_ids):
+                    loaded = two_stacks
+                    _summary_try = two_stack_summary
+                    loaded_ids = candidate_ids
         ranked_block = block_units_top.copy()
         ranked_block['_terminal_rank'] = pd.to_numeric(
             ranked_block.get('Logische_Reihenfolge_im_Block'), errors='coerce'
@@ -14299,7 +14490,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
         'Hintereinander-Verladung zusätzlich prüfen (Vergleich)',
         value=False,
         key='try_length_first_compare_v131',
-        help='Berechnet bei mehr als einer Fuhre zusätzlich mit „zuerst hintereinander versuchen“. '
+        help='Prüft zusätzlich echte zwei Längsstapel und bewertet auch die Zahl der belegten Pritschen. '
              'Nur wenn alle Plausibilitätsprüfungen passen und tatsächlich weniger Fuhren entstehen, '
              'wird die Alternative übernommen. Standard bleibt sonst unverändert.',
     )
@@ -14703,25 +14894,37 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                         (find_geometry_conflicts(alt_placements, alt_platforms) is not None
                          and not find_geometry_conflicts(alt_placements, alt_platforms).empty)
                     )
+                    standard_platforms = len(platforms_used_df) if platforms_used_df is not None else 0
+                    alternative_platforms = len(alt_platforms) if alt_platforms is not None else 0
+                    alt_support_errors = (
+                        _pinned_manual_support_chain_issues(alt_placements, alt_platforms)
+                        if alt_platforms is not None and not alt_platforms.empty
+                        else pd.DataFrame([{'Typ': 'Auflagekette'}])
+                    )
+                    alt_physical_conflicts = _pinned_manual_physical_conflicts(alt_placements)
                     improved = (
                         alt_fuhren > 0
-                        and alt_fuhren < standard_fuhren
+                        and alt_fuhren <= standard_fuhren
+                        and alternative_platforms > 0
+                        and alternative_platforms < standard_platforms
                         and alternative_unloaded <= standard_unloaded
                         and not has_hard_errors
                         and not has_geometry_conflicts
+                        and alt_support_errors.empty
+                        and alt_physical_conflicts.empty
                     )
                     if improved:
                         placements_df, summary_df, platforms_used_df, fuhren_log_df, plan_units_df = alternative
                         comparison_text = (
-                            f'Variantenvergleich: Standard {standard_fuhren} Fuhren, '
-                            f'hintereinander {alt_fuhren} Fuhren. '
-                            'Alternative übernommen; Geometrie und Grenzwerte ohne harte Warnungen.'
+                            f'Variantenvergleich: Standard {standard_fuhren} Fuhren / {standard_platforms} Pritschen, '
+                            f'hintereinander {alt_fuhren} Fuhren / {alternative_platforms} Pritschen. '
+                            'Alternative übernommen: weniger Pritschen bei geprüfter Geometrie und Auflage.'
                         )
                     else:
                         comparison_text = (
-                            f'Variantenvergleich: Standard {standard_fuhren} Fuhren, '
-                            f'hintereinander {alt_fuhren} Fuhren. Standard beibehalten '
-                            '(keine geprüfte Verbesserung mit weniger Fuhren).'
+                            f'Variantenvergleich: Standard {standard_fuhren} Fuhren / {standard_platforms} Pritschen, '
+                            f'hintereinander {alt_fuhren} Fuhren / {alternative_platforms} Pritschen. '
+                            'Standard beibehalten (keine geprüfte Verbesserung mit weniger Pritschen).'
                         )
 
             st.session_state['automatic_loading_plan_v84'] = {
