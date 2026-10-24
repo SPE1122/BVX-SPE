@@ -7224,6 +7224,239 @@ def create_variant_a_loading_plan(
                     )
         return best_df, best_summary
 
+    def _try_bridged_longitudinal_stacks(
+        physical_units: pd.DataFrame, platform_row: pd.Series
+    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """V134: geordnete Laengsstapel mit durchgehenden langen Zwischenlagen.
+
+        Die physische (umgekehrte) Attributfolge wird nie umsortiert.
+        Kurze, aufeinanderfolgende Teile werden auf zwei Laengsspuren aufgeteilt.
+        Eine lange Zwischenlage verbindet beide Spuren nur bei gemeinsamem
+        Auflageniveau und nach vollstaendiger Kontakt-/Auflagepruefung.
+        Ungueltige Kandidaten werden verworfen; die bisherige Automatik bleibt.
+        """
+        if not bool(prefer_length_before_stack) or not bool(allow_stack):
+            return pd.DataFrame(), pd.DataFrame()
+        if physical_units is None or len(physical_units) < 3:
+            return pd.DataFrame(), pd.DataFrame()
+        deck_len = safe_number(platform_row.get('Länge_mm'), 0.0)
+        deck_width = safe_number(platform_row.get('Breite_mm'), 0.0)
+        deck_back = safe_number(platform_row.get('Überhang_hinten_mm'), 0.0)
+        deck_eff = deck_len + deck_back + safe_number(platform_row.get('Überhang_vorne_mm'), 0.0)
+        deck_height = safe_number(platform_row.get('Max_Höhe_mm'), 0.0)
+        base_z = safe_number(platform_row.get('Kantholz_erste_Lage_mm'), base_default)
+        gap = max(0.0, float(gap_default))
+        if deck_len <= 0 or deck_width <= 0 or deck_height <= base_z:
+            return pd.DataFrame(), pd.DataFrame()
+
+        records = [r for _, r in physical_units.iterrows()]
+        lengths = [safe_number(r.get('Länge_mm'), 0.0) for r in records]
+        if any(
+            le <= 0 or le > deck_eff or
+            safe_number(r.get('Breite_mm'), 0.0) <= 0 or
+            safe_number(r.get('Breite_mm'), 0.0) > deck_width or
+            safe_number(r.get('Höhe_mm'), 0.0) <= 0
+            for le, r in zip(lengths, records)
+        ):
+            return pd.DataFrame(), pd.DataFrame()
+        if sum(safe_number(r.get('Gewicht_kg'), 0.0) for r in records) + safe_number(
+            platform_row.get('Eigengewicht_Pritsche_kg'), 0.0
+        ) > safe_number(platform_row.get('Max_Gewicht_kg'), 0.0) + 0.01:
+            return pd.DataFrame(), pd.DataFrame()
+
+        # 8-m-Teile bei 7.6-m-Pritschen sind durchgehende Lagen;
+        # 4-m-Teile koennen zwei Laengsstapel bilden.
+        bridge_threshold = max(deck_len * 0.80, min(lengths) * 1.50)
+        phases: List[Tuple[str, Any]] = []
+        short_run: List[pd.Series] = []
+        for row, length in zip(records, lengths):
+            if length >= bridge_threshold:
+                if short_run:
+                    phases.append(('short', short_run))
+                    short_run = []
+                phases.append(('bridge', row))
+            else:
+                short_run.append(row)
+        if short_run:
+            phases.append(('short', short_run))
+        if not any(kind == 'bridge' for kind, _ in phases):
+            return pd.DataFrame(), pd.DataFrame()
+        if not any(kind == 'short' and len(items) >= 2 for kind, items in phases):
+            return pd.DataFrame(), pd.DataFrame()
+
+        def layer_gap(lower: Optional[pd.Series], upper: pd.Series) -> float:
+            if lower is None:
+                return 0.0
+            if (str(lower.get('Typ', '')).strip() == 'Bund'
+                    or str(upper.get('Typ', '')).strip() == 'Bund'):
+                return max(0.0, float(layer_default))
+            return max(0.0, float(general_default))
+
+        def group_height(items: List[pd.Series]) -> float:
+            z = 0.0
+            last = None
+            for item in items:
+                z += layer_gap(last, item) + safe_number(item.get('Höhe_mm'), 0.0)
+                last = item
+            return z
+
+        # Nur wenige ausgeglichene, fortlaufende Teilungen je Kurzteil-Block
+        # ausprobieren. Die Reihenfolge innerhalb jeder Gruppe bleibt erhalten.
+        patterns: List[List[Tuple[str, Any]]] = [[]]
+        for kind, content in phases:
+            if kind == 'bridge':
+                patterns = [p + [('bridge', content)] for p in patterns]
+                continue
+            n = len(content)
+            if n < 2:
+                splits = [n]  # kurzer Einzelteil-Block bleibt in Spur A
+            else:
+                splits = sorted(
+                    range(1, n),
+                    key=lambda i: (
+                        abs(group_height(content[:i]) - group_height(content[i:])),
+                        abs(i - n / 2.0),
+                    ),
+                )[:3]
+            patterns = [
+                p + [('short', (content[:split], content[split:]))]
+                for p in patterns for split in splits
+            ][:16]
+
+        best_rows = pd.DataFrame()
+        best_summary = pd.DataFrame()
+        best_score = None
+        platform_df = pd.DataFrame([platform_row])
+        for pattern in patterns[:16]:
+            left_len = max(
+                [safe_number(r.get('Länge_mm'), 0.0)
+                 for kind, parts in pattern if kind == 'short' for r in parts[0]]
+                or [0.0]
+            )
+            right_len = max(
+                [safe_number(r.get('Länge_mm'), 0.0)
+                 for kind, parts in pattern if kind == 'short' for r in parts[1]]
+                or [0.0]
+            )
+            max_bridge = max(
+                [safe_number(r.get('Länge_mm'), 0.0)
+                 for kind, r in pattern if kind == 'bridge'] or [0.0]
+            )
+            if left_len <= 0 or right_len <= 0:
+                continue
+            pair_span = left_len + gap + right_len
+            span = max(pair_span, max_bridge)
+            if span > deck_eff + 0.1:
+                continue
+            physical_center = deck_back + deck_len / 2.0
+            for raw_start in (
+                physical_center - span / 2.0,
+                deck_back - max(0.0, span - deck_len) / 2.0,
+                0.0,
+                deck_back,
+            ):
+                start = min(max(0.0, raw_start), max(0.0, deck_eff - span))
+                left_x = start + (span - pair_span) / 2.0
+                right_x = left_x + left_len + gap
+                state = init_platform_state(
+                    platform_row, base_default, layer_default, gap_default
+                )
+                state['prevent_wide_on_narrow'] = bool(prevent_wide_on_narrow)
+                state['min_support_width_ratio'] = float(compaction_planning_support_ratio)
+                state['max_unsupported_length_mm'] = float(max_unsupported_length_mm)
+                state['max_unsupported_side_mm'] = float(max_unsupported_side_mm)
+                state['max_unsupported_length_percent'] = float(max_unsupported_length_percent)
+                state['max_unsupported_side_percent'] = float(max_unsupported_side_percent)
+                state['prefer_support_quality'] = bool(prefer_support_quality)
+                top = [base_z, base_z]
+                previous: List[Optional[pd.Series]] = [None, None]
+                ok = True
+
+                def put(unit: pd.Series, x: float, z: float) -> bool:
+                    length = float(unit['Länge_mm'])
+                    width = float(unit['Breite_mm'])
+                    height = float(unit['Höhe_mm'])
+                    weight = float(unit['Gewicht_kg'])
+                    y = (deck_width - width) / 2.0
+                    if not can_place_stable(
+                        state, unit, x, y, z, length, width, height, weight
+                    ):
+                        return False
+                    commit_place(
+                        state, unit, x, y, z, length, width, height,
+                        0, 'Geordnete Laengsstapel / Brueckenlage'
+                    )
+                    return True
+
+                for kind, content in pattern:
+                    if kind == 'short':
+                        for col, group in enumerate(content):
+                            x0 = left_x if col == 0 else right_x
+                            lmax = left_len if col == 0 else right_len
+                            for item in group:
+                                z = top[col] + layer_gap(previous[col], item)
+                                x = x0 + (lmax - float(item['Länge_mm'])) / 2.0
+                                if not put(item, round(x, 1), round(z, 1)):
+                                    ok = False
+                                    break
+                                top[col] = z + float(item['Höhe_mm'])
+                                previous[col] = item
+                            if not ok:
+                                break
+                    else:
+                        long_item = content
+                        # Keine frei schwebende Bruecke: beide Stapel muessen
+                        # auf demselben Niveau stehen. Sonst zurueck zur
+                        # bisherigen Verladelogik, nicht "passend" rechnen.
+                        z_left = top[0] + layer_gap(previous[0], long_item)
+                        z_right = top[1] + layer_gap(previous[1], long_item)
+                        if abs(z_left - z_right) > 1.0:
+                            ok = False
+                        else:
+                            long_length = float(long_item['Länge_mm'])
+                            x = start + (span - long_length) / 2.0
+                            # Lange Einheit muss mit beiden Laengsspur-
+                            # Auflagen ueberlappen, sofern diese existieren.
+                            if previous[0] is not None and previous[1] is not None:
+                                overlap_a = max(0.0, min(x + long_length, left_x + left_len) - max(x, left_x))
+                                overlap_b = max(0.0, min(x + long_length, right_x + right_len) - max(x, right_x))
+                                if min(overlap_a, overlap_b) < 0.20 * min(left_len, right_len):
+                                    ok = False
+                            if ok and not put(long_item, round(x, 1), round(z_left, 1)):
+                                ok = False
+                            if ok:
+                                new_top = z_left + float(long_item['Höhe_mm'])
+                                top = [new_top, new_top]
+                                previous = [long_item, long_item]
+                    if not ok or max(top) > deck_height + 0.1:
+                        ok = False
+                        break
+                if not ok:
+                    continue
+                candidate = pd.DataFrame(state['placements'])
+                if candidate.empty or not find_geometry_conflicts(candidate, platform_df).empty:
+                    continue
+                if not _pinned_manual_support_chain_issues(candidate, platform_df).empty:
+                    continue
+                if not _pinned_manual_physical_conflicts(candidate).empty:
+                    continue
+                cog = _load_center_of_gravity_values_for_platform(candidate, platform_row)
+                sp = abs(safe_number(cog.get('Schwerpunkt_Abstand_X_mm'), 0.0))
+                # Gesamtbild: Schwerpunkt, keine uebertriebene Auskragung,
+                # ausgeglichene Saeulen und niedrige Stapel.
+                real = candidate[candidate['Typ'].apply(_is_real_load_type_value)]
+                rear = max(0.0, deck_back - float(real['X_mm'].min()))
+                front = max(
+                    0.0,
+                    float((real['X_mm'] + real['Länge_mm']).max()) - (deck_back + deck_len),
+                )
+                score = sp * 10.0 + (rear + front) * 0.3 + abs(top[0] - top[1]) * 0.1
+                if best_score is None or score < best_score:
+                    best_score = score
+                    best_rows = candidate
+                    best_summary = recompute_summary_from_placements(candidate, platform_df)
+        return best_rows, best_summary
+
     def _pack_block_units_on_platform(block_units_top: pd.DataFrame, platform_row: pd.Series) -> Tuple[bool, pd.DataFrame, pd.DataFrame]:
         if block_units_top is None or block_units_top.empty:
             return False, pd.DataFrame(), pd.DataFrame()
@@ -7254,18 +7487,52 @@ def create_variant_a_loading_plan(
         loaded = placements_try[placements_try['Pritsche'] != 'NICHT VERLADEN'].copy()
         wanted_ids = block_units_top['Einheit_ID'].astype(str).tolist()
         loaded_ids = _loaded_block_unit_ids(loaded)
-        # Zuerst unverändert die bisherige Platzierung. Erst wenn nicht
-        # alle Einheiten passen, wird die echte Zweistapel-Variante geprüft.
-        if bool(prefer_length_before_stack) and set(wanted_ids) != set(loaded_ids):
+        # V134: Geordnete Laengsstapel IMMER als Alternative testen, auch
+        # wenn die bisherige Packung bereits alle Teile enthaelt. Lange
+        # Zwischenlagen duerfen die zwei Spuren nur abgestuetzt ueberbruecken.
+        if bool(prefer_length_before_stack):
             two_stacks, two_stack_summary = _try_two_longitudinal_stacks(
                 physical_order, platform_row
             )
-            if not two_stacks.empty:
-                candidate_ids = _loaded_block_unit_ids(two_stacks)
-                if set(wanted_ids) == set(candidate_ids):
-                    loaded = two_stacks
-                    _summary_try = two_stack_summary
-                    loaded_ids = candidate_ids
+            bridge_stacks, bridge_summary = _try_bridged_longitudinal_stacks(
+                physical_order, platform_row
+            )
+            checked_options = []
+            for alternative_rows, alternative_summary in (
+                (two_stacks, two_stack_summary),
+                (bridge_stacks, bridge_summary),
+            ):
+                if alternative_rows is None or alternative_rows.empty:
+                    continue
+                if set(_loaded_block_unit_ids(alternative_rows)) != set(wanted_ids):
+                    continue
+                candidate_platform = pd.DataFrame([platform_row])
+                if not find_geometry_conflicts(alternative_rows, candidate_platform).empty:
+                    continue
+                if not _pinned_manual_support_chain_issues(alternative_rows, candidate_platform).empty:
+                    continue
+                if not _pinned_manual_physical_conflicts(alternative_rows).empty:
+                    continue
+                checked_options.append((alternative_rows, alternative_summary))
+
+            def _cog_delta(candidate: pd.DataFrame) -> float:
+                if candidate is None or candidate.empty:
+                    return float('inf')
+                value = _load_center_of_gravity_values_for_platform(candidate, platform_row)
+                return abs(safe_number(value.get('Schwerpunkt_Abstand_X_mm'), 0.0))
+
+            if checked_options:
+                checked_options.sort(key=lambda pair: _cog_delta(pair[0]))
+                candidate_rows, candidate_summary = checked_options[0]
+                default_is_complete = set(wanted_ids) == set(loaded_ids)
+                # Eine saubere Alternative wird bevorzugt, wenn sie die
+                # Verladbarkeit erhaelt und den Schwerpunkt nicht deutlich
+                # schlechter macht. Sonst Standard unveraendert behalten.
+                if (not default_is_complete
+                        or _cog_delta(candidate_rows) <= _cog_delta(loaded) + 150.0):
+                    loaded = candidate_rows
+                    _summary_try = candidate_summary
+                    loaded_ids = _loaded_block_unit_ids(loaded)
         ranked_block = block_units_top.copy()
         ranked_block['_terminal_rank'] = pd.to_numeric(
             ranked_block.get('Logische_Reihenfolge_im_Block'), errors='coerce'
