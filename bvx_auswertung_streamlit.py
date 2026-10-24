@@ -7073,11 +7073,11 @@ def create_variant_a_loading_plan(
             return pd.DataFrame(), pd.DataFrame()
 
         records = [row for _, row in physical_units.iterrows()]
-        # Ein schmaler Einzelstapel benötigt eine andere 2D-Suche. Nur breite
-        # Elemente/Bunde als zwei getrennte Stapel hintereinander prüfen.
+        # Keine Mindestbreite: auch schmale Elemente/Bunde als zwei
+        # mittige Längsstapel prüfen. Nullbreiten bleiben unzulässig.
         if any(
             safe_number(u.get('Länge_mm'), 0.0) <= 0.0
-            or safe_number(u.get('Breite_mm'), 0.0) < 0.75 * deck_width
+            or safe_number(u.get('Breite_mm'), 0.0) <= 0.0
             or safe_number(u.get('Breite_mm'), 0.0) > deck_width
             or safe_number(u.get('Höhe_mm'), 0.0) <= 0.0
             for u in records
