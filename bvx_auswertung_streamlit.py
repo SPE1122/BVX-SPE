@@ -7045,8 +7045,35 @@ def create_variant_a_loading_plan(
             real_loads = real_loads[real_loads['Typ'].apply(_is_real_load_type_value)]
         return real_loads.get('Einheit_ID', pd.Series(dtype=str)).dropna().astype(str).tolist()
 
+    def _longitudinal_diag_hit(diag: Optional[Dict[str, Any]], variant: str, reason: str) -> None:
+        """Nur Diagnosezaehler, keine Aenderung der Platzierungsentscheidung."""
+        if diag is None:
+            return
+        reasons = diag.setdefault(variant, {})
+        reasons[reason] = int(reasons.get(reason, 0)) + 1
+
+    def _longitudinal_reject_reason(
+        state: Dict[str, Any], unit: pd.Series, x: float, y: float, z: float,
+        length: float, width: float, height: float, weight: float,
+    ) -> str:
+        """Warum eine konkrete Position von can_place_stable abgelehnt wurde."""
+        if state['total_weight'] + weight + state.get('Eigengewicht_Pritsche_kg', 0.0) > state['Max_Gewicht_kg']:
+            return 'Gewicht'
+        if x < -0.01 or x + length > state['Eff_Länge_mm'] + 0.01:
+            return 'Länge / erlaubter Überhang'
+        if y < -0.01 or y + width > state['Breite_mm'] + 0.01:
+            return 'Breite'
+        if z < -0.01 or z + height > state['Max_Höhe_mm'] + 0.01:
+            return 'Höhe'
+        if _blocked_by_runge(state, y, z, width):
+            return 'Runge'
+        if _collides_with_existing_real_load(state, x, y, z, length, width, height):
+            return 'Kollision'
+        return 'Auflage / freier Überstand (Stabilitätsprüfung)'
+
     def _try_two_longitudinal_stacks(
-        physical_units: pd.DataFrame, platform_row: pd.Series
+        physical_units: pd.DataFrame, platform_row: pd.Series,
+        diagnostic: Optional[Dict[str, Any]] = None,
     ) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """V132: zusätzliche, explizit geprüfte Verladung mit zwei Längsstapeln.
 
@@ -7055,9 +7082,12 @@ def create_variant_a_loading_plan(
         Die Positionsprüfung läuft über dieselben can_place_stable/commit_place
         Funktionen wie die bestehende Hauptverladung.
         """
+        variant = 'Zwei Längsstapel'
         if not bool(prefer_length_before_stack) or not bool(allow_stack):
+            _longitudinal_diag_hit(diagnostic, variant, 'Option deaktiviert')
             return pd.DataFrame(), pd.DataFrame()
         if physical_units is None or len(physical_units) < 3:
+            _longitudinal_diag_hit(diagnostic, variant, 'Zu wenige Verladeeinheiten')
             return pd.DataFrame(), pd.DataFrame()
         deck_length = safe_number(platform_row.get('Länge_mm'), 0.0)
         deck_width = safe_number(platform_row.get('Breite_mm'), 0.0)
@@ -7070,6 +7100,7 @@ def create_variant_a_loading_plan(
         base_z = safe_number(platform_row.get('Kantholz_erste_Lage_mm'), base_default)
         gap = max(0.0, float(gap_default))
         if deck_width <= 0 or deck_height <= base_z or effective_length <= 0:
+            _longitudinal_diag_hit(diagnostic, variant, 'Ungültige Pritschenmasse')
             return pd.DataFrame(), pd.DataFrame()
 
         records = [row for _, row in physical_units.iterrows()]
@@ -7082,10 +7113,12 @@ def create_variant_a_loading_plan(
             or safe_number(u.get('Höhe_mm'), 0.0) <= 0.0
             for u in records
         ):
+            _longitudinal_diag_hit(diagnostic, variant, 'Bauteilabmessungen ausserhalb der Grenzen')
             return pd.DataFrame(), pd.DataFrame()
         if sum(safe_number(u.get('Gewicht_kg'), 0.0) for u in records) + safe_number(
             platform_row.get('Eigengewicht_Pritsche_kg'), 0.0
         ) > safe_number(platform_row.get('Max_Gewicht_kg'), 0.0) + 0.01:
+            _longitudinal_diag_hit(diagnostic, variant, 'Gewicht')
             return pd.DataFrame(), pd.DataFrame()
 
         def spacer_between(prev: pd.Series, current: pd.Series) -> float:
@@ -7110,12 +7143,15 @@ def create_variant_a_loading_plan(
             length_b = max(safe_number(u.get('Länge_mm'), 0.0) for u in b)
             span = length_a + gap + length_b
             if span > effective_length + 0.1:
+                _longitudinal_diag_hit(diagnostic, variant, 'Gesamtlänge / Überhang')
                 continue
             height_a, height_b = stack_height(a), stack_height(b)
             if max(height_a, height_b) > deck_height + 0.1:
+                _longitudinal_diag_hit(diagnostic, variant, 'Ladehöhe')
                 continue
             splits.append((abs(height_a - height_b), split, length_a, length_b, span))
         if not splits:
+            _longitudinal_diag_hit(diagnostic, variant, 'Keine gültige Teilung nach Länge und Höhe')
             return pd.DataFrame(), pd.DataFrame()
         # Keine unbegrenzte Kombinatorik bei grossen Aufträgen.
         splits.sort(key=lambda item: (item[0], -min(item[1], len(records) - item[1])))
@@ -7176,6 +7212,9 @@ def create_variant_a_loading_plan(
                         if not can_place_stable(
                             state, unit, x, y, z, length, width, height, weight
                         ):
+                            _longitudinal_diag_hit(diagnostic, variant, _longitudinal_reject_reason(
+                                state, unit, x, y, z, length, width, height, weight
+                            ))
                             ok = False
                             break
                         commit_place(
@@ -7193,12 +7232,14 @@ def create_variant_a_loading_plan(
                     continue
                 candidate_platform = pd.DataFrame([platform_row])
                 if not find_geometry_conflicts(candidate_df, candidate_platform).empty:
+                    _longitudinal_diag_hit(diagnostic, variant, 'Kollision / Geometrie in Gesamtprüfung')
                     continue
                 # Auch die komplette Auflagekette nachweisen, nicht nur jeden
                 # einzelnen Kandidaten beim schrittweisen Platzieren prüfen.
                 if not _pinned_manual_support_chain_issues(
                     candidate_df, candidate_platform
                 ).empty:
+                    _longitudinal_diag_hit(diagnostic, variant, 'Auflagekette nicht nachgewiesen')
                     continue
                 center_metrics = _load_center_of_gravity_values_for_platform(
                     candidate_df, platform_row
@@ -7222,10 +7263,13 @@ def create_variant_a_loading_plan(
                     best_summary = recompute_summary_from_placements(
                         candidate_df, candidate_platform
                     )
+        _longitudinal_diag_hit(diagnostic, variant,
+            'Gültige Variante gefunden' if not best_df.empty else 'Keine Position besteht alle Prüfungen')
         return best_df, best_summary
 
     def _try_bridged_longitudinal_stacks(
-        physical_units: pd.DataFrame, platform_row: pd.Series
+        physical_units: pd.DataFrame, platform_row: pd.Series,
+        diagnostic: Optional[Dict[str, Any]] = None,
     ) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """V134: geordnete Laengsstapel mit durchgehenden langen Zwischenlagen.
 
@@ -7235,9 +7279,12 @@ def create_variant_a_loading_plan(
         Auflageniveau und nach vollstaendiger Kontakt-/Auflagepruefung.
         Ungueltige Kandidaten werden verworfen; die bisherige Automatik bleibt.
         """
+        variant = 'Lange Brückenlagen'
         if not bool(prefer_length_before_stack) or not bool(allow_stack):
+            _longitudinal_diag_hit(diagnostic, variant, 'Option deaktiviert')
             return pd.DataFrame(), pd.DataFrame()
         if physical_units is None or len(physical_units) < 3:
+            _longitudinal_diag_hit(diagnostic, variant, 'Zu wenige Verladeeinheiten')
             return pd.DataFrame(), pd.DataFrame()
         deck_len = safe_number(platform_row.get('Länge_mm'), 0.0)
         deck_width = safe_number(platform_row.get('Breite_mm'), 0.0)
@@ -7247,6 +7294,7 @@ def create_variant_a_loading_plan(
         base_z = safe_number(platform_row.get('Kantholz_erste_Lage_mm'), base_default)
         gap = max(0.0, float(gap_default))
         if deck_len <= 0 or deck_width <= 0 or deck_height <= base_z:
+            _longitudinal_diag_hit(diagnostic, variant, 'Ungültige Pritschenmasse')
             return pd.DataFrame(), pd.DataFrame()
 
         records = [r for _, r in physical_units.iterrows()]
@@ -7258,10 +7306,12 @@ def create_variant_a_loading_plan(
             safe_number(r.get('Höhe_mm'), 0.0) <= 0
             for le, r in zip(lengths, records)
         ):
+            _longitudinal_diag_hit(diagnostic, variant, 'Bauteilabmessungen ausserhalb der Grenzen')
             return pd.DataFrame(), pd.DataFrame()
         if sum(safe_number(r.get('Gewicht_kg'), 0.0) for r in records) + safe_number(
             platform_row.get('Eigengewicht_Pritsche_kg'), 0.0
         ) > safe_number(platform_row.get('Max_Gewicht_kg'), 0.0) + 0.01:
+            _longitudinal_diag_hit(diagnostic, variant, 'Gewicht')
             return pd.DataFrame(), pd.DataFrame()
 
         # 8-m-Teile bei 7.6-m-Pritschen sind durchgehende Lagen;
@@ -7280,8 +7330,10 @@ def create_variant_a_loading_plan(
         if short_run:
             phases.append(('short', short_run))
         if not any(kind == 'bridge' for kind, _ in phases):
+            _longitudinal_diag_hit(diagnostic, variant, 'Keine langen Zwischenlagen vorhanden')
             return pd.DataFrame(), pd.DataFrame()
         if not any(kind == 'short' and len(items) >= 2 for kind, items in phases):
+            _longitudinal_diag_hit(diagnostic, variant, 'Keine passende Kurzteilgruppe zwischen langen Lagen')
             return pd.DataFrame(), pd.DataFrame()
 
         def layer_gap(lower: Optional[pd.Series], upper: pd.Series) -> float:
@@ -7343,10 +7395,12 @@ def create_variant_a_loading_plan(
                  for kind, r in pattern if kind == 'bridge'] or [0.0]
             )
             if left_len <= 0 or right_len <= 0:
+                _longitudinal_diag_hit(diagnostic, variant, 'Zwei Längsstapel nicht bildbar')
                 continue
             pair_span = left_len + gap + right_len
             span = max(pair_span, max_bridge)
             if span > deck_eff + 0.1:
+                _longitudinal_diag_hit(diagnostic, variant, 'Gesamtlänge / Überhang')
                 continue
             physical_center = deck_back + deck_len / 2.0
             for raw_start in (
@@ -7381,6 +7435,9 @@ def create_variant_a_loading_plan(
                     if not can_place_stable(
                         state, unit, x, y, z, length, width, height, weight
                     ):
+                        _longitudinal_diag_hit(diagnostic, variant, _longitudinal_reject_reason(
+                            state, unit, x, y, z, length, width, height, weight
+                        ))
                         return False
                     commit_place(
                         state, unit, x, y, z, length, width, height,
@@ -7411,6 +7468,7 @@ def create_variant_a_loading_plan(
                         z_left = top[0] + layer_gap(previous[0], long_item)
                         z_right = top[1] + layer_gap(previous[1], long_item)
                         if abs(z_left - z_right) > 1.0:
+                            _longitudinal_diag_hit(diagnostic, variant, 'Brückenauflager nicht auf gleicher Höhe')
                             ok = False
                         else:
                             long_length = float(long_item['Länge_mm'])
@@ -7421,6 +7479,7 @@ def create_variant_a_loading_plan(
                                 overlap_a = max(0.0, min(x + long_length, left_x + left_len) - max(x, left_x))
                                 overlap_b = max(0.0, min(x + long_length, right_x + right_len) - max(x, right_x))
                                 if min(overlap_a, overlap_b) < 0.20 * min(left_len, right_len):
+                                    _longitudinal_diag_hit(diagnostic, variant, 'Zu wenig Überdeckung auf beiden Stapeln')
                                     ok = False
                             if ok and not put(long_item, round(x, 1), round(z_left, 1)):
                                 ok = False
@@ -7429,16 +7488,21 @@ def create_variant_a_loading_plan(
                                 top = [new_top, new_top]
                                 previous = [long_item, long_item]
                     if not ok or max(top) > deck_height + 0.1:
+                        if ok:
+                            _longitudinal_diag_hit(diagnostic, variant, 'Ladehöhe')
                         ok = False
                         break
                 if not ok:
                     continue
                 candidate = pd.DataFrame(state['placements'])
                 if candidate.empty or not find_geometry_conflicts(candidate, platform_df).empty:
+                    _longitudinal_diag_hit(diagnostic, variant, 'Kollision / Geometrie in Gesamtprüfung')
                     continue
                 if not _pinned_manual_support_chain_issues(candidate, platform_df).empty:
+                    _longitudinal_diag_hit(diagnostic, variant, 'Auflagekette nicht nachgewiesen')
                     continue
                 if not _pinned_manual_physical_conflicts(candidate).empty:
+                    _longitudinal_diag_hit(diagnostic, variant, 'Physische Kollision')
                     continue
                 cog = _load_center_of_gravity_values_for_platform(candidate, platform_row)
                 sp = abs(safe_number(cog.get('Schwerpunkt_Abstand_X_mm'), 0.0))
@@ -7455,6 +7519,8 @@ def create_variant_a_loading_plan(
                     best_score = score
                     best_rows = candidate
                     best_summary = recompute_summary_from_placements(candidate, platform_df)
+        _longitudinal_diag_hit(diagnostic, variant,
+            'Gültige Variante gefunden' if not best_rows.empty else 'Keine Position besteht alle Prüfungen')
         return best_rows, best_summary
 
     def _pack_block_units_on_platform(block_units_top: pd.DataFrame, platform_row: pd.Series) -> Tuple[bool, pd.DataFrame, pd.DataFrame]:
@@ -7487,33 +7553,36 @@ def create_variant_a_loading_plan(
         loaded = placements_try[placements_try['Pritsche'] != 'NICHT VERLADEN'].copy()
         wanted_ids = block_units_top['Einheit_ID'].astype(str).tolist()
         loaded_ids = _loaded_block_unit_ids(loaded)
-        # V134: Geordnete Laengsstapel IMMER als Alternative testen, auch
-        # wenn die bisherige Packung bereits alle Teile enthaelt. Lange
-        # Zwischenlagen duerfen die zwei Spuren nur abgestuetzt ueberbruecken.
+        # Nur Diagnose sammeln; die Packentscheidung bleibt unveraendert.
+        longitudinal_diag: Dict[str, Any] = {'Entscheidung': 'Standardverladung'}
         if bool(prefer_length_before_stack):
             two_stacks, two_stack_summary = _try_two_longitudinal_stacks(
-                physical_order, platform_row
+                physical_order, platform_row, diagnostic=longitudinal_diag
             )
             bridge_stacks, bridge_summary = _try_bridged_longitudinal_stacks(
-                physical_order, platform_row
+                physical_order, platform_row, diagnostic=longitudinal_diag
             )
             checked_options = []
-            for alternative_rows, alternative_summary in (
-                (two_stacks, two_stack_summary),
-                (bridge_stacks, bridge_summary),
+            for variant_name, alternative_rows, alternative_summary in (
+                ('Zwei Längsstapel', two_stacks, two_stack_summary),
+                ('Lange Brückenlagen', bridge_stacks, bridge_summary),
             ):
                 if alternative_rows is None or alternative_rows.empty:
                     continue
                 if set(_loaded_block_unit_ids(alternative_rows)) != set(wanted_ids):
+                    _longitudinal_diag_hit(longitudinal_diag, variant_name, 'Nicht alle Verladeeinheiten enthalten')
                     continue
                 candidate_platform = pd.DataFrame([platform_row])
                 if not find_geometry_conflicts(alternative_rows, candidate_platform).empty:
+                    _longitudinal_diag_hit(longitudinal_diag, variant_name, 'Kollision / Geometrie in Gesamtprüfung')
                     continue
                 if not _pinned_manual_support_chain_issues(alternative_rows, candidate_platform).empty:
+                    _longitudinal_diag_hit(longitudinal_diag, variant_name, 'Auflagekette nicht nachgewiesen')
                     continue
                 if not _pinned_manual_physical_conflicts(alternative_rows).empty:
+                    _longitudinal_diag_hit(longitudinal_diag, variant_name, 'Physische Kollision')
                     continue
-                checked_options.append((alternative_rows, alternative_summary))
+                checked_options.append((alternative_rows, alternative_summary, variant_name))
 
             def _cog_delta(candidate: pd.DataFrame) -> float:
                 if candidate is None or candidate.empty:
@@ -7523,16 +7592,26 @@ def create_variant_a_loading_plan(
 
             if checked_options:
                 checked_options.sort(key=lambda pair: _cog_delta(pair[0]))
-                candidate_rows, candidate_summary = checked_options[0]
+                candidate_rows, candidate_summary, candidate_variant = checked_options[0]
                 default_is_complete = set(wanted_ids) == set(loaded_ids)
-                # Eine saubere Alternative wird bevorzugt, wenn sie die
-                # Verladbarkeit erhaelt und den Schwerpunkt nicht deutlich
-                # schlechter macht. Sonst Standard unveraendert behalten.
+                default_delta = _cog_delta(loaded)
+                candidate_delta = _cog_delta(candidate_rows)
+                # Exakt dieselbe 150-mm-Schwelle wie vor der Diagnose.
                 if (not default_is_complete
-                        or _cog_delta(candidate_rows) <= _cog_delta(loaded) + 150.0):
+                        or candidate_delta <= default_delta + 150.0):
                     loaded = candidate_rows
                     _summary_try = candidate_summary
                     loaded_ids = _loaded_block_unit_ids(loaded)
+                    longitudinal_diag['Entscheidung'] = (
+                        f'{candidate_variant} übernommen (SP {candidate_delta:.0f} mm)'
+                    )
+                else:
+                    longitudinal_diag['Entscheidung'] = (
+                        f'Standard behalten: alternative SP-Abweichung {candidate_delta:.0f} mm '
+                        f'gegenüber Standard {default_delta:.0f} mm (Grenze +150 mm)'
+                    )
+            else:
+                longitudinal_diag['Entscheidung'] = 'Standard behalten: keine vollständig gültige geordnete Variante'
         ranked_block = block_units_top.copy()
         ranked_block['_terminal_rank'] = pd.to_numeric(
             ranked_block.get('Logische_Reihenfolge_im_Block'), errors='coerce'
@@ -7614,6 +7693,8 @@ def create_variant_a_loading_plan(
                 lambda v: v if 'V21 Pritschenblock' in v else f'{v} / V21 Pritschenblock'
             )
         summary = recompute_summary_from_placements(loaded, platform_df)
+        if bool(prefer_length_before_stack):
+            loaded.attrs['longitudinal_diagnostic'] = longitudinal_diag
         return True, loaded, summary
 
     def _find_max_part_block_for_platform(parts_df: pd.DataFrame, platform_row: pd.Series, unit_start: int) -> Dict[str, Any]:
@@ -7701,6 +7782,7 @@ def create_variant_a_loading_plan(
         summary_frames: List[pd.DataFrame] = []
         used_platform_frames: List[pd.DataFrame] = []
         unit_frames: List[pd.DataFrame] = []
+        diagnostic_rows: List[Dict[str, str]] = []
         loaded_part_count = 0
         first_label = ''
         last_label = ''
@@ -7720,6 +7802,32 @@ def create_variant_a_loading_plan(
 
             units_for_platform = candidate['units'].copy()
             unit_counter += len(units_for_platform)
+            if bool(prefer_length_before_stack):
+                details = candidate['loaded'].attrs.get('longitudinal_diagnostic', {})
+                if details:
+                    parts = []
+                    for variant in ('Zwei Längsstapel', 'Lange Brückenlagen'):
+                        counts = details.get(variant, {})
+                        if counts:
+                            # Die zaehlbaren Ablehnungen stehen vor dem
+                            # allgemeinen Status. Bis zu drei Hauptursachen.
+                            reasons = sorted(
+                                ((key, value) for key, value in counts.items()
+                                 if key != 'Gültige Variante gefunden'),
+                                key=lambda pair: (-pair[1], pair[0]),
+                            )
+                            if 'Gültige Variante gefunden' in counts:
+                                parts.append(f"{variant}: gültig")
+                            elif reasons:
+                                parts.append(
+                                    f"{variant}: " +
+                                    "; ".join(f"{name} ({n})" for name, n in reasons[:3])
+                                )
+                    diagnostic_rows.append({
+                        'Pritsche': str(platform_row.get('Pritschenname', platform_row.get('Pritsche', ''))),
+                        'Ergebnis': str(details.get('Entscheidung', '')),
+                        'Prüfungen': ' | '.join(parts) or 'Keine Auswertung vorhanden',
+                    })
             placement_frames.append(candidate['loaded'])
             summary_frames.append(candidate['summary'])
             used_platform_frames.append(pd.DataFrame([platform_row]))
@@ -7751,6 +7859,7 @@ def create_variant_a_loading_plan(
             'first_label': first_label,
             'last_label': last_label,
             'next_unit_counter': unit_counter,
+            'longitudinal_diagnostic_rows': diagnostic_rows,
         }
 
     if enabled_options.empty:
@@ -7834,6 +7943,10 @@ def create_variant_a_loading_plan(
             'Pritschen_Trennattribut': split_attr_clean,
             'Pritschen_Trenngruppe': active_split_group,
             'Restplatz_mit_naechster_Gruppe_auffuellen': bool(fill_remainder_next_group),
+            'Diagnose_Längsstapel': ' / '.join(
+                f"{d['Pritsche']}: {d['Ergebnis']} | {d['Prüfungen']}"
+                for d in best_try.get('longitudinal_diagnostic_rows', [])
+            ) if bool(prefer_length_before_stack) else '',
         })
 
         remaining_parts = remaining_parts.iloc[int(best_try['parts_loaded_count']):].copy().reset_index(drop=True)
@@ -15137,6 +15250,12 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                             avoid_unnecessary_overhang=bool(avoid_unnecessary_overhang),
                         )
                     alt_placements, alt_summary, alt_platforms, alt_log, alt_units = alternative
+                    longitudinal_diagnostic_report = alt_log[[
+                        col for col in (
+                            'Fuhre_Nr', 'Pritschen_Trenngruppe', 'Pritschen',
+                            'Diagnose_Längsstapel'
+                        ) if col in alt_log.columns
+                    ]].copy() if alt_log is not None and not alt_log.empty else pd.DataFrame()
                     alt_fuhren = len(alt_log) if alt_log is not None else 0
 
                     def _unloaded_part_count(df: pd.DataFrame) -> int:
@@ -15195,6 +15314,11 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                         )
 
             st.session_state['automatic_loading_plan_v84'] = {
+                'longitudinal_diagnostic_report': (
+                    longitudinal_diagnostic_report
+                    if bool(try_length_first_compare) and 'longitudinal_diagnostic_report' in locals()
+                    else pd.DataFrame()
+                ),
                 'signature': automatic_input_signature,
                 'placements': placements_df,
                 'summary': summary_df,
@@ -15235,6 +15359,11 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
         comparison_text_display = str(st.session_state.get('automatic_loading_plan_v84', {}).get('comparison_text', ''))
         if comparison_text_display:
             st.info(comparison_text_display)
+        report = st.session_state.get('automatic_loading_plan_v84', {}).get('longitudinal_diagnostic_report')
+        if isinstance(report, pd.DataFrame) and not report.empty:
+            with st.expander('Diagnose Längsverladung – warum wurde eine Stapelvariante verworfen?', expanded=False):
+                st.caption('Zeigt die wichtigsten Ablehnungsgründe je Fuhre und WP-Gruppe. Die Zahlen sind verworfene Positionsversuche, keine Fehler an einzelnen Bauteilen. Die Diagnose ändert den Verladeplan nicht.')
+                st.dataframe(report, use_container_width=True, hide_index=True)
 
     if placements_df.attrs.get('Verdichtungsbudget_erreicht'):
         st.warning(
