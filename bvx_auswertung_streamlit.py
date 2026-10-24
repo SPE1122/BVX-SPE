@@ -14295,6 +14295,14 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
     allow_beside = col1.checkbox('Nebeneinander erlauben', value=True)
     allow_stack = col2.checkbox('Übereinander erlauben', value=True)
     allow_rotation = col3.checkbox('90° hochkant drehen erlauben, wenn Pritsche es erlaubt', value=False, help='Hochkant bedeutet: Länge bleibt gleich, Breite und Höhe werden getauscht.')
+    try_length_first_compare = st.checkbox(
+        'Hintereinander-Verladung zusätzlich prüfen (Vergleich)',
+        value=False,
+        key='try_length_first_compare_v131',
+        help='Berechnet bei mehr als einer Fuhre zusätzlich mit „zuerst hintereinander versuchen“. '
+             'Nur wenn alle Plausibilitätsprüfungen passen und tatsächlich weniger Fuhren entstehen, '
+             'wird die Alternative übernommen. Standard bleibt sonst unverändert.',
+    )
     center_geometric = True
     max_fuhren = col4.number_input('Max. Fuhren Sicherheitslimit', min_value=1, max_value=200, value=50, step=1)
     enable_multilayer_compaction = st.checkbox(
@@ -14537,6 +14545,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
             'allow_beside': bool(allow_beside),
             'allow_stack': bool(allow_stack),
             'allow_rotation': bool(allow_rotation),
+            'try_length_first_compare': bool(try_length_first_compare),
             'max_fuhren': int(max_fuhren),
             'use_bundles': bool(use_bundles),
             'max_bundle_weight': float(max_bundle_weight),
@@ -14626,6 +14635,95 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                 enable_multilayer_compaction=bool(enable_multilayer_compaction),
                 avoid_unnecessary_overhang=bool(avoid_unnecessary_overhang),
             )
+
+            # V131: rein optionaler Vergleich. Die Standardberechnung und deren
+            # Reihenfolge bleiben die unveränderte Ausgangsbasis.
+            comparison_text = ''
+            if bool(try_length_first_compare):
+                standard_fuhren = len(fuhren_log_df) if fuhren_log_df is not None else 0
+                if standard_fuhren <= 1:
+                    comparison_text = 'Variantenvergleich: Standard hat höchstens eine Fuhre; keine zweite Berechnung nötig.'
+                else:
+                    with st.spinner('Alternative: zuerst hintereinander versuchen ...'):
+                        alternative = create_variant_a_loading_plan(
+                            sorted_parts_for_loading,
+                            options_edit,
+                            pritschen_edit,
+                            standards=standards,
+                            allow_beside=allow_beside,
+                            allow_stack=allow_stack,
+                            allow_rotation=allow_rotation,
+                            center_geometric=center_geometric,
+                            max_fuhren=int(max_fuhren),
+                            use_bundles=use_bundles,
+                            max_bundle_weight=max_bundle_weight,
+                            bundle_spacer_height=bundle_spacer_height,
+                            general_spacer_height=general_spacer_height,
+                            same_height=same_height,
+                            same_width=same_width,
+                            same_quality=same_quality,
+                            same_profile=same_profile,
+                            label_attr=display_label_attr,
+                            same_attrs=bundle_match_attrs,
+                            bundle_order_flex_percent=float(effective_bundle_order_flex_percent),
+                            prevent_wide_on_narrow=bool(prevent_wide_on_narrow),
+                            min_support_width_ratio=float(min_support_width_percent) / 100.0,
+                            max_unsupported_length_percent=float(max_unsupported_length_percent),
+                            max_unsupported_side_percent=float(max_unsupported_side_percent),
+                            prefer_length_before_stack=True,
+                            fuhre_split_attr=effective_fuhre_split_attr,
+                            fill_remainder_next_group=bool(fill_remainder_next_group),
+                            prefer_stable_option=bool(compact_transport_strategy),
+                            prefer_support_quality=bool(prefer_support_quality),
+                            enable_multilayer_compaction=bool(enable_multilayer_compaction),
+                            avoid_unnecessary_overhang=bool(avoid_unnecessary_overhang),
+                        )
+                    alt_placements, alt_summary, alt_platforms, alt_log, alt_units = alternative
+                    alt_fuhren = len(alt_log) if alt_log is not None else 0
+
+                    def _unloaded_part_count(df: pd.DataFrame) -> int:
+                        if df is None or df.empty or 'Pritsche' not in df.columns:
+                            return 0
+                        missing = df[df['Pritsche'].astype(str).eq('NICHT VERLADEN')]
+                        if missing.empty:
+                            return 0
+                        return int(pd.to_numeric(missing['Anzahl_Bauteile'], errors='coerce').fillna(1).sum())
+
+                    standard_unloaded = _unloaded_part_count(placements_df)
+                    alternative_unloaded = _unloaded_part_count(alt_placements)
+                    alt_errors = compute_loading_warnings(alt_placements, alt_platforms)
+                    hard_error_types = {'Position', 'Länge', 'Breite', 'Höhe', 'Gewicht', 'Pritsche', 'Kollision'}
+                    has_hard_errors = bool(
+                        alt_errors is not None and not alt_errors.empty
+                        and 'Typ' in alt_errors.columns
+                        and alt_errors['Typ'].astype(str).isin(hard_error_types).any()
+                    )
+                    has_geometry_conflicts = bool(
+                        alt_platforms is None or alt_platforms.empty or
+                        (find_geometry_conflicts(alt_placements, alt_platforms) is not None
+                         and not find_geometry_conflicts(alt_placements, alt_platforms).empty)
+                    )
+                    improved = (
+                        alt_fuhren > 0
+                        and alt_fuhren < standard_fuhren
+                        and alternative_unloaded <= standard_unloaded
+                        and not has_hard_errors
+                        and not has_geometry_conflicts
+                    )
+                    if improved:
+                        placements_df, summary_df, platforms_used_df, fuhren_log_df, plan_units_df = alternative
+                        comparison_text = (
+                            f'Variantenvergleich: Standard {standard_fuhren} Fuhren, '
+                            f'hintereinander {alt_fuhren} Fuhren. '
+                            'Alternative übernommen; Geometrie und Grenzwerte ohne harte Warnungen.'
+                        )
+                    else:
+                        comparison_text = (
+                            f'Variantenvergleich: Standard {standard_fuhren} Fuhren, '
+                            f'hintereinander {alt_fuhren} Fuhren. Standard beibehalten '
+                            '(keine geprüfte Verbesserung mit weniger Fuhren).'
+                        )
+
             st.session_state['automatic_loading_plan_v84'] = {
                 'signature': automatic_input_signature,
                 'placements': placements_df,
@@ -14633,6 +14731,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                 'platforms': platforms_used_df,
                 'fuhren_log': fuhren_log_df,
                 'units': plan_units_df,
+                'comparison_text': comparison_text,
             }
         else:
             plan_is_stale = str(stored_plan.get('signature', '')) != automatic_input_signature
@@ -14662,6 +14761,10 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
 
     if plan_is_stale:
         st.warning('Eingaben wurden geändert. Der angezeigte automatische Plan bleibt unverändert. Für eine neue Berechnung bitte „Verladung starten / neu berechnen“ drücken.')
+    if verladeart == 'Automatisch':
+        comparison_text_display = str(st.session_state.get('automatic_loading_plan_v84', {}).get('comparison_text', ''))
+        if comparison_text_display:
+            st.info(comparison_text_display)
 
     if placements_df.attrs.get('Verdichtungsbudget_erreicht'):
         st.warning(
