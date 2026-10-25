@@ -15288,29 +15288,168 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                         else pd.DataFrame([{'Typ': 'Auflagekette'}])
                     )
                     alt_physical_conflicts = _pinned_manual_physical_conflicts(alt_placements)
-                    improved = (
+
+                    # V135: auch bei gleicher Pritschenzahl darf eine tatsächlich
+                    # geordnetere, vollständig geprüfte Längsverladung gewinnen.
+                    # Original-Bauteile, WP-Gruppen und Fuhrenabfolge müssen gleich bleiben.
+                    def _real_load_rows(df: pd.DataFrame) -> pd.DataFrame:
+                        if df is None or df.empty or 'Typ' not in df.columns:
+                            return pd.DataFrame()
+                        real = df.loc[df['Typ'].apply(_is_real_load_type_value)].copy()
+                        if 'Pritsche' in real.columns:
+                            real = real.loc[real['Pritsche'].astype(str).ne('NICHT VERLADEN')]
+                        return real
+
+                    def _loaded_unit_signature(df: pd.DataFrame) -> Counter:
+                        real = _real_load_rows(df)
+                        if real.empty or 'Einheit_ID' not in real.columns:
+                            return Counter()
+                        return Counter(real['Einheit_ID'].astype(str).tolist())
+
+                    def _wp_group_signature(df: pd.DataFrame) -> List[tuple]:
+                        if df is None or df.empty:
+                            return []
+                        fields = ('Pritschen_Trenngruppe', 'Pritschen_Trennattribut',
+                                  'Fuhrenoption', 'Pritschen', 'Bauteile')
+                        return [
+                            tuple(str(row.get(k, '')) for k in fields)
+                            for _, row in df.iterrows()
+                        ]
+
+                    def _coordinates_signature(df: pd.DataFrame) -> List[tuple]:
+                        real = _real_load_rows(df)
+                        if real.empty:
+                            return []
+                        keys = ('Pritsche', 'Einheit_ID', 'X_mm', 'Y_mm', 'Z_mm',
+                                'Länge_mm', 'Breite_mm', 'Höhe_mm')
+                        tuples = []
+                        for _, row in real.iterrows():
+                            tuples.append(tuple(
+                                round(safe_number(row.get(k), 0.0), 1)
+                                if k.endswith('_mm') else str(row.get(k, ''))
+                                for k in keys
+                            ))
+                        return sorted(tuples)
+
+                    def _layout_scores(df: pd.DataFrame, decks: pd.DataFrame) -> Tuple[float, float, float]:
+                        """Endplan: SP-Abweichung (Summe/Maximum) und X-Unruhe der kurzen Elemente."""
+                        real = _real_load_rows(df)
+                        if real.empty or decks is None or decks.empty:
+                            return float('inf'), float('inf'), float('inf')
+                        sp_total = 0.0
+                        sp_worst = 0.0
+                        alignment_error = 0.0
+                        alignment_count = 0
+                        for _, deck in decks.iterrows():
+                            name = str(deck.get('Pritsche', ''))
+                            on_deck = real.loc[real['Pritsche'].astype(str).eq(name)]
+                            if on_deck.empty:
+                                return float('inf'), float('inf'), float('inf')
+                            sp = _load_center_of_gravity_values_for_platform(df, deck)
+                            deviation = abs(safe_number(sp.get('Schwerpunkt_Abstand_X_mm'), 0.0))
+                            sp_total += deviation
+                            sp_worst = max(sp_worst, deviation)
+                            deck_length = safe_number(deck.get('Länge_mm'), 0.0)
+                            short = on_deck.loc[
+                                pd.to_numeric(on_deck['Länge_mm'], errors='coerce')
+                                < deck_length * 0.8
+                            ]
+                            x_centers = [
+                                safe_number(row.get('X_mm')) + safe_number(row.get('Länge_mm')) / 2.0
+                                for _, row in short.iterrows()
+                            ]
+                            if len(x_centers) < 3:
+                                continue
+                            # Zwei stabile X-Zentren; grosse unterschiedliche
+                            # Versätze innerhalb der Stapel werden bestraft.
+                            c1, c2 = min(x_centers), max(x_centers)
+                            for _iteration in range(6):
+                                g1 = [x for x in x_centers if abs(x - c1) <= abs(x - c2)]
+                                g2 = [x for x in x_centers if abs(x - c1) > abs(x - c2)]
+                                if not g1 or not g2:
+                                    break
+                                c1 = sum(g1) / len(g1)
+                                c2 = sum(g2) / len(g2)
+                            alignment_error += sum(min(abs(x - c1), abs(x - c2)) for x in x_centers)
+                            alignment_count += len(x_centers)
+                        return sp_total, sp_worst, (
+                            alignment_error / alignment_count if alignment_count else 0.0
+                        )
+
+                    same_parts = (
+                        _loaded_unit_signature(alt_placements) == _loaded_unit_signature(placements_df)
+                        and bool(_loaded_unit_signature(alt_placements))
+                    )
+                    same_wp_groups = _wp_group_signature(alt_log) == _wp_group_signature(fuhren_log_df)
+                    alt_has_ordered_stacks = bool(
+                        alt_log is not None and not alt_log.empty
+                        and 'Diagnose_Längsstapel' in alt_log.columns
+                        and alt_log['Diagnose_Längsstapel'].astype(str).str.contains(
+                            r'(Zwei Längsstapel|Lange Brückenlagen) übernommen',
+                            regex=True,
+                        ).any()
+                    )
+                    changed_geometry = (
+                        _coordinates_signature(alt_placements) != _coordinates_signature(placements_df)
+                    )
+                    std_sp, std_worst, std_alignment = _layout_scores(
+                        placements_df, platforms_used_df
+                    )
+                    alt_sp, alt_worst, alt_alignment = _layout_scores(
+                        alt_placements, alt_platforms
+                    )
+                    fewer_platforms = (
+                        alternative_platforms > 0 and alternative_platforms < standard_platforms
+                    )
+                    same_platforms_better_layout = (
+                        alternative_platforms > 0
+                        and alternative_platforms == standard_platforms
+                        and alt_fuhren == standard_fuhren
+                        and same_parts
+                        and same_wp_groups
+                        and alt_has_ordered_stacks
+                        and changed_geometry
+                        and alt_worst <= std_worst + 150.0
+                        and alt_sp <= std_sp + 50.0
+                        and (
+                            alt_sp <= std_sp - 40.0
+                            or alt_alignment <= std_alignment - 40.0
+                        )
+                    )
+                    passed_safety = (
                         alt_fuhren > 0
                         and alt_fuhren <= standard_fuhren
-                        and alternative_platforms > 0
-                        and alternative_platforms < standard_platforms
                         and alternative_unloaded <= standard_unloaded
+                        and same_parts
+                        and same_wp_groups
                         and not has_hard_errors
                         and not has_geometry_conflicts
                         and alt_support_errors.empty
                         and alt_physical_conflicts.empty
                     )
+                    improved = passed_safety and (fewer_platforms or same_platforms_better_layout)
+                    summary_prefix = (
+                        f'Variantenvergleich: Standard {standard_fuhren} Fuhren / {standard_platforms} Pritschen, '
+                        f'hintereinander {alt_fuhren} Fuhren / {alternative_platforms} Pritschen. '
+                    )
                     if improved:
                         placements_df, summary_df, platforms_used_df, fuhren_log_df, plan_units_df = alternative
+                        reason = (
+                            'Weniger Pritschen'
+                            if fewer_platforms
+                            else 'Geordnete Stapel bei gleicher Pritschenzahl'
+                        )
                         comparison_text = (
-                            f'Variantenvergleich: Standard {standard_fuhren} Fuhren / {standard_platforms} Pritschen, '
-                            f'hintereinander {alt_fuhren} Fuhren / {alternative_platforms} Pritschen. '
-                            'Alternative übernommen: weniger Pritschen bei geprüfter Geometrie und Auflage.'
+                            summary_prefix + f'Alternative übernommen: {reason}. '
+                            f'SP-Abweichung über alle Pritschen {std_sp:.0f} → {alt_sp:.0f} mm; '
+                            f'X-Stapelversatz {std_alignment:.0f} → {alt_alignment:.0f} mm.'
                         )
                     else:
                         comparison_text = (
-                            f'Variantenvergleich: Standard {standard_fuhren} Fuhren / {standard_platforms} Pritschen, '
-                            f'hintereinander {alt_fuhren} Fuhren / {alternative_platforms} Pritschen. '
-                            'Standard beibehalten (keine geprüfte Verbesserung mit weniger Pritschen).'
+                            summary_prefix +
+                            'Standard beibehalten: keine nach allen Prüfungen bestätigte Verbesserung. '
+                            f'SP-Abweichung {std_sp:.0f} / {alt_sp:.0f} mm; '
+                            f'X-Stapelversatz {std_alignment:.0f} / {alt_alignment:.0f} mm.'
                         )
 
             st.session_state['automatic_loading_plan_v84'] = {
