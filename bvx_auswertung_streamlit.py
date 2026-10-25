@@ -5970,6 +5970,76 @@ def _effective_multilayer_support_ratio(
 
 
 @with_compaction_budget
+
+def _loading_layout_quality(placements_df: pd.DataFrame, platform: pd.Series) -> Dict[str, float]:
+    """Vergleicht ausschliesslich echte Ladungen auf derselben Pritsche.
+
+    Der Schwerpunkt nutzt exakt dieselbe gewichtsbezogene Berechnung wie
+    Zusammenfassung, BSD und PDF. Auflager werden nicht als Ladung gezählt.
+    """
+    empty = {
+        'sp_mm': float('inf'), 'overhang_mm': float('inf'),
+        'height_mm': float('inf'), 'alignment_mm': float('inf'),
+        'score': float('inf'),
+    }
+    if placements_df is None or placements_df.empty or 'Typ' not in placements_df.columns:
+        return empty
+    real = placements_df[placements_df['Typ'].apply(_is_real_load_type_value)].copy()
+    pname = str(platform.get('Pritsche', ''))
+    if 'Pritsche' in real.columns:
+        real = real[real['Pritsche'].astype(str).eq(pname)]
+    if real.empty:
+        return empty
+    deck_len = safe_number(platform.get('Länge_mm'), 0.0)
+    deck_back = safe_number(platform.get('Überhang_hinten_mm'), 0.0)
+    cog = _load_center_of_gravity_values_for_platform(placements_df, platform)
+    sp = abs(safe_number(cog.get('Schwerpunkt_Abstand_X_mm'), 0.0))
+    x = pd.to_numeric(real['X_mm'], errors='coerce')
+    lengths = pd.to_numeric(real['Länge_mm'], errors='coerce')
+    z = pd.to_numeric(real['Z_mm'], errors='coerce')
+    heights = pd.to_numeric(real['Höhe_mm'], errors='coerce')
+    if x.isna().any() or lengths.isna().any() or z.isna().any() or heights.isna().any():
+        return empty
+    overhang = (
+        max(0.0, deck_back - float(x.min()))
+        + max(0.0, float((x + lengths).max()) - (deck_back + deck_len))
+    )
+    max_height = float((z + heights).max())
+    # Zwei saubere X-Spuren haben wenig Streuung; schiefe, einzeln
+    # verschobene Lagen erhalten einen grösseren Strafwert.
+    centers = (x + lengths / 2.0)[lengths < deck_len * 0.8].tolist()
+    alignment = 0.0
+    if len(centers) >= 3:
+        left, right = min(centers), max(centers)
+        for _ in range(6):
+            group_left = [v for v in centers if abs(v - left) <= abs(v - right)]
+            group_right = [v for v in centers if abs(v - left) > abs(v - right)]
+            if not group_left or not group_right:
+                break
+            left = sum(group_left) / len(group_left)
+            right = sum(group_right) / len(group_right)
+        alignment = sum(min(abs(v - left), abs(v - right)) for v in centers) / len(centers)
+    return {
+        'sp_mm': sp,
+        'overhang_mm': overhang,
+        'height_mm': max_height,
+        'alignment_mm': alignment,
+        'score': sp * 10.0 + overhang * 0.5 + max_height * 0.1 + alignment,
+    }
+
+
+def _loading_platform_geometry_safe(placements_df: pd.DataFrame, platform: pd.Series) -> bool:
+    """Kein Rücksetzen auf eine geometrisch/physisch unsichere Rohposition."""
+    if placements_df is None or placements_df.empty:
+        return False
+    deck = pd.DataFrame([platform])
+    return (
+        find_geometry_conflicts(placements_df, deck).empty
+        and _pinned_manual_support_chain_issues(placements_df, deck).empty
+        and _pinned_manual_physical_conflicts(placements_df).empty
+    )
+
+
 def apply_main_loading_postprocess(
     placements_df: pd.DataFrame,
     summary_df: Optional[pd.DataFrame],
@@ -5993,6 +6063,10 @@ def apply_main_loading_postprocess(
         return clean_pl, clean_sum
 
     result = clean_placements_dataframe(placements_df)
+    # Rohpositionen je Pritsche als unveraenderliche Referenz behalten.
+    # Ohne diesen Schutz konnte die Nachbearbeitung die bereits gepruefte
+    # Schwerpunktlage um mehrere hundert Millimeter verschieben.
+    original_placements = result.copy()
     platforms_local = platforms_used_df.copy()
     if center_geometric:
         result = center_placements_geometrically(result, platforms_local)
@@ -6044,8 +6118,54 @@ def apply_main_loading_postprocess(
                 result, compaction_platforms
             )
             result = _sync_planned_support_rows_to_load(result)
+    # Nachbearbeitung nur behalten, wenn die vorangehende, sicher gepruefte
+    # Pritschenposition nicht verschlechtert wurde. Explizit gewaehlte
+    # Laengsstapel bleiben grundsaetzlich auf ihren geprueften X/Y/Z-Werten.
+    # Die Entscheidung ist strikt pritschenbezogen: keine Neuzuordnung von
+    # Bauteilen oder Vermischung unterschiedlicher WP.
+    revert_platforms: List[str] = []
+    for _, deck in platforms_local.iterrows():
+        pname = str(deck.get('Pritsche', ''))
+        old_rows = original_placements.loc[
+            original_placements['Pritsche'].astype(str).eq(pname)
+        ].copy()
+        new_rows = result.loc[result['Pritsche'].astype(str).eq(pname)].copy()
+        if old_rows.empty or new_rows.empty:
+            continue
+        old_ids = sorted(_loaded_block_unit_ids_for_quality(old_rows))
+        new_ids = sorted(_loaded_block_unit_ids_for_quality(new_rows))
+        if old_ids != new_ids:
+            continue
+        protected_stacks = (
+            'Ebene' in old_rows.columns
+            and old_rows['Ebene'].astype(str).str.contains(
+                r'Zwei Längsstapel|Geordnete Laengsstapel', regex=True
+            ).any()
+        )
+        before = _loading_layout_quality(old_rows, deck)
+        after = _loading_layout_quality(new_rows, deck)
+        sp_drift = after['sp_mm'] > before['sp_mm'] + 20.0
+        if (protected_stacks or sp_drift) and _loading_platform_geometry_safe(old_rows, deck):
+            revert_platforms.append(pname)
+    if revert_platforms:
+        untouched = result.loc[
+            ~result['Pritsche'].astype(str).isin(revert_platforms)
+        ].copy()
+        originals = original_placements.loc[
+            original_placements['Pritsche'].astype(str).isin(revert_platforms)
+        ].copy()
+        result = pd.concat([untouched, originals], ignore_index=True)
     new_summary = recompute_summary_from_placements(result, platforms_local)
     return result, new_summary
+
+
+def _loaded_block_unit_ids_for_quality(placements_df: pd.DataFrame) -> List[str]:
+    """Unveraenderliche Menge echter Ladeeinheiten pro einzelner Pritsche."""
+    if placements_df is None or placements_df.empty or 'Typ' not in placements_df.columns:
+        return []
+    real = placements_df.loc[placements_df['Typ'].apply(_is_real_load_type_value)]
+    return real['Einheit_ID'].dropna().astype(str).tolist()
+
 
 def normalize_y_from_platform_center(placements_df: pd.DataFrame, platforms_df: pd.DataFrame) -> pd.DataFrame:
     """Richtet die Y-Positionen praxisnah von der Pritschenmitte aus.
@@ -7584,31 +7704,44 @@ def create_variant_a_loading_plan(
                     continue
                 checked_options.append((alternative_rows, alternative_summary, variant_name))
 
-            def _cog_delta(candidate: pd.DataFrame) -> float:
-                if candidate is None or candidate.empty:
-                    return float('inf')
-                value = _load_center_of_gravity_values_for_platform(candidate, platform_row)
-                return abs(safe_number(value.get('Schwerpunkt_Abstand_X_mm'), 0.0))
-
+            # Der fertige Pritschenplan muss besser sein, nicht nur eine
+            # hypothetische Zwischenposition. Schwerpunkt, tatsaechlicher
+            # Ueberhang, Stapelhoehe und X-Ausrichtung werden gemeinsam
+            # bewertet. Auflage/Kollision sind bereits harte Ausschlusskriterien.
             if checked_options:
-                checked_options.sort(key=lambda pair: _cog_delta(pair[0]))
-                candidate_rows, candidate_summary, candidate_variant = checked_options[0]
-                default_is_complete = set(wanted_ids) == set(loaded_ids)
-                default_delta = _cog_delta(loaded)
-                candidate_delta = _cog_delta(candidate_rows)
-                # Exakt dieselbe 150-mm-Schwelle wie vor der Diagnose.
-                if (not default_is_complete
-                        or candidate_delta <= default_delta + 150.0):
-                    loaded = candidate_rows
-                    _summary_try = candidate_summary
+                checked_options.sort(
+                    key=lambda option: _loading_layout_quality(
+                        option[0], platform_row
+                    )['score']
+                )
+                default_is_complete = sorted(wanted_ids) == sorted(loaded_ids)
+                default_quality = _loading_layout_quality(loaded, platform_row)
+                chosen_option = None
+                for candidate_rows, candidate_summary, candidate_variant in checked_options:
+                    candidate_quality = _loading_layout_quality(candidate_rows, platform_row)
+                    no_regression = (
+                        candidate_quality['sp_mm'] <= default_quality['sp_mm'] + 1.0
+                        and candidate_quality['overhang_mm'] <= default_quality['overhang_mm'] + 1.0
+                        and candidate_quality['height_mm'] <= default_quality['height_mm'] + 1.0
+                    )
+                    better = candidate_quality['score'] < default_quality['score'] - 1.0
+                    if not default_is_complete or (no_regression and better):
+                        chosen_option = (
+                            candidate_rows, candidate_summary, candidate_variant,
+                            candidate_quality,
+                        )
+                        break
+                if chosen_option is not None:
+                    loaded, _summary_try, variant, quality = chosen_option
                     loaded_ids = _loaded_block_unit_ids(loaded)
                     longitudinal_diag['Entscheidung'] = (
-                        f'{candidate_variant} übernommen (SP {candidate_delta:.0f} mm)'
+                        f"{variant} übernommen (SP {quality['sp_mm']:.0f} mm, "
+                        f"Überhang {quality['overhang_mm']:.0f} mm)"
                     )
                 else:
                     longitudinal_diag['Entscheidung'] = (
-                        f'Standard behalten: alternative SP-Abweichung {candidate_delta:.0f} mm '
-                        f'gegenüber Standard {default_delta:.0f} mm (Grenze +150 mm)'
+                        'Standard behalten: keine nach Schwerpunkt, Überhang und '
+                        'Stapelaufbau bessere Variante'
                     )
             else:
                 longitudinal_diag['Entscheidung'] = 'Standard behalten: keine vollständig gültige geordnete Variante'
