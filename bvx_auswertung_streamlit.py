@@ -15300,21 +15300,36 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                             real = real.loc[real['Pritsche'].astype(str).ne('NICHT VERLADEN')]
                         return real
 
-                    def _loaded_unit_signature(df: pd.DataFrame) -> Counter:
-                        real = _real_load_rows(df)
-                        if real.empty or 'Einheit_ID' not in real.columns:
-                            return Counter()
-                        return Counter(real['Einheit_ID'].astype(str).tolist())
-
                     def _wp_group_signature(df: pd.DataFrame) -> List[tuple]:
-                        if df is None or df.empty:
+                        """V136: originalgetreue PB-Reihenfolge, unabhängig von Bund-IDs
+                        und davon, ob eine PB-Gruppe eine oder zwei Fuhren benötigt.
+
+                        Beide Varianten verarbeiten dieselbe sortierte Bauteilliste
+                        fortlaufend. Deshalb kann man die Anzahl Bauteile pro
+                        zusammenhängender PB-Gruppe vergleichen, nicht die Zahl
+                        der Pritschen oder die veränderlichen Verladeeinheit-IDs.
+                        """
+                        if df is None or df.empty or not {
+                            'Pritschen_Trenngruppe', 'Bauteile',
+                        }.issubset(df.columns):
                             return []
-                        fields = ('Pritschen_Trenngruppe', 'Pritschen_Trennattribut',
-                                  'Fuhrenoption', 'Pritschen', 'Bauteile')
-                        return [
-                            tuple(str(row.get(k, '')) for k in fields)
-                            for _, row in df.iterrows()
-                        ]
+                        groups: List[tuple] = []
+                        for _, row in df.iterrows():
+                            group_key = (
+                                str(row.get('Pritschen_Trennattribut', '') or ''),
+                                str(row.get('Pritschen_Trenngruppe', '') or ''),
+                            )
+                            piece_count = int(safe_number(row.get('Bauteile'), 0.0))
+                            if piece_count <= 0:
+                                return []
+                            if groups and groups[-1][:2] == group_key:
+                                previous = groups[-1]
+                                groups[-1] = (
+                                    previous[0], previous[1], previous[2] + piece_count,
+                                )
+                            else:
+                                groups.append((group_key[0], group_key[1], piece_count))
+                        return groups
 
                     def _coordinates_signature(df: pd.DataFrame) -> List[tuple]:
                         real = _real_load_rows(df)
@@ -15376,11 +15391,16 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                             alignment_error / alignment_count if alignment_count else 0.0
                         )
 
-                    same_parts = (
-                        _loaded_unit_signature(alt_placements) == _loaded_unit_signature(placements_df)
-                        and bool(_loaded_unit_signature(alt_placements))
+                    standard_wp_signature = _wp_group_signature(fuhren_log_df)
+                    alternative_wp_signature = _wp_group_signature(alt_log)
+                    same_wp_groups = (
+                        bool(standard_wp_signature)
+                        and standard_wp_signature == alternative_wp_signature
                     )
-                    same_wp_groups = _wp_group_signature(alt_log) == _wp_group_signature(fuhren_log_df)
+                    # Die Signatur umfasst sowohl die PB-Reihenfolge als auch
+                    # die vollständige Anzahl Originalbauteile je Gruppe.
+                    # Unterschiedliche Bund-/Einheit-IDs sind KEIN Verlust.
+                    same_parts = same_wp_groups
                     alt_has_ordered_stacks = bool(
                         alt_log is not None and not alt_log.empty
                         and 'Diagnose_Längsstapel' in alt_log.columns
