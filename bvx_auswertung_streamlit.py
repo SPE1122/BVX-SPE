@@ -6144,8 +6144,12 @@ def apply_main_loading_postprocess(
         )
         before = _loading_layout_quality(old_rows, deck)
         after = _loading_layout_quality(new_rows, deck)
-        sp_drift = after['sp_mm'] > before['sp_mm'] + 20.0
-        if (protected_stacks or sp_drift) and _loading_platform_geometry_safe(old_rows, deck):
+        worse_final_position = (
+            after['sp_mm'] > before['sp_mm'] + 1.0
+            or after['overhang_mm'] > before['overhang_mm'] + 1.0
+            or after['height_mm'] > before['height_mm'] + 1.0
+        )
+        if (protected_stacks or worse_final_position) and _loading_platform_geometry_safe(old_rows, deck):
             revert_platforms.append(pname)
     if revert_platforms:
         untouched = result.loc[
