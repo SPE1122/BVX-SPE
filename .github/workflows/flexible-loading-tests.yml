@@ -2,7 +2,7 @@ name: Flexible loading regression checks
 
 on:
   push:
-    branches: [feature/flexible-lanes-width-20261030]
+    branches: [feature/flexible-lanes-width-20261030, feature/optionale-seitenbalance-20261030]
   pull_request:
     branches: [main]
   workflow_dispatch:
