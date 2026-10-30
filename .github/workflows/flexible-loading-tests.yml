@@ -1,6 +1,8 @@
 name: Flexible loading regression checks
 
 on:
+  push:
+    branches: [feature/flexible-lanes-width-20261030]
   pull_request:
     branches: [main]
   workflow_dispatch:
