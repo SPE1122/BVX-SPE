@@ -198,35 +198,39 @@ def calculate_flexible_loading(
                 y_lanes.append(y_start)
                 y_start += lane_width
 
-            valid = True
+            # Von unten nach oben über ALLE Bahnen einfügen. Andernfalls
+            # würde die obere Lage von Bahn A als Bezug für Bahn B gelten.
+            placement_order = []
             for stack_index, stack in enumerate(stacks):
-                lane = stack_index // 2
                 z = base_z
                 previous = None
                 for unit in stack:
-                    length = float(unit['Länge_mm'])
-                    width = float(unit['Breite_mm'])
-                    height = float(unit['Höhe_mm'])
-                    weight = float(unit['Gewicht_kg'])
                     if previous is not None:
                         z += layer_default if (
                             str(previous.get('Typ', '')) == 'Bund'
                             or str(unit.get('Typ', '')) == 'Bund'
                         ) else general_default
-                    x = round(anchors[stack_index] + (x_lengths[stack_index] - length) / 2.0, 1)
-                    y = round(y_lanes[lane] + (profile[lane] - width) / 2.0, 1)
-                    if not can_place_stable(state, unit, x, y, z, length, width, height, weight):
-                        diagnostics['Auflage / Platzierung'] += 1
-                        valid = False
-                        break
-                    commit_place(
-                        state, unit, x, y, z, length, width, height, 0,
-                        'Flexible Verladung / getrennte Breiten- und Längsbahnen'
-                    )
-                    z += height
+                    placement_order.append((z, stack_index, unit))
+                    z += float(unit['Höhe_mm'])
                     previous = unit
-                if not valid:
+            placement_order.sort(key=lambda entry: (entry[0], entry[1]))
+            valid = True
+            for z, stack_index, unit in placement_order:
+                lane = stack_index // 2
+                length = float(unit['Länge_mm'])
+                width = float(unit['Breite_mm'])
+                height = float(unit['Höhe_mm'])
+                weight = float(unit['Gewicht_kg'])
+                x = round(anchors[stack_index] + (x_lengths[stack_index] - length) / 2.0, 1)
+                y = round(y_lanes[lane] + (profile[lane] - width) / 2.0, 1)
+                if not can_place_stable(state, unit, x, y, z, length, width, height, weight):
+                    diagnostics['Auflage / Platzierung'] += 1
+                    valid = False
                     break
+                commit_place(
+                    state, unit, x, y, z, length, width, height, 0,
+                    'Flexible Verladung / getrennte Breiten- und Längsbahnen'
+                )
             if not valid:
                 continue
             candidate = pd.DataFrame(state['placements'])
