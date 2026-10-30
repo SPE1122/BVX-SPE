@@ -48,7 +48,7 @@ def _width_profiles(records: List[pd.Series], deck_width: float,
 def _assign_to_stacks(records: List[pd.Series], widths: Tuple[float, ...],
                       deck_length: float, max_height: float, base_height: float,
                       gap: float, layer_gap: float, general_gap: float,
-                      strategy: str) -> Optional[List[List[pd.Series]]]:
+                      strategy: str, allow_stack: bool = True) -> Optional[List[List[pd.Series]]]:
     # Zwei Längsstapel pro Breitenbahn, unabhängig gefüllt.
     stacks: List[List[pd.Series]] = [[] for _ in widths for _ in range(2)]
     heights = [base_height] * len(stacks)
@@ -60,6 +60,8 @@ def _assign_to_stacks(records: List[pd.Series], widths: Tuple[float, ...],
         height = float(row['Höhe_mm'])
         viable: List[Tuple[float, int, float, float]] = []
         for i, stack in enumerate(stacks):
+            if stack and not allow_stack:
+                continue
             lane = i // 2
             if width > widths[lane] + 0.01:
                 continue
@@ -121,6 +123,8 @@ def calculate_flexible_loading(
     max_unsupported_length_percent: float,
     max_unsupported_side_percent: float,
     prefer_support_quality: bool,
+    allow_stack: bool = True,
+    allow_beside: bool = True,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, str]:
     """Sucht zusätzliche flexible Breiten-/Längslagen, ohne bestehende Pläne zu ändern.
 
@@ -131,6 +135,8 @@ def calculate_flexible_loading(
     empty = pd.DataFrame()
     if physical_units is None or physical_units.empty:
         return empty, empty, 'Keine Verladeeinheiten'
+    if not allow_beside:
+        return empty, empty, 'Nebeneinander-Verladung deaktiviert'
 
     records = [row for _, row in physical_units.iterrows()]
     deck_len = float(platform_row.get('Länge_mm', 0.0))
@@ -139,6 +145,8 @@ def calculate_flexible_loading(
     deck_back = float(platform_row.get('Überhang_hinten_mm', 0.0))
     effective_length = deck_len + deck_back + float(platform_row.get('Überhang_vorne_mm', 0.0))
     base_z = float(platform_row.get('Kantholz_erste_Lage_mm', base_default))
+    layer_gap = float(platform_row.get('Einlage_zwischen_Lagen_mm', layer_default))
+    general_gap = float(platform_row.get('Einlage_allgemein_mm', general_default))
     gap = max(0.0, float(gap_default))
     if min(deck_len, deck_width, deck_height) <= 0 or deck_height <= base_z:
         return empty, empty, 'Ungültige Pritschenmasse'
@@ -162,7 +170,7 @@ def calculate_flexible_loading(
         for strategy in ('hoehe', 'breite', 'folge'):
             stacks = _assign_to_stacks(
                 records, profile, effective_length, deck_height, base_z,
-                gap, layer_default, general_default, strategy
+                gap, layer_gap, general_gap, strategy, allow_stack
             )
             if stacks is None:
                 diagnostics['Breite, Höhe oder Länge'] += 1
@@ -206,10 +214,10 @@ def calculate_flexible_loading(
                 previous = None
                 for unit in stack:
                     if previous is not None:
-                        z += layer_default if (
+                        z += layer_gap if (
                             str(previous.get('Typ', '')) == 'Bund'
                             or str(unit.get('Typ', '')) == 'Bund'
-                        ) else general_default
+                        ) else general_gap
                     placement_order.append((z, stack_index, unit))
                     z += float(unit['Höhe_mm'])
                     previous = unit
@@ -248,7 +256,7 @@ def calculate_flexible_loading(
             # Einschliesslich Helferzeilen: keine Einheiten verlieren.
             real_ids = sorted(
                 str(r['Einheit_ID']) for _, r in candidate.iterrows()
-                if str(r.get('Typ', '')) in ('Bund', 'Einzelteil')
+                if str(r.get('Typ', '')).strip() not in {'Unterbau', 'Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz'}
             )
             wanted_ids = sorted(str(r['Einheit_ID']) for r in records)
             if real_ids != wanted_ids:
