@@ -7775,6 +7775,8 @@ def create_variant_a_loading_plan(
                 max_unsupported_length_percent=max_unsupported_length_percent,
                 max_unsupported_side_percent=max_unsupported_side_percent,
                 prefer_support_quality=prefer_support_quality,
+                allow_stack=allow_stack,
+                allow_beside=allow_beside,
             )
             if not flex_rows.empty and sorted(_loaded_block_unit_ids(flex_rows)) == sorted(wanted_ids):
                 flex_q = _loading_layout_quality(flex_rows, platform_row)
