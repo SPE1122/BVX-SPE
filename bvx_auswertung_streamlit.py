@@ -6989,6 +6989,24 @@ def build_trip_platforms(pritschen_df: pd.DataFrame, fuhrenoption: str, fuhre_nr
     return rows
 
 
+def _load_optional_flexible_variants():
+    """Streamlit: beim Hot-Deploy eventuell veraltetes Modul automatisch neu laden.
+
+    Die Zusatzfunktionen dürfen die bestehende Standardverladung nie
+    unbenutzbar machen. Aufrufer fangen ImportError ab und verwenden
+    dann den bisherigen Ladeplan.
+    """
+    import importlib
+
+    module = importlib.import_module('verlade_varianten_flex')
+    needed = ('calculate_flexible_loading', 'seitenbalance_kennzahl')
+    if not all(callable(getattr(module, name, None)) for name in needed):
+        module = importlib.reload(module)
+    if not all(callable(getattr(module, name, None)) for name in needed):
+        raise ImportError('Verlade-Zusatzmodul ist nicht vollständig geladen')
+    return module
+
+
 @with_compaction_budget
 def create_variant_a_loading_plan(
     sorted_parts: pd.DataFrame,
@@ -7754,8 +7772,19 @@ def create_variant_a_loading_plan(
                 longitudinal_diag['Entscheidung'] = 'Standard behalten: keine vollständig gültige geordnete Variante'
         # Zusätzliche Suchwege bleiben von Standard und bisherigen Längsstapeln getrennt.
         if flexible_lane_compare or flexible_width_compare or prefer_side_balance:
-            from verlade_varianten_flex import calculate_flexible_loading, seitenbalance_kennzahl
-            flex_rows, _flex_sum, flex_reason = calculate_flexible_loading(
+            try:
+                flex_module = _load_optional_flexible_variants()
+            except (ImportError, AttributeError) as exc:
+                # Optionale Varianten abschalten, Standardverladung bleibt nutzbar.
+                longitudinal_diag['Entscheidung'] = (
+                    'Zusatzoptimierung nicht verfügbar; Standardverladung beibehalten'
+                )
+                _longitudinal_diag_hit(
+                    longitudinal_diag, 'Flexible Verladung', 'Import des Zusatzmoduls fehlgeschlagen'
+                )
+                flex_module = None
+            if flex_module is not None:
+                flex_rows, _flex_sum, flex_reason = flex_module.calculate_flexible_loading(
                 physical_order, platform_row,
                 two_lane=bool(flexible_lane_compare),
                 flexible_width=bool(flexible_width_compare or prefer_side_balance),
@@ -7780,31 +7809,31 @@ def create_variant_a_loading_plan(
                 allow_beside=allow_beside,
                 prefer_side_balance=prefer_side_balance,
             )
-            if not flex_rows.empty and sorted(_loaded_block_unit_ids(flex_rows)) == sorted(wanted_ids):
-                flex_q = _loading_layout_quality(flex_rows, platform_row)
-                base_q = _loading_layout_quality(loaded, platform_row)
-                no_regression = (
-                    flex_q['sp_mm'] <= base_q['sp_mm'] + 1.0
-                    and flex_q['overhang_mm'] <= base_q['overhang_mm'] + 1.0
-                    and flex_q['height_mm'] <= base_q['height_mm'] + 1.0
-                )
-                better_side_balance = (
-                    bool(prefer_side_balance)
-                    and seitenbalance_kennzahl(flex_rows, platform_row)
-                        + 30.0 < seitenbalance_kennzahl(loaded, platform_row)
-                    and flex_q['sp_mm'] <= base_q['sp_mm'] + 1.0
-                    and flex_q['overhang_mm'] <= base_q['overhang_mm'] + 1.0
-                    and flex_q['height_mm'] <= base_q['height_mm'] + 1.0
-                )
-                if sorted(_loaded_block_unit_ids(loaded)) != sorted(wanted_ids) or (
-                    no_regression and (flex_q['score'] < base_q['score'] - 1.0 or better_side_balance)
-                ):
-                    loaded = flex_rows
-                    loaded_ids = _loaded_block_unit_ids(loaded)
-                    longitudinal_diag['Entscheidung'] = 'Flexible Verladung übernommen'
-                    longitudinal_diag.setdefault('Flexible Verladung', {})['Gültige Variante gefunden'] = 1
-            else:
-                longitudinal_diag.setdefault('Flexible Verladung', {})[flex_reason] = 1
+                if not flex_rows.empty and sorted(_loaded_block_unit_ids(flex_rows)) == sorted(wanted_ids):
+                    flex_q = _loading_layout_quality(flex_rows, platform_row)
+                    base_q = _loading_layout_quality(loaded, platform_row)
+                    no_regression = (
+                        flex_q['sp_mm'] <= base_q['sp_mm'] + 1.0
+                        and flex_q['overhang_mm'] <= base_q['overhang_mm'] + 1.0
+                        and flex_q['height_mm'] <= base_q['height_mm'] + 1.0
+                    )
+                    better_side_balance = (
+                        bool(prefer_side_balance)
+                        and flex_module.seitenbalance_kennzahl(flex_rows, platform_row)
+                            + 30.0 < flex_module.seitenbalance_kennzahl(loaded, platform_row)
+                        and flex_q['sp_mm'] <= base_q['sp_mm'] + 1.0
+                        and flex_q['overhang_mm'] <= base_q['overhang_mm'] + 1.0
+                        and flex_q['height_mm'] <= base_q['height_mm'] + 1.0
+                    )
+                    if sorted(_loaded_block_unit_ids(loaded)) != sorted(wanted_ids) or (
+                        no_regression and (flex_q['score'] < base_q['score'] - 1.0 or better_side_balance)
+                    ):
+                        loaded = flex_rows
+                        loaded_ids = _loaded_block_unit_ids(loaded)
+                        longitudinal_diag['Entscheidung'] = 'Flexible Verladung übernommen'
+                        longitudinal_diag.setdefault('Flexible Verladung', {})['Gültige Variante gefunden'] = 1
+                else:
+                    longitudinal_diag.setdefault('Flexible Verladung', {})[flex_reason] = 1
 
         ranked_block = block_units_top.copy()
         ranked_block['_terminal_rank'] = pd.to_numeric(
@@ -15643,15 +15672,22 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                     )
                     side_balance_gain = False
                     if bool(prefer_side_balance) and standard_platforms == alternative_platforms and alternative_platforms > 0:
-                        from verlade_varianten_flex import seitenbalance_kennzahl
-                        def balance_all(loads, decks):
-                            return sum(seitenbalance_kennzahl(loads, deck) for _, deck in decks.iterrows())
-                        side_balance_gain = (
-                            balance_all(alt_placements, alt_platforms) + 30.0
-                            < balance_all(placements_df, platforms_used_df)
-                            and alt_worst <= std_worst + 1.0
-                            and alt_sp <= std_sp + 1.0
-                        )
+                        try:
+                            flex_module = _load_optional_flexible_variants()
+                        except (ImportError, AttributeError):
+                            flex_module = None
+                        if flex_module is not None:
+                            def balance_all(loads, decks):
+                                return sum(
+                                    flex_module.seitenbalance_kennzahl(loads, deck)
+                                    for _, deck in decks.iterrows()
+                                )
+                            side_balance_gain = (
+                                balance_all(alt_placements, alt_platforms) + 30.0
+                                < balance_all(placements_df, platforms_used_df)
+                                and alt_worst <= std_worst + 1.0
+                                and alt_sp <= std_sp + 1.0
+                            )
                     same_platforms_better_layout = (
                         alternative_platforms > 0
                         and alternative_platforms == standard_platforms
