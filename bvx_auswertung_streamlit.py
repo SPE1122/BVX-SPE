@@ -7875,7 +7875,7 @@ def create_variant_a_loading_plan(
                 lambda v: v if 'V21 Pritschenblock' in v else f'{v} / V21 Pritschenblock'
             )
         summary = recompute_summary_from_placements(loaded, platform_df)
-        if bool(prefer_length_before_stack):
+        if bool(prefer_length_before_stack or flexible_lane_compare or flexible_width_compare):
             loaded.attrs['longitudinal_diagnostic'] = longitudinal_diag
         return True, loaded, summary
 
