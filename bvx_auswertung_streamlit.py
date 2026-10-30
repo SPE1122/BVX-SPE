@@ -7026,6 +7026,7 @@ def create_variant_a_loading_plan(
     avoid_unnecessary_overhang: bool = False,
     flexible_lane_compare: bool = False,
     flexible_width_compare: bool = False,
+    prefer_side_balance: bool = False,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """V22: geprüfte Block-Suche pro Pritsche mit getrennter Sortier- und Anzeige-/Stapelrichtung.
 
@@ -7752,12 +7753,12 @@ def create_variant_a_loading_plan(
             else:
                 longitudinal_diag['Entscheidung'] = 'Standard behalten: keine vollständig gültige geordnete Variante'
         # Zusätzliche Suchwege bleiben von Standard und bisherigen Längsstapeln getrennt.
-        if flexible_lane_compare or flexible_width_compare:
-            from verlade_varianten_flex import calculate_flexible_loading
+        if flexible_lane_compare or flexible_width_compare or prefer_side_balance:
+            from verlade_varianten_flex import calculate_flexible_loading, seitenbalance_kennzahl
             flex_rows, _flex_sum, flex_reason = calculate_flexible_loading(
                 physical_order, platform_row,
                 two_lane=bool(flexible_lane_compare),
-                flexible_width=bool(flexible_width_compare),
+                flexible_width=bool(flexible_width_compare or prefer_side_balance),
                 init_platform_state=init_platform_state,
                 can_place_stable=can_place_stable,
                 commit_place=commit_place,
@@ -7777,6 +7778,7 @@ def create_variant_a_loading_plan(
                 prefer_support_quality=prefer_support_quality,
                 allow_stack=allow_stack,
                 allow_beside=allow_beside,
+                prefer_side_balance=prefer_side_balance,
             )
             if not flex_rows.empty and sorted(_loaded_block_unit_ids(flex_rows)) == sorted(wanted_ids):
                 flex_q = _loading_layout_quality(flex_rows, platform_row)
@@ -7786,8 +7788,16 @@ def create_variant_a_loading_plan(
                     and flex_q['overhang_mm'] <= base_q['overhang_mm'] + 1.0
                     and flex_q['height_mm'] <= base_q['height_mm'] + 1.0
                 )
+                better_side_balance = (
+                    bool(prefer_side_balance)
+                    and seitenbalance_kennzahl(flex_rows, platform_row)
+                        + 30.0 < seitenbalance_kennzahl(loaded, platform_row)
+                    and flex_q['sp_mm'] <= base_q['sp_mm'] + 1.0
+                    and flex_q['overhang_mm'] <= base_q['overhang_mm'] + 1.0
+                    and flex_q['height_mm'] <= base_q['height_mm'] + 1.0
+                )
                 if sorted(_loaded_block_unit_ids(loaded)) != sorted(wanted_ids) or (
-                    no_regression and flex_q['score'] < base_q['score'] - 1.0
+                    no_regression and (flex_q['score'] < base_q['score'] - 1.0 or better_side_balance)
                 ):
                     loaded = flex_rows
                     loaded_ids = _loaded_block_unit_ids(loaded)
@@ -7877,7 +7887,7 @@ def create_variant_a_loading_plan(
                 lambda v: v if 'V21 Pritschenblock' in v else f'{v} / V21 Pritschenblock'
             )
         summary = recompute_summary_from_placements(loaded, platform_df)
-        if bool(prefer_length_before_stack or flexible_lane_compare or flexible_width_compare):
+        if bool(prefer_length_before_stack or flexible_lane_compare or flexible_width_compare or prefer_side_balance):
             loaded.attrs['longitudinal_diagnostic'] = longitudinal_diag
         return True, loaded, summary
 
@@ -7986,7 +7996,7 @@ def create_variant_a_loading_plan(
 
             units_for_platform = candidate['units'].copy()
             unit_counter += len(units_for_platform)
-            if bool(prefer_length_before_stack or flexible_lane_compare or flexible_width_compare):
+            if bool(prefer_length_before_stack or flexible_lane_compare or flexible_width_compare or prefer_side_balance):
                 details = candidate['loaded'].attrs.get('longitudinal_diagnostic', {})
                 if details:
                     parts = []
@@ -8130,7 +8140,7 @@ def create_variant_a_loading_plan(
             'Diagnose_Längsstapel': ' / '.join(
                 f"{d['Pritsche']}: {d['Ergebnis']} | {d['Prüfungen']}"
                 for d in best_try.get('longitudinal_diagnostic_rows', [])
-            ) if bool(prefer_length_before_stack or flexible_lane_compare or flexible_width_compare) else '',
+            ) if bool(prefer_length_before_stack or flexible_lane_compare or flexible_width_compare or prefer_side_balance) else '',
         })
 
         remaining_parts = remaining_parts.iloc[int(best_try['parts_loaded_count']):].copy().reset_index(drop=True)
@@ -15069,6 +15079,15 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
         key='flexible_width_compare_v137',
         help='Zusätzliche Varianten für z. B. 1800+200 oder 1200+600+600 mm.',
     )
+    prefer_side_balance = st.checkbox(
+        'Gleichmässige Seitenbeladung bevorzugen',
+        value=False,
+        key='prefer_side_balance_v138',
+        help='Prüft zusätzliche Verladevarianten mit ausgeglichenen Stapelhöhen links/rechts, '
+             'auch getrennt hinten und vorne. Nur sichere Lösungen ohne schlechteren '
+             'Längsschwerpunkt, Überhang oder Ladehöhe werden übernommen. '
+             'Aus = bisherige Verladung unverändert.',
+    )
     center_geometric = True
     max_fuhren = col4.number_input('Max. Fuhren Sicherheitslimit', min_value=1, max_value=200, value=50, step=1)
     enable_multilayer_compaction = st.checkbox(
@@ -15314,6 +15333,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
             'try_length_first_compare': bool(try_length_first_compare),
             'flexible_lane_compare': bool(flexible_lane_compare),
             'flexible_width_compare': bool(flexible_width_compare),
+            'prefer_side_balance': bool(prefer_side_balance),
             'max_fuhren': int(max_fuhren),
             'use_bundles': bool(use_bundles),
             'max_bundle_weight': float(max_bundle_weight),
@@ -15407,7 +15427,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
             # V131: rein optionaler Vergleich. Die Standardberechnung und deren
             # Reihenfolge bleiben die unveränderte Ausgangsbasis.
             comparison_text = ''
-            if bool(try_length_first_compare or flexible_lane_compare or flexible_width_compare):
+            if bool(try_length_first_compare or flexible_lane_compare or flexible_width_compare or prefer_side_balance):
                 standard_fuhren = len(fuhren_log_df) if fuhren_log_df is not None else 0
                 if standard_fuhren <= 1:
                     comparison_text = 'Variantenvergleich: Standard hat höchstens eine Fuhre; keine zweite Berechnung nötig.'
@@ -15441,6 +15461,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                             prefer_length_before_stack=bool(try_length_first_compare),
                             flexible_lane_compare=bool(flexible_lane_compare),
                             flexible_width_compare=bool(flexible_width_compare),
+                            prefer_side_balance=bool(prefer_side_balance),
                             fuhre_split_attr=effective_fuhre_split_attr,
                             fill_remainder_next_group=bool(fill_remainder_next_group),
                             prefer_stable_option=bool(compact_transport_strategy),
@@ -15620,19 +15641,31 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                     fewer_platforms = (
                         alternative_platforms > 0 and alternative_platforms < standard_platforms
                     )
+                    side_balance_gain = False
+                    if bool(prefer_side_balance) and standard_platforms == alternative_platforms and alternative_platforms > 0:
+                        from verlade_varianten_flex import seitenbalance_kennzahl
+                        def balance_all(loads, decks):
+                            return sum(seitenbalance_kennzahl(loads, deck) for _, deck in decks.iterrows())
+                        side_balance_gain = (
+                            balance_all(alt_placements, alt_platforms) + 30.0
+                            < balance_all(placements_df, platforms_used_df)
+                            and alt_worst <= std_worst + 1.0
+                            and alt_sp <= std_sp + 1.0
+                        )
                     same_platforms_better_layout = (
                         alternative_platforms > 0
                         and alternative_platforms == standard_platforms
                         and alt_fuhren == standard_fuhren
                         and same_parts
                         and same_wp_groups
-                        and alt_has_ordered_stacks
+                        and (alt_has_ordered_stacks or side_balance_gain)
                         and changed_geometry
                         and alt_worst <= std_worst + 150.0
                         and alt_sp <= std_sp + 50.0
                         and (
                             alt_sp <= std_sp - 40.0
                             or alt_alignment <= std_alignment - 40.0
+                            or side_balance_gain
                         )
                     )
                     passed_safety = (
@@ -15674,7 +15707,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
             st.session_state['automatic_loading_plan_v84'] = {
                 'longitudinal_diagnostic_report': (
                     longitudinal_diagnostic_report
-                    if bool(try_length_first_compare or flexible_lane_compare or flexible_width_compare) and 'longitudinal_diagnostic_report' in locals()
+                    if bool(try_length_first_compare or flexible_lane_compare or flexible_width_compare or prefer_side_balance) and 'longitudinal_diagnostic_report' in locals()
                     else pd.DataFrame()
                 ),
                 'signature': automatic_input_signature,

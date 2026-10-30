@@ -12,8 +12,56 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import pandas as pd
 
 
+
+def seitenbalance_kennzahl(placements: pd.DataFrame, platform: pd.Series) -> float:
+    """Hoehendifferenz links/rechts, getrennt hinten und vorne, in mm.
+
+    Nur echte Bauteile werden bewertet. Ueber die Mitte reichende Elemente
+    zaehlen auf beiden Seiten. Hohe Einzelstapel auf einer Seite fallen auf,
+    auch wenn der Laengsschwerpunkt exakt mittig ist.
+    """
+    if placements is None or placements.empty or 'Typ' not in placements.columns:
+        return float('inf')
+    deck_length = float(platform.get('Länge_mm', 0.0))
+    deck_width = float(platform.get('Breite_mm', 0.0))
+    back = float(platform.get('Überhang_hinten_mm', 0.0))
+    if deck_length <= 0.0 or deck_width <= 0.0:
+        return float('inf')
+    mid_x = back + deck_length * 0.5
+    mid_y = deck_width * 0.5
+    # 2x2: links/rechts, hinten/vorne
+    top = [[0.0, 0.0], [0.0, 0.0]]
+    used = False
+    helpers = {'Unterbau', 'Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz'}
+    for _, row in placements.iterrows():
+        if str(row.get('Typ', '')).strip() in helpers:
+            continue
+        if str(row.get('Pritsche', '')) != str(platform.get('Pritsche', '')):
+            continue
+        x = float(row.get('X_mm', 0.0))
+        y = float(row.get('Y_mm', 0.0))
+        z = float(row.get('Z_mm', 0.0))
+        length = float(row.get('Länge_mm', 0.0))
+        width = float(row.get('Breite_mm', 0.0))
+        height = float(row.get('Höhe_mm', 0.0))
+        if min(length, width, height) <= 0:
+            continue
+        used = True
+        for part, (start, end) in enumerate(((back, mid_x), (mid_x, back + deck_length))):
+            if min(x + length, end) - max(x, start) <= 1.0:
+                continue
+            for side, (lower, upper) in enumerate(((0.0, mid_y), (mid_y, deck_width))):
+                if min(y + width, upper) - max(y, lower) > 1.0:
+                    top[part][side] = max(top[part][side], z + height)
+    if not used:
+        return float('inf')
+    differences = [abs(halves[0] - halves[1]) for halves in top]
+    return 0.5 * max(differences) + 0.5 * sum(differences) / len(differences)
+
+
 def _width_profiles(records: List[pd.Series], deck_width: float,
-                    two_lane: bool, flexible_width: bool) -> List[Tuple[float, ...]]:
+                    two_lane: bool, flexible_width: bool,
+                    prefer_side_balance: bool = False) -> List[Tuple[float, ...]]:
     widths = [float(row['Breite_mm']) for row in records]
     if not widths or min(widths) <= 0.0 or max(widths) > deck_width + 0.01:
         return []
@@ -42,13 +90,24 @@ def _width_profiles(records: List[pd.Series], deck_width: float,
                 -float(deck_width - sum(profile)), -float(len(profile)))
     eligible = [p for p in profiles if rank(p)[0] >= 0.0]
     eligible.sort(key=rank, reverse=True)
-    return eligible[:12]
+    if not prefer_side_balance:
+        return eligible[:12]
+    # Auch spiegelverkehrte Belegungen testen: breite Elemente sonst
+    # immer links, obwohl rechts ggf. ein hoeherer Stapel steht.
+    mirrored = []
+    for p in eligible[:8]:
+        if p not in mirrored:
+            mirrored.append(p)
+        if p[::-1] not in mirrored:
+            mirrored.append(p[::-1])
+    return mirrored[:16]
 
 
 def _assign_to_stacks(records: List[pd.Series], widths: Tuple[float, ...],
                       deck_length: float, max_height: float, base_height: float,
                       gap: float, layer_gap: float, general_gap: float,
-                      strategy: str, allow_stack: bool = True) -> Optional[List[List[pd.Series]]]:
+                      strategy: str, allow_stack: bool = True,
+                      balance_sides: bool = False) -> Optional[List[List[pd.Series]]]:
     # Zwei Längsstapel pro Breitenbahn, unabhängig gefüllt.
     stacks: List[List[pd.Series]] = [[] for _ in widths for _ in range(2)]
     heights = [base_height] * len(stacks)
@@ -79,7 +138,15 @@ def _assign_to_stacks(records: List[pd.Series], widths: Tuple[float, ...],
 
             # Breite passend ausnutzen, Höhen gleichmässig verteilen.
             width_waste = widths[lane] - width
-            if strategy == 'hoehe':
+            if strategy == 'seitenbalance' and balance_sides:
+                trial_heights = heights.copy()
+                trial_heights[i] = next_height
+                lane_left = max((max(trial_heights[2*j:2*j+2])
+                                 for j in range((len(widths)+1)//2)), default=base_height)
+                lane_right = max((max(trial_heights[2*j:2*j+2])
+                                  for j in range((len(widths)+1)//2, len(widths))), default=base_height)
+                score = abs(lane_left - lane_right) * 4.0 + next_height * 0.2 + width_waste * 0.05
+            elif strategy == 'hoehe':
                 score = next_height + width_waste * 0.22
             elif strategy == 'breite':
                 score = width_waste * 2.0 + next_height * 0.25
@@ -125,6 +192,7 @@ def calculate_flexible_loading(
     prefer_support_quality: bool,
     allow_stack: bool = True,
     allow_beside: bool = True,
+    prefer_side_balance: bool = False,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, str]:
     """Sucht zusätzliche flexible Breiten-/Längslagen, ohne bestehende Pläne zu ändern.
 
@@ -158,7 +226,7 @@ def calculate_flexible_loading(
             > float(platform_row.get('Max_Gewicht_kg', 0.0)) + 0.01):
         return empty, empty, 'Gewichtsgrenze'
 
-    profiles = _width_profiles(records, deck_width, two_lane, flexible_width)
+    profiles = _width_profiles(records, deck_width, two_lane, flexible_width, prefer_side_balance)
     if not profiles:
         return empty, empty, 'Keine passende Breitenaufteilung'
     platform_df = pd.DataFrame([platform_row])
@@ -167,10 +235,11 @@ def calculate_flexible_loading(
     diagnostics = Counter()
 
     for profile in profiles:
-        for strategy in ('hoehe', 'breite', 'folge'):
+        strategies = ('hoehe', 'breite', 'folge', 'seitenbalance') if prefer_side_balance else ('hoehe', 'breite', 'folge')
+        for strategy in strategies:
             stacks = _assign_to_stacks(
                 records, profile, effective_length, deck_height, base_z,
-                gap, layer_gap, general_gap, strategy, allow_stack
+                gap, layer_gap, general_gap, strategy, allow_stack, prefer_side_balance
             )
             if stacks is None:
                 diagnostics['Breite, Höhe oder Länge'] += 1
@@ -264,6 +333,8 @@ def calculate_flexible_loading(
                 continue
             quality = load_quality(candidate, platform_row)
             score = float(quality['score'])
+            if prefer_side_balance:
+                score += seitenbalance_kennzahl(candidate, platform_row) * 6.0
             if best_score is None or score < best_score:
                 best_score = score
                 best_df = candidate

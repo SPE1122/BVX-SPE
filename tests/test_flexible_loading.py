@@ -3,7 +3,7 @@ import unittest
 
 import pandas as pd
 
-from verlade_varianten_flex import _width_profiles, _assign_to_stacks, calculate_flexible_loading
+from verlade_varianten_flex import _width_profiles, _assign_to_stacks, calculate_flexible_loading, seitenbalance_kennzahl
 
 
 def unit(uid, width=600.0, length=1800.0, height=140.0):
@@ -99,6 +99,42 @@ class FlexibleVariantTests(unittest.TestCase):
         )
         self.assertTrue(rows.empty)
         self.assertIn('deaktiviert', reason)
+
+
+    def test_side_balance_separately_in_front_and_rear(self):
+        platform = pd.Series({'Pritsche': 'T', 'Länge_mm': 7600.0,
+                              'Breite_mm': 2450.0, 'Überhang_hinten_mm': 0.0})
+        def part(uid, x, y, z, width=1000):
+            return {'Einheit_ID': uid, 'Typ': 'Bauteil', 'Pritsche': 'T',
+                    'X_mm': float(x), 'Y_mm': float(y), 'Z_mm': float(z),
+                    'Länge_mm': 3000.0, 'Breite_mm': float(width), 'Höhe_mm': 200.0}
+        unbalanced = pd.DataFrame([
+            part('HL', 200, 100, 1800),
+            part('HR', 200, 1400, 80),
+            part('VL', 4200, 100, 1800),
+            part('VR', 4200, 1400, 80),
+        ])
+        balanced = pd.DataFrame([
+            part('HL', 200, 100, 1000),
+            part('HR', 200, 1400, 1000),
+            part('VL', 4200, 100, 1000),
+            part('VR', 4200, 1400, 1000),
+        ])
+        self.assertGreater(seitenbalance_kennzahl(unbalanced, platform), 1000)
+        self.assertEqual(seitenbalance_kennzahl(balanced, platform), 0)
+
+    def test_overlapping_middle_piece_counts_both_sides(self):
+        platform = pd.Series({'Pritsche': 'T', 'Länge_mm': 7600.0,
+                              'Breite_mm': 2450.0, 'Überhang_hinten_mm': 0.0})
+        centered = pd.DataFrame([{'Einheit_ID': 'WIDE', 'Typ': 'Bauteil',
+            'Pritsche': 'T', 'X_mm': 0.0, 'Y_mm': 100.0, 'Z_mm': 80.0,
+            'Länge_mm': 7600.0, 'Breite_mm': 2200.0, 'Höhe_mm': 200.0}])
+        self.assertEqual(seitenbalance_kennzahl(centered, platform), 0)
+
+    def test_side_balance_can_mirror_width_profiles(self):
+        records = [unit('A', 1800), unit('B', 200)]
+        profiles = _width_profiles(records, 2450, False, True, True)
+        self.assertTrue(any(p[::-1] in profiles for p in profiles if len(p) >= 2))
 
 
 if __name__ == '__main__':
