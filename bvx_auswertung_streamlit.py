@@ -15458,7 +15458,11 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
             comparison_text = ''
             if bool(try_length_first_compare or flexible_lane_compare or flexible_width_compare or prefer_side_balance):
                 standard_fuhren = len(fuhren_log_df) if fuhren_log_df is not None else 0
-                if standard_fuhren <= 1:
+                # Eine Fuhre mit mehreren Pritschen braucht bei aktivierter
+                # Seitenbalance ebenfalls den Variantenvergleich.
+                standard_platform_count = len(platforms_used_df) if platforms_used_df is not None else 0
+                balance_comparison_needed = bool(prefer_side_balance) and standard_platform_count >= 2
+                if standard_fuhren <= 1 and not balance_comparison_needed:
                     comparison_text = 'Variantenvergleich: Standard hat höchstens eine Fuhre; keine zweite Berechnung nötig.'
                 else:
                     with st.spinner('Alternative: zuerst hintereinander versuchen ...'):
