@@ -304,89 +304,96 @@ def calculate_flexible_loading(
                 start = min(max(0.0, center - span / 2.0), max(0.0, effective_length - span))
                 anchors.extend([start, start + first + (gap if first and second else 0.0)])
 
-            state = init_platform_state(platform_row, base_default, layer_default, gap_default)
-            state['prevent_wide_on_narrow'] = bool(prevent_wide_on_narrow)
-            state['min_support_width_ratio'] = float(min_support_ratio)
-            state['max_unsupported_length_mm'] = float(max_unsupported_length_mm)
-            state['max_unsupported_side_mm'] = float(max_unsupported_side_mm)
-            state['max_unsupported_length_percent'] = float(max_unsupported_length_percent)
-            state['max_unsupported_side_percent'] = float(max_unsupported_side_percent)
-            state['prefer_support_quality'] = bool(prefer_support_quality)
+            # Auch freie Randflaechen nutzen: Profile alternativ links,
+            # mittig oder rechts positionieren. Jeder Versuch muss danach
+            # dieselben Auflage-, Kollisions- und Sicherheitspruefungen bestehen.
+            free_width = max(0.0, deck_width - sum(profile))
+            offsets = ([free_width / 2.0] if not prefer_side_balance else
+                       sorted(set((0.0, free_width / 2.0, free_width))))
+            for offset_y in offsets:
+                state = init_platform_state(platform_row, base_default, layer_default, gap_default)
+                state['prevent_wide_on_narrow'] = bool(prevent_wide_on_narrow)
+                state['min_support_width_ratio'] = float(min_support_ratio)
+                state['max_unsupported_length_mm'] = float(max_unsupported_length_mm)
+                state['max_unsupported_side_mm'] = float(max_unsupported_side_mm)
+                state['max_unsupported_length_percent'] = float(max_unsupported_length_percent)
+                state['max_unsupported_side_percent'] = float(max_unsupported_side_percent)
+                state['prefer_support_quality'] = bool(prefer_support_quality)
 
-            # Die bisherige mittige Breitenposition bleibt Standard.
-            # Bei aktivierter Seitenbalance werden zusaetzlich links- und
-            # rechtsbuendige Profilpositionen geprueft (siehe aeussere Schleife).
-            y_start = (deck_width - sum(profile)) / 2.0
-            y_lanes: List[float] = []
-            for lane_width in profile:
-                y_lanes.append(y_start)
-                y_start += lane_width
+                # Die bisherige mittige Breitenposition bleibt Standard.
+                # Bei aktivierter Seitenbalance werden zusaetzlich links- und
+                # rechtsbuendige Profilpositionen geprueft (siehe aeussere Schleife).
+                y_start = offset_y
+                y_lanes: List[float] = []
+                for lane_width in profile:
+                    y_lanes.append(y_start)
+                    y_start += lane_width
 
-            # Von unten nach oben über ALLE Bahnen einfügen. Andernfalls
-            # würde die obere Lage von Bahn A als Bezug für Bahn B gelten.
-            placement_order = []
-            for stack_index, stack in enumerate(stacks):
-                z = base_z
-                previous = None
-                for unit in stack:
-                    if previous is not None:
-                        z += layer_gap if (
-                            str(previous.get('Typ', '')) == 'Bund'
-                            or str(unit.get('Typ', '')) == 'Bund'
-                        ) else general_gap
-                    placement_order.append((z, stack_index, unit))
-                    z += float(unit['Höhe_mm'])
-                    previous = unit
-            placement_order.sort(key=lambda entry: (entry[0], entry[1]))
-            valid = True
-            for z, stack_index, unit in placement_order:
-                lane = stack_index // 2
-                length = float(unit['Länge_mm'])
-                width = float(unit['Breite_mm'])
-                height = float(unit['Höhe_mm'])
-                weight = float(unit['Gewicht_kg'])
-                x = round(anchors[stack_index] + (x_lengths[stack_index] - length) / 2.0, 1)
-                y = round(y_lanes[lane] + (profile[lane] - width) / 2.0, 1)
-                if not can_place_stable(state, unit, x, y, z, length, width, height, weight):
-                    diagnostics['Auflage / Platzierung'] += 1
-                    valid = False
-                    break
-                commit_place(
-                    state, unit, x, y, z, length, width, height, 0,
-                    'Flexible Verladung / getrennte Breiten- und Längsbahnen'
+                # Von unten nach oben über ALLE Bahnen einfügen. Andernfalls
+                # würde die obere Lage von Bahn A als Bezug für Bahn B gelten.
+                placement_order = []
+                for stack_index, stack in enumerate(stacks):
+                    z = base_z
+                    previous = None
+                    for unit in stack:
+                        if previous is not None:
+                            z += layer_gap if (
+                                str(previous.get('Typ', '')) == 'Bund'
+                                or str(unit.get('Typ', '')) == 'Bund'
+                            ) else general_gap
+                        placement_order.append((z, stack_index, unit))
+                        z += float(unit['Höhe_mm'])
+                        previous = unit
+                placement_order.sort(key=lambda entry: (entry[0], entry[1]))
+                valid = True
+                for z, stack_index, unit in placement_order:
+                    lane = stack_index // 2
+                    length = float(unit['Länge_mm'])
+                    width = float(unit['Breite_mm'])
+                    height = float(unit['Höhe_mm'])
+                    weight = float(unit['Gewicht_kg'])
+                    x = round(anchors[stack_index] + (x_lengths[stack_index] - length) / 2.0, 1)
+                    y = round(y_lanes[lane] + (profile[lane] - width) / 2.0, 1)
+                    if not can_place_stable(state, unit, x, y, z, length, width, height, weight):
+                        diagnostics['Auflage / Platzierung'] += 1
+                        valid = False
+                        break
+                    commit_place(
+                        state, unit, x, y, z, length, width, height, 0,
+                        'Flexible Verladung / getrennte Breiten- und Längsbahnen'
+                    )
+                if not valid:
+                    continue
+                candidate = pd.DataFrame(state['placements'])
+                if candidate.empty:
+                    continue
+                if not find_geometry_conflicts(candidate, platform_df).empty:
+                    diagnostics['Geometrie'] += 1
+                    continue
+                if not support_chain_issues(candidate, platform_df).empty:
+                    diagnostics['Auflagekette'] += 1
+                    continue
+                if not physical_conflicts(candidate).empty:
+                    diagnostics['Physische Kollision'] += 1
+                    continue
+                # Einschliesslich Helferzeilen: keine Einheiten verlieren.
+                real_ids = sorted(
+                    str(r['Einheit_ID']) for _, r in candidate.iterrows()
+                    if str(r.get('Typ', '')).strip() not in {'Unterbau', 'Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz'}
                 )
-            if not valid:
-                continue
-            candidate = pd.DataFrame(state['placements'])
-            if candidate.empty:
-                continue
-            if not find_geometry_conflicts(candidate, platform_df).empty:
-                diagnostics['Geometrie'] += 1
-                continue
-            if not support_chain_issues(candidate, platform_df).empty:
-                diagnostics['Auflagekette'] += 1
-                continue
-            if not physical_conflicts(candidate).empty:
-                diagnostics['Physische Kollision'] += 1
-                continue
-            # Einschliesslich Helferzeilen: keine Einheiten verlieren.
-            real_ids = sorted(
-                str(r['Einheit_ID']) for _, r in candidate.iterrows()
-                if str(r.get('Typ', '')).strip() not in {'Unterbau', 'Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz'}
-            )
-            wanted_ids = sorted(str(r['Einheit_ID']) for r in records)
-            if real_ids != wanted_ids:
-                diagnostics['Unvollständige Verladung'] += 1
-                continue
-            quality = load_quality(candidate, platform_row)
-            score = float(quality['score'])
-            if prefer_side_balance:
-                score += seitenbalance_kennzahl(candidate, platform_row) * 6.0
-                score += flaechenverteilung_kennzahl(candidate, platform_row) * 2.0
-            if best_score is None or score < best_score:
-                best_score = score
-                best_df = candidate
-                best_summary = recompute_summary(candidate, platform_df)
+                wanted_ids = sorted(str(r['Einheit_ID']) for r in records)
+                if real_ids != wanted_ids:
+                    diagnostics['Unvollständige Verladung'] += 1
+                    continue
+                quality = load_quality(candidate, platform_row)
+                score = float(quality['score'])
+                if prefer_side_balance:
+                    score += seitenbalance_kennzahl(candidate, platform_row) * 6.0
+                    score += flaechenverteilung_kennzahl(candidate, platform_row) * 2.0
+                if best_score is None or score < best_score:
+                    best_score = score
+                    best_df = candidate
+                    best_summary = recompute_summary(candidate, platform_df)
 
     if best_df.empty:
         reason = ', '.join(f'{name}: {n}' for name, n in diagnostics.most_common(3))
