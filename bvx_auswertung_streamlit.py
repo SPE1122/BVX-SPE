@@ -15461,14 +15461,12 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                 # Eine Fuhre mit mehreren Pritschen braucht bei aktivierter
                 # Seitenbalance ebenfalls den Variantenvergleich.
                 standard_platform_count = len(platforms_used_df) if platforms_used_df is not None else 0
-                # Die Y-Seitenbalance ist keine Vorgabe fuer eine zusaetzliche
-                # vollstaendige Fuhrensimulation. Wenn die Standardplanung
-                # bereits eine Fuhre schafft, liefert der zweite Durchlauf
-                # keine Reduktion der Fuhrenzahl und kostet bei grossen
-                # Auftraegen mehrere Minuten. Die normale Y-Platzierung und
-                # saemtliche Sicherheitspruefungen bleiben unveraendert.
-                if standard_fuhren <= 1:
-                    comparison_text = 'Variantenvergleich: Standard hat bereits eine Fuhre; zeitintensive Zweitberechnung entfällt.'
+                # Bei einer Fuhre mit LKW UND Anhaenger muss der
+                # Seitenverteilungs-Vergleich erhalten bleiben.
+                # Ein Abschalten wuerde die neue Y-Mitte-Verladung umgehen.
+                balance_comparison_needed = bool(prefer_side_balance) and standard_platform_count >= 2
+                if standard_fuhren <= 1 and not balance_comparison_needed:
+                    comparison_text = 'Variantenvergleich: Standard hat höchstens eine Fuhre; keine zweite Berechnung nötig.'
                 else:
                     with st.spinner('Alternative: zuerst hintereinander versuchen ...'):
                         alternative = create_variant_a_loading_plan(
