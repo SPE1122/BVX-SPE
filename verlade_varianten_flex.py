@@ -136,11 +136,13 @@ def _width_profiles(records: List[pd.Series], deck_width: float,
                         profiles.add((round(other, 1), w))
     eligible = [p for p in profiles if rank(p)[0] >= 0.0]
     if two_lane:
-        # Filter VOR dem Limit auf die besten Profile. Zuvor gingen
-        # die passenden zwei Spuren im Ranking der 3-/4-Spurprofile
-        # verloren und wurden erst nach der Begrenzung herausgefiltert.
+        # Zwei Pritschenhaelften sind die Y-Bezugsbereiche, keine
+        # Begrenzung auf genau zwei Breitenbahnen. Insbesondere duerfen
+        # vier 600-mm-Bahnen als je zwei Bahnen links/rechts verbleiben.
         eligible = [p for p in eligible
-                    if len(p) == 2 and max(p) <= half + 0.01]
+                    if len(p) in (2, 4)
+                    and sum(p[:len(p)//2]) <= half + 0.01
+                    and sum(p[len(p)//2:]) <= half + 0.01]
     eligible.sort(key=rank, reverse=True)
     if two_lane and fixed in eligible:
         # Die gemeinsame Mittellinie und zwei voll nutzbare Haelften
@@ -395,16 +397,15 @@ def calculate_flexible_loading(
 
     profiles = _width_profiles(records, deck_width, two_lane, flexible_width, prefer_side_balance)
     if two_lane:
-        # Zwei getrennte Spuren links und rechts der festen Mittellinie.
-        # Die Spuren duerfen unterschiedlich breit sein: erzwungene
-        # 1225/1225 mm haben im realen Test A3-24 eine weitere Pritsche
-        # erfordert. Die starre Aufteilung ist deshalb KEINE harte Vorgabe.
+        # Zweigeteilte Y-Flaeche mit variabler Zahl von Bahnen:
+        # zwei breite oder vier schmale, jeweils von der festen
+        # Pritschenmitte nach aussen. Keine starre 1225/1225-Vorgabe.
         half_width = deck_width / 2.0
         profiles = [
             p for p in profiles
-            if len(p) == 2
-            and p[0] <= half_width + 0.01
-            and p[1] <= half_width + 0.01
+            if len(p) in (2, 4)
+            and sum(p[:len(p)//2]) <= half_width + 0.01
+            and sum(p[len(p)//2:]) <= half_width + 0.01
         ]
     if not profiles:
         return empty, empty, 'Keine passende Breitenaufteilung'
