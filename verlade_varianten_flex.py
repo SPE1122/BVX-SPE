@@ -384,17 +384,15 @@ def calculate_flexible_loading(
 
     profiles = _width_profiles(records, deck_width, two_lane, flexible_width, prefer_side_balance)
     if two_lane:
-        # Die explizite zweispurige Vergleichsvariante muss wirklich zwei
-        # separate Spuren links/rechts der festen Pritschenmitte verwenden.
-        # Einspurige und mehrspurige Profile duerfen diese Variante nicht
-        # unbemerkt ersetzen.
+        # Bei explizit zweispuriger Verladung beide Haelften immer
+        # vollstaendig reservieren: 2450 mm -> 1225 / 1225 mm.
+        # Vorher wurden auch 1200 / 703 mm gewaehlt. Dadurch war die
+        # zweite Spur zu schmal fuer 1200-mm-Bauteile, obwohl die
+        # Trennlinie in Y bereits richtig stand.
         half_width = deck_width / 2.0
-        profiles = [
-            p for p in profiles
-            if len(p) == 2
-            and p[0] <= half_width + 0.01
-            and p[1] <= half_width + 0.01
-        ]
+        profiles = ([(half_width, half_width)]
+                    if max(float(r['Breite_mm']) for r in records) <= half_width + 0.01
+                    else [])
     if not profiles:
         return empty, empty, 'Keine passende Breitenaufteilung'
     platform_df = pd.DataFrame([platform_row])
