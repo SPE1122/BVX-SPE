@@ -211,6 +211,107 @@ def _assign_to_stacks(records: List[pd.Series], widths: Tuple[float, ...],
     return stacks
 
 
+
+def _dynamic_spatial_layout(records, platform_row, *, init_platform_state,
+                            can_place_stable, commit_place, base_default,
+                            layer_default, general_default, gap_default,
+                            prevent_wide_on_narrow, min_support_ratio,
+                            max_unsupported_length_mm, max_unsupported_side_mm,
+                            max_unsupported_length_percent,
+                            max_unsupported_side_percent,
+                            prefer_support_quality, allow_stack):
+    """Freie X/Y-Stellflaechen statt einer festen Zahl von Stapeln.
+
+    Die Eingabereihenfolge bleibt die physische Stapelreihenfolge (unten zuerst).
+    Die bestehenden Platzierungspruefungen entscheiden verbindlich ueber
+    Auflager, Abmessungen, Gewicht und Kollisionen.
+    """
+    deck_l = float(platform_row['Länge_mm'])
+    deck_w = float(platform_row['Breite_mm'])
+    back = float(platform_row.get('Überhang_hinten_mm', 0.0))
+    front = float(platform_row.get('Überhang_vorne_mm', 0.0))
+    usable_l = deck_l + back + front
+    base_z = float(platform_row.get('Kantholz_erste_Lage_mm', base_default))
+    gap_z = float(platform_row.get('Einlage_allgemein_mm', general_default))
+    layer_z = float(platform_row.get('Einlage_zwischen_Lagen_mm', layer_default))
+    results = []
+
+    # Verschiedene deterministische Gewichtungen statt einer starren
+    # Vier-Stapel-Aufteilung. Keine Aenderung der Pak-/Einheitenfolge.
+    for balance_weight, stack_weight in ((8.0, 0.6), (15.0, 1.0), (5.0, 2.0)):
+        state = init_platform_state(platform_row, base_default, layer_default, gap_default)
+        state.update({
+            'prevent_wide_on_narrow': bool(prevent_wide_on_narrow),
+            'min_support_width_ratio': float(min_support_ratio),
+            'max_unsupported_length_mm': float(max_unsupported_length_mm),
+            'max_unsupported_side_mm': float(max_unsupported_side_mm),
+            'max_unsupported_length_percent': float(max_unsupported_length_percent),
+            'max_unsupported_side_percent': float(max_unsupported_side_percent),
+            'prefer_support_quality': bool(prefer_support_quality),
+        })
+        placed = []
+        total_mass = 0.0
+        moment_x = 0.0
+        moment_y = 0.0
+        success = True
+        for unit in records:
+            length = float(unit['Länge_mm'])
+            width = float(unit['Breite_mm'])
+            height = float(unit['Höhe_mm'])
+            mass = float(unit['Gewicht_kg'])
+            if length > usable_l + 0.01 or width > deck_w + 0.01:
+                success = False
+                break
+            # Positionen an realen Kanten und mittig: ermoeglicht beliebig
+            # viele nebeneinander und hintereinander liegende Stapel.
+            xs = {0.0, back, max(0.0, (usable_l-length)/2),
+                  max(0.0, usable_l-length)}
+            ys = {0.0, max(0.0, (deck_w-width)/2), max(0.0, deck_w-width)}
+            for p in placed:
+                px, py, pz, pl, pw, ph = p
+                xs.update((px, px+pl+gap_default, px-length-gap_default,
+                           px+(pl-length)/2))
+                ys.update((py, py+pw, py-width, py+(pw-width)/2))
+            xs = sorted({round(x, 1) for x in xs if -0.01 <= x <= usable_l-length+0.01})
+            ys = sorted({round(y, 1) for y in ys if -0.01 <= y <= deck_w-width+0.01})
+            # Die oberen Auflageebenen sind ebenfalls dynamisch.
+            zs = {base_z}
+            if allow_stack:
+                for _, _, pz, _, _, ph in placed:
+                    zs.add(round(pz+ph+gap_z, 1))
+                    zs.add(round(pz+ph+layer_z, 1))
+            options = []
+            for z in sorted(zs):
+                for x in xs:
+                    for y in ys:
+                        if not can_place_stable(state, unit, x, y, z,
+                                                length, width, height, mass):
+                            continue
+                        new_total = total_mass + mass
+                        cx = (moment_x + mass*(x+length/2))/new_total
+                        cy = (moment_y + mass*(y+width/2))/new_total
+                        # Schwerpunkt in beiden Achsen, niedrige Ladehoehe
+                        # und kompakte Position gleichermassen beurteilen.
+                        score = (balance_weight*abs(cy-deck_w/2)
+                                 + 2.0*abs(cx-(back+deck_l/2))
+                                 + stack_weight*z
+                                 + 0.01*(x+y))
+                        options.append((score, z, x, y))
+            if not options:
+                success = False
+                break
+            _, z, x, y = min(options)
+            commit_place(state, unit, x, y, z, length, width, height, 0,
+                         'Dynamische Stellflaechensuche X/Y')
+            placed.append((x, y, z, length, width, height))
+            total_mass += mass
+            moment_x += mass*(x+length/2)
+            moment_y += mass*(y+width/2)
+        if success and placed:
+            results.append(pd.DataFrame(state['placements']))
+    return results
+
+
 def calculate_flexible_loading(
     physical_units: pd.DataFrame,
     platform_row: pd.Series,
@@ -394,6 +495,48 @@ def calculate_flexible_loading(
                     best_score = score
                     best_df = candidate
                     best_summary = recompute_summary(candidate, platform_df)
+
+    # Zweiter, unabhaengiger Suchweg: dynamische freie Stellflaechen.
+    # Er ersetzt die vorhandenen Bahnen nicht und uebernimmt nur Kandidaten,
+    # welche die identischen abschliessenden Sicherheitspruefungen bestehen.
+    if prefer_side_balance and flexible_width:
+        spatial_candidates = _dynamic_spatial_layout(
+            records, platform_row,
+            init_platform_state=init_platform_state,
+            can_place_stable=can_place_stable,
+            commit_place=commit_place,
+            base_default=base_default, layer_default=layer_default,
+            general_default=general_default, gap_default=gap_default,
+            prevent_wide_on_narrow=prevent_wide_on_narrow,
+            min_support_ratio=min_support_ratio,
+            max_unsupported_length_mm=max_unsupported_length_mm,
+            max_unsupported_side_mm=max_unsupported_side_mm,
+            max_unsupported_length_percent=max_unsupported_length_percent,
+            max_unsupported_side_percent=max_unsupported_side_percent,
+            prefer_support_quality=prefer_support_quality,
+            allow_stack=allow_stack,
+        )
+        wanted_ids = sorted(str(r['Einheit_ID']) for r in records)
+        ignored = {'Unterbau', 'Kantholz', 'Bundeinlage', 'Einlage', 'Lagenholz'}
+        for candidate in spatial_candidates:
+            real_ids = sorted(str(r['Einheit_ID']) for _, r in candidate.iterrows()
+                              if str(r.get('Typ', '')).strip() not in ignored)
+            if real_ids != wanted_ids:
+                continue
+            if not find_geometry_conflicts(candidate, platform_df).empty:
+                continue
+            if not support_chain_issues(candidate, platform_df).empty:
+                continue
+            if not physical_conflicts(candidate).empty:
+                continue
+            quality = load_quality(candidate, platform_row)
+            score = (float(quality['score'])
+                     + seitenbalance_kennzahl(candidate, platform_row)*6.0
+                     + flaechenverteilung_kennzahl(candidate, platform_row)*2.0)
+            if best_score is None or score < best_score:
+                best_score = score
+                best_df = candidate
+                best_summary = recompute_summary(candidate, platform_df)
 
     if best_df.empty:
         reason = ', '.join(f'{name}: {n}' for name, n in diagnostics.most_common(3))
