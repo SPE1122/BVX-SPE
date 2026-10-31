@@ -383,6 +383,18 @@ def calculate_flexible_loading(
         return empty, empty, 'Gewichtsgrenze'
 
     profiles = _width_profiles(records, deck_width, two_lane, flexible_width, prefer_side_balance)
+    if two_lane:
+        # Die explizite zweispurige Vergleichsvariante muss wirklich zwei
+        # separate Spuren links/rechts der festen Pritschenmitte verwenden.
+        # Einspurige und mehrspurige Profile duerfen diese Variante nicht
+        # unbemerkt ersetzen.
+        half_width = deck_width / 2.0
+        profiles = [
+            p for p in profiles
+            if len(p) == 2
+            and p[0] <= half_width + 0.01
+            and p[1] <= half_width + 0.01
+        ]
     if not profiles:
         return empty, empty, 'Keine passende Breitenaufteilung'
     platform_df = pd.DataFrame([platform_row])
@@ -518,7 +530,7 @@ def calculate_flexible_loading(
     # Zweiter, unabhaengiger Suchweg: dynamische freie Stellflaechen.
     # Er ersetzt die vorhandenen Bahnen nicht und uebernimmt nur Kandidaten,
     # welche die identischen abschliessenden Sicherheitspruefungen bestehen.
-    if prefer_side_balance and flexible_width:
+    if prefer_side_balance and flexible_width and not two_lane:
         spatial_candidates = _dynamic_spatial_layout(
             records, platform_row,
             init_platform_state=init_platform_state,
