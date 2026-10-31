@@ -417,9 +417,20 @@ def calculate_flexible_loading(
             # Auch freie Randflaechen nutzen: Profile alternativ links,
             # mittig oder rechts positionieren. Jeder Versuch muss danach
             # dieselben Auflage-, Kollisions- und Sicherheitspruefungen bestehen.
-            free_width = max(0.0, deck_width - sum(profile))
-            offsets = ([free_width / 2.0] if not prefer_side_balance else
-                       sorted(set((0.0, free_width / 2.0, free_width))))
+            # Die Pritschenmitte ist die feste Trennlinie fuer links/rechts.
+            # Niemals das komplette zweispurige Profil an den Rand verschieben:
+            # sonst ist die linke/rechte Spur fuer 1200-mm-Elemente blockiert.
+            center_y = deck_width / 2.0
+            if len(profile) >= 2:
+                split = (len(profile) + 1) // 2
+                left_span = sum(profile[:split])
+                right_span = sum(profile[split:])
+                if left_span > center_y + 0.01 or right_span > center_y + 0.01:
+                    diagnostics['Spuren passen nicht beidseits der Mitte'] += 1
+                    continue
+                offsets = [center_y - left_span]
+            else:
+                offsets = [(deck_width - sum(profile)) / 2.0]
             for offset_y in offsets:
                 state = init_platform_state(platform_row, base_default, layer_default, gap_default)
                 state['prevent_wide_on_narrow'] = bool(prevent_wide_on_narrow)
@@ -430,9 +441,8 @@ def calculate_flexible_loading(
                 state['max_unsupported_side_percent'] = float(max_unsupported_side_percent)
                 state['prefer_support_quality'] = bool(prefer_support_quality)
 
-                # Die bisherige mittige Breitenposition bleibt Standard.
-                # Bei aktivierter Seitenbalance werden zusaetzlich links- und
-                # rechtsbuendige Profilpositionen geprueft (siehe aeussere Schleife).
+                # Breitenbahnen gehen von der festen Pritschenmitte aus.
+                # Links und rechts bleiben getrennte Haelften.
                 y_start = offset_y
                 y_lanes: List[float] = []
                 for lane_width in profile:
