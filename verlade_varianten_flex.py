@@ -440,10 +440,15 @@ def calculate_flexible_loading(
                 if left_span > center_y + 0.01 or right_span > center_y + 0.01:
                     diagnostics['Spuren passen nicht beidseits der Mitte'] += 1
                     continue
-                offsets = [center_y - left_span]
+                # Erste Wahl: JEDES Element an der festen Y-Mittellinie
+                # ansetzen, links bis zur Mitte / rechts ab der Mitte.
+                # Alte Bahnzentrierung bleibt nur als sichere Rueckfallebene.
+                offsets = ([(center_y - left_span, 'innen'), (center_y - left_span, 'bahn')]
+                           if two_lane and len(profile) == 2
+                           else [(center_y - left_span, 'bahn')])
             else:
-                offsets = [(deck_width - sum(profile)) / 2.0]
-            for offset_y in offsets:
+                offsets = [((deck_width - sum(profile)) / 2.0, 'bahn')]
+            for offset_y, y_mode in offsets:
                 state = init_platform_state(platform_row, base_default, layer_default, gap_default)
                 state['prevent_wide_on_narrow'] = bool(prevent_wide_on_narrow)
                 state['min_support_width_ratio'] = float(min_support_ratio)
@@ -485,14 +490,22 @@ def calculate_flexible_loading(
                     height = float(unit['Höhe_mm'])
                     weight = float(unit['Gewicht_kg'])
                     x = round(anchors[stack_index] + (x_lengths[stack_index] - length) / 2.0, 1)
-                    y = round(y_lanes[lane] + (profile[lane] - width) / 2.0, 1)
+                    if y_mode == 'innen':
+                        # Y=0 ist der linke Pritschenrand, Mitte=Breite/2.
+                        # Kein Zentrieren schmaler Elemente innerhalb
+                        # einer asymmetrischen, verschobenen Breitenbahn.
+                        y = round(center_y - width if lane == 0 else center_y, 1)
+                    else:
+                        y = round(y_lanes[lane] + (profile[lane] - width) / 2.0, 1)
                     if not can_place_stable(state, unit, x, y, z, length, width, height, weight):
                         diagnostics['Auflage / Platzierung'] += 1
                         valid = False
                         break
                     commit_place(
                         state, unit, x, y, z, length, width, height, 0,
-                        'Flexible Verladung / getrennte Breiten- und Längsbahnen'
+                        ('Flexible Verladung / Y ab Pritschenmitte links/rechts'
+                         if y_mode == 'innen' else
+                         'Flexible Verladung / getrennte Breiten- und Längsbahnen')
                     )
                 if not valid:
                     continue
@@ -519,7 +532,18 @@ def calculate_flexible_loading(
                     continue
                 quality = load_quality(candidate, platform_row)
                 score = float(quality['score'])
-                if prefer_side_balance:
+                if two_lane and len(profile) == 2:
+                    # Nur Elemente links/rechts verteilen. Weder den
+                    # gewichteten Y-Schwerpunkt noch eine Gesamtverschiebung
+                    # der Ladung auf die andere Seite optimieren.
+                    left_count = sum(len(stack) for stack in stacks[:2])
+                    right_count = sum(len(stack) for stack in stacks[2:])
+                    score += abs(left_count - right_count) * 20.0
+                    # Bei ansonsten gleichwertiger Verladung die feste
+                    # Mittel-Anlage vor der alten Bahnzentrierung waehlen.
+                    if y_mode != 'innen':
+                        score += 50.0
+                elif prefer_side_balance:
                     score += seitenbalance_kennzahl(candidate, platform_row) * 6.0
                     score += flaechenverteilung_kennzahl(candidate, platform_row) * 2.0
                 if best_score is None or score < best_score:
