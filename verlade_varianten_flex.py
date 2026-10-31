@@ -274,14 +274,23 @@ def _dynamic_spatial_layout(records, platform_row, *, init_platform_state,
                 ys.update((py, py+pw, py-width, py+(pw-width)/2))
             xs = sorted({round(x, 1) for x in xs if -0.01 <= x <= usable_l-length+0.01})
             ys = sorted({round(y, 1) for y in ys if -0.01 <= y <= deck_w-width+0.01})
+            # Suchbudget begrenzen: auch bei vielen schmalen Bauteilen
+            # keine quadratisch anwachsenden X/Y-Kombinationen.
+            # Schwerpunktnahe und vorhandene Kantenpositionen bevorzugen.
+            x_mid = back + (deck_l-length)/2.0
+            y_mid = (deck_w-width)/2.0
+            xs = sorted(sorted(xs, key=lambda v: (abs(v-x_mid), v))[:12])
+            ys = sorted(sorted(ys, key=lambda v: (abs(v-y_mid), v))[:12])
             # Die oberen Auflageebenen sind ebenfalls dynamisch.
             zs = {base_z}
             if allow_stack:
                 for _, _, pz, _, _, ph in placed:
                     zs.add(round(pz+ph+gap_z, 1))
                     zs.add(round(pz+ph+layer_z, 1))
+            # Die acht tiefsten tragfaehigen Ebenenkandidaten pruefen.
+            # Andere Anordnungen bleiben ueber die alte Bahnsuche moeglich.
             options = []
-            for z in sorted(zs):
+            for z in sorted(zs)[:8]:
                 for x in xs:
                     for y in ys:
                         if not can_place_stable(state, unit, x, y, z,
