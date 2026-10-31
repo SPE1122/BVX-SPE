@@ -279,18 +279,18 @@ def _dynamic_spatial_layout(records, platform_row, *, init_platform_state,
             # Schwerpunktnahe und vorhandene Kantenpositionen bevorzugen.
             x_mid = back + (deck_l-length)/2.0
             y_mid = (deck_w-width)/2.0
-            xs = sorted(sorted(xs, key=lambda v: (abs(v-x_mid), v))[:12])
-            ys = sorted(sorted(ys, key=lambda v: (abs(v-y_mid), v))[:12])
+            xs = sorted(sorted(xs, key=lambda v: (abs(v-x_mid), v))[:7])
+            ys = sorted(sorted(ys, key=lambda v: (abs(v-y_mid), v))[:7])
             # Die oberen Auflageebenen sind ebenfalls dynamisch.
             zs = {base_z}
             if allow_stack:
                 for _, _, pz, _, _, ph in placed:
                     zs.add(round(pz+ph+gap_z, 1))
                     zs.add(round(pz+ph+layer_z, 1))
-            # Die acht tiefsten tragfaehigen Ebenenkandidaten pruefen.
+            # Die fuenf tiefsten Hoehenkandidaten pruefen.
             # Andere Anordnungen bleiben ueber die alte Bahnsuche moeglich.
             options = []
-            for z in sorted(zs)[:8]:
+            for z in sorted(zs)[:5]:
                 for x in xs:
                     for y in ys:
                         if not can_place_stable(state, unit, x, y, z,
