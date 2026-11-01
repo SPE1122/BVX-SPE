@@ -135,20 +135,7 @@ def _width_profiles(records: List[pd.Series], deck_width: float,
                         profiles.add((w, round(other, 1)))
                         profiles.add((round(other, 1), w))
     eligible = [p for p in profiles if rank(p)[0] >= 0.0]
-    if two_lane:
-        # Zwei Pritschenhaelften sind die Y-Bezugsbereiche, keine
-        # Begrenzung auf genau zwei Breitenbahnen. Insbesondere duerfen
-        # vier 600-mm-Bahnen als je zwei Bahnen links/rechts verbleiben.
-        eligible = [p for p in eligible
-                    if len(p) in (2, 4)
-                    and sum(p[:len(p)//2]) <= half + 0.01
-                    and sum(p[len(p)//2:]) <= half + 0.01]
     eligible.sort(key=rank, reverse=True)
-    if two_lane and fixed in eligible:
-        # Die gemeinsame Mittellinie und zwei voll nutzbare Haelften
-        # zuerst pruefen, ohne schmalere passende Alternativen auszuschliessen.
-        eligible.remove(fixed)
-        eligible.insert(0, fixed)
     if not prefer_side_balance:
         return eligible[:12]
     # Auch spiegelverkehrte Belegungen testen: breite Elemente sonst
@@ -397,15 +384,16 @@ def calculate_flexible_loading(
 
     profiles = _width_profiles(records, deck_width, two_lane, flexible_width, prefer_side_balance)
     if two_lane:
-        # Zweigeteilte Y-Flaeche mit variabler Zahl von Bahnen:
-        # zwei breite oder vier schmale, jeweils von der festen
-        # Pritschenmitte nach aussen. Keine starre 1225/1225-Vorgabe.
+        # Die explizite zweispurige Vergleichsvariante muss wirklich zwei
+        # separate Spuren links/rechts der festen Pritschenmitte verwenden.
+        # Einspurige und mehrspurige Profile duerfen diese Variante nicht
+        # unbemerkt ersetzen.
         half_width = deck_width / 2.0
         profiles = [
             p for p in profiles
-            if len(p) in (2, 4)
-            and sum(p[:len(p)//2]) <= half_width + 0.01
-            and sum(p[len(p)//2:]) <= half_width + 0.01
+            if len(p) == 2
+            and p[0] <= half_width + 0.01
+            and p[1] <= half_width + 0.01
         ]
     if not profiles:
         return empty, empty, 'Keine passende Breitenaufteilung'
@@ -414,13 +402,7 @@ def calculate_flexible_loading(
     best_score: Optional[float] = None
     diagnostics = Counter()
 
-    for profile_index, profile in enumerate(profiles):
-        # Nach acht vollstaendig untersuchten Profilen bei Erfolg
-        # abbrechen. Wenn KEIN Profil eine gueltige Verladung ergab,
-        # werden ALLE weiteren Profile geprueft: keine stille
-        # Verringerung der packbaren Bauteilmenge durch ein hartes Limit.
-        if profile_index >= 8 and not best_df.empty:
-            break
+    for profile in profiles:
         strategies = ('hoehe', 'breite', 'folge', 'seitenbalance') if prefer_side_balance else ('hoehe', 'breite', 'folge')
         for strategy in strategies:
             stacks = _assign_to_stacks(
@@ -458,15 +440,10 @@ def calculate_flexible_loading(
                 if left_span > center_y + 0.01 or right_span > center_y + 0.01:
                     diagnostics['Spuren passen nicht beidseits der Mitte'] += 1
                     continue
-                # Erste Wahl: JEDES Element an der festen Y-Mittellinie
-                # ansetzen, links bis zur Mitte / rechts ab der Mitte.
-                # Alte Bahnzentrierung bleibt nur als sichere Rueckfallebene.
-                offsets = ([(center_y - left_span, 'innen'), (center_y - left_span, 'bahn')]
-                           if two_lane and len(profile) == 2
-                           else [(center_y - left_span, 'bahn')])
+                offsets = [center_y - left_span]
             else:
-                offsets = [((deck_width - sum(profile)) / 2.0, 'bahn')]
-            for offset_y, y_mode in offsets:
+                offsets = [(deck_width - sum(profile)) / 2.0]
+            for offset_y in offsets:
                 state = init_platform_state(platform_row, base_default, layer_default, gap_default)
                 state['prevent_wide_on_narrow'] = bool(prevent_wide_on_narrow)
                 state['min_support_width_ratio'] = float(min_support_ratio)
@@ -508,22 +485,14 @@ def calculate_flexible_loading(
                     height = float(unit['Höhe_mm'])
                     weight = float(unit['Gewicht_kg'])
                     x = round(anchors[stack_index] + (x_lengths[stack_index] - length) / 2.0, 1)
-                    if y_mode == 'innen':
-                        # Y=0 ist der linke Pritschenrand, Mitte=Breite/2.
-                        # Kein Zentrieren schmaler Elemente innerhalb
-                        # einer asymmetrischen, verschobenen Breitenbahn.
-                        y = round(center_y - width if lane == 0 else center_y, 1)
-                    else:
-                        y = round(y_lanes[lane] + (profile[lane] - width) / 2.0, 1)
+                    y = round(y_lanes[lane] + (profile[lane] - width) / 2.0, 1)
                     if not can_place_stable(state, unit, x, y, z, length, width, height, weight):
                         diagnostics['Auflage / Platzierung'] += 1
                         valid = False
                         break
                     commit_place(
                         state, unit, x, y, z, length, width, height, 0,
-                        ('Flexible Verladung / Y ab Pritschenmitte links/rechts'
-                         if y_mode == 'innen' else
-                         'Flexible Verladung / getrennte Breiten- und Längsbahnen')
+                        'Flexible Verladung / getrennte Breiten- und Längsbahnen'
                     )
                 if not valid:
                     continue
@@ -550,34 +519,18 @@ def calculate_flexible_loading(
                     continue
                 quality = load_quality(candidate, platform_row)
                 score = float(quality['score'])
-                if two_lane and len(profile) == 2:
-                    # Nur Elemente links/rechts verteilen. Weder den
-                    # gewichteten Y-Schwerpunkt noch eine Gesamtverschiebung
-                    # der Ladung auf die andere Seite optimieren.
-                    left_count = sum(len(stack) for stack in stacks[:2])
-                    right_count = sum(len(stack) for stack in stacks[2:])
-                    score += abs(left_count - right_count) * 20.0
-                    # Bei ansonsten gleichwertiger Verladung die feste
-                    # Mittel-Anlage vor der alten Bahnzentrierung waehlen.
-                    if y_mode != 'innen':
-                        score += 50.0
-                elif prefer_side_balance:
+                if prefer_side_balance:
                     score += seitenbalance_kennzahl(candidate, platform_row) * 6.0
                     score += flaechenverteilung_kennzahl(candidate, platform_row) * 2.0
                 if best_score is None or score < best_score:
                     best_score = score
                     best_df = candidate
                     best_summary = recompute_summary(candidate, platform_df)
-                # Die gleiche Verteilung nochmals mitten in den Bahnen
-                # zu pruefen ist unnoetig, wenn die gewuenschte Anlage
-                # ab Y-Mitte bereits alle Sicherheitspruefungen besteht.
-                if two_lane and y_mode == 'innen':
-                    break
 
     # Zweiter, unabhaengiger Suchweg: dynamische freie Stellflaechen.
     # Er ersetzt die vorhandenen Bahnen nicht und uebernimmt nur Kandidaten,
     # welche die identischen abschliessenden Sicherheitspruefungen bestehen.
-    if prefer_side_balance and flexible_width and not two_lane and len(records) <= 12:
+    if prefer_side_balance and flexible_width and not two_lane:
         spatial_candidates = _dynamic_spatial_layout(
             records, platform_row,
             init_platform_state=init_platform_state,
