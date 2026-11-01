@@ -10,6 +10,7 @@ from itertools import combinations_with_replacement
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
+from loading_diagnostics import trace_event
 
 
 
@@ -169,6 +170,8 @@ def _assign_to_stacks(records: List[pd.Series], widths: Tuple[float, ...],
                 continue
             lane = i // 2
             if width > widths[lane] + 0.01:
+                trace_event('Bahnbreite_abgelehnt', Einheit_ID=str(row.get('Einheit_ID', '')),
+                            Teilbreite_mm=width, Bahnbreite_mm=widths[lane])
                 continue
             old = stack[-1] if stack else None
             spacer = (layer_gap if old is not None and (
@@ -180,6 +183,11 @@ def _assign_to_stacks(records: List[pd.Series], widths: Tuple[float, ...],
             if (next_height > max_height + 0.01
                     or next_length + (gap if other_length else 0.0)
                     + other_length > deck_length + 0.01):
+                trace_event('Stapelabmessungen_abgelehnt',
+                            Einheit_ID=str(row.get('Einheit_ID', '')),
+                            Höhe_mm=next_height, Max_Höhe_mm=max_height,
+                            Gesamtlänge_mm=next_length + (gap if other_length else 0.0) + other_length,
+                            Max_Länge_mm=deck_length)
                 continue
 
             # Breite passend ausnutzen, Höhen gleichmässig verteilen.
@@ -396,7 +404,11 @@ def calculate_flexible_loading(
             and p[1] <= half_width + 0.01
         ]
     if not profiles:
+        trace_event('Keine_Breitenprofile', Pritsche=str(platform_row.get('Pritsche', '')))
         return empty, empty, 'Keine passende Breitenaufteilung'
+    trace_event('Flexible_Suche', Pritsche=str(platform_row.get('Pritsche', '')),
+                Einheiten=[str(r.get('Einheit_ID', '')) for r in records],
+                Profile=profiles, zweispurig=two_lane, Seitenbalance=prefer_side_balance)
     platform_df = pd.DataFrame([platform_row])
     best_df, best_summary = empty, empty
     best_score: Optional[float] = None
@@ -487,6 +499,11 @@ def calculate_flexible_loading(
                     x = round(anchors[stack_index] + (x_lengths[stack_index] - length) / 2.0, 1)
                     y = round(y_lanes[lane] + (profile[lane] - width) / 2.0, 1)
                     if not can_place_stable(state, unit, x, y, z, length, width, height, weight):
+                        trace_event('Auflage_oder_Platzierung_abgelehnt',
+                                    Pritsche=str(platform_row.get('Pritsche', '')),
+                                    Einheit_ID=str(unit.get('Einheit_ID', '')),
+                                    X_mm=x, Y_mm=y, Z_mm=z, Länge_mm=length,
+                                    Breite_mm=width, Höhe_mm=height, Profil=profile)
                         diagnostics['Auflage / Platzierung'] += 1
                         valid = False
                         break
@@ -570,6 +587,9 @@ def calculate_flexible_loading(
                 best_summary = recompute_summary(candidate, platform_df)
 
     if best_df.empty:
+        trace_event('Flexible_Suche_ohne_Ergebnis', Gründe=dict(diagnostics))
         reason = ', '.join(f'{name}: {n}' for name, n in diagnostics.most_common(3))
         return empty, empty, reason or 'Keine gültige zusätzliche Anordnung'
+    trace_event('Flexible_Suche_Ergebnis', Gründe=dict(diagnostics), Bewertung=best_score,
+                Pritsche=str(platform_row.get('Pritsche', '')))
     return best_df, best_summary, 'Gültige flexible Anordnung'

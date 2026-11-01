@@ -28,6 +28,9 @@ import json
 import hashlib
 from compaction_runtime import compaction_budget, with_compaction_budget
 from pdf_bundle_display import expand_bundle_display_rows, bundle_spacer_pdf_note
+from loading_diagnostics import (
+    traced_loading_run, make_snapshot, render_diagnostic_download, support_diagnostic_table,
+)
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Tuple
 from collections import Counter
@@ -7008,6 +7011,7 @@ def _load_optional_flexible_variants():
 
 
 @with_compaction_budget
+@traced_loading_run
 def create_variant_a_loading_plan(
     sorted_parts: pd.DataFrame,
     options_df: pd.DataFrame,
@@ -15351,11 +15355,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
         pritschen_edit['Auflager_bei_Verladeplanung_beruecksichtigen'] = bool(consider_generated_supports)
         pritschen_edit['Auflager_Strenge'] = str(support_planning_mode)
 
-    automatic_input_signature = _loading_plan_input_signature(
-        sorted_parts_for_loading,
-        options_edit,
-        pritschen_edit,
-        {
+    diagnostic_settings = {
             'allow_beside': bool(allow_beside),
             'allow_stack': bool(allow_stack),
             'allow_rotation': bool(allow_rotation),
@@ -15390,8 +15390,27 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
             'fill_remainder_next_group': bool(fill_remainder_next_group),
             'base_wood_height': float(base_wood_height),
             'gap_length': float(gap_length),
-        },
+        }
+    automatic_input_signature = _loading_plan_input_signature(
+        sorted_parts_for_loading,
+        options_edit,
+        pritschen_edit,
+        diagnostic_settings,
     )
+    diagnostic_current_settings = {
+        **diagnostic_settings, 'verladeart': verladeart,
+        'main_attr': main_attr, 'main_direction': main_direction,
+        'second_attr': second_attr, 'second_direction': second_direction,
+        'extra_sort_attrs': extra_sort_attrs,
+        'center_geometric': bool(center_geometric),
+        'underbau_enabled': bool(underbau_enabled),
+        'draw_underbau_rows': bool(draw_underbau_rows),
+        'front_orientation': vorne_orientation, 'left_orientation': links_orientation,
+        'density_kg_m3': float(density), 'product_mode': product_mode,
+        'swap_width_height': bool(force_swap_width_height),
+        'bundle_overview_only': bool(bundle_overview_only),
+        'min_underbau_height_mm': float(min_underbau_height),
+    }
 
     st.subheader('8. Verladung starten')
     st.caption('Die Verladung wird erst berechnet, wenn dieser Startknopf gedrückt wird.')
@@ -15420,6 +15439,11 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
     if verladeart == 'Automatisch':
         stored_plan = st.session_state.get('automatic_loading_plan_v84')
         if recalculate_requested or not isinstance(stored_plan, dict):
+            diagnostic_snapshot = make_snapshot(
+                diagnostic_current_settings, sorted_parts_for_loading,
+                options_edit, pritschen_edit, standards,
+            )
+            diagnostic_started = time.perf_counter()
             placements_df, summary_df, platforms_used_df, fuhren_log_df, plan_units_df = create_variant_a_loading_plan(
                 sorted_parts_for_loading,
                 options_edit,
@@ -15455,6 +15479,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
 
             # V131: rein optionaler Vergleich. Die Standardberechnung und deren
             # Reihenfolge bleiben die unveränderte Ausgangsbasis.
+            diagnostic_runs = {'standard': placements_df.attrs.get('loading_diagnostics')}
             comparison_text = ''
             if bool(try_length_first_compare or flexible_lane_compare or flexible_width_compare or prefer_side_balance):
                 standard_fuhren = len(fuhren_log_df) if fuhren_log_df is not None else 0
@@ -15503,6 +15528,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                             avoid_unnecessary_overhang=bool(avoid_unnecessary_overhang),
                         )
                     alt_placements, alt_summary, alt_platforms, alt_log, alt_units = alternative
+                    diagnostic_runs['alternative'] = alt_placements.attrs.get('loading_diagnostics')
                     longitudinal_diagnostic_report = alt_log[[
                         col for col in (
                             'Fuhre_Nr', 'Pritschen_Trenngruppe', 'Pritschen',
@@ -15745,6 +15771,9 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                         )
 
             st.session_state['automatic_loading_plan_v84'] = {
+                'diagnostic_snapshot': diagnostic_snapshot,
+                'diagnostic_runs': diagnostic_runs,
+                'diagnostic_elapsed_seconds': time.perf_counter() - diagnostic_started,
                 'longitudinal_diagnostic_report': (
                     longitudinal_diagnostic_report
                     if bool(try_length_first_compare or flexible_lane_compare or flexible_width_compare or prefer_side_balance) and 'longitudinal_diagnostic_report' in locals()
@@ -16697,6 +16726,56 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                 st.plotly_chart(draw_loading_view(display_placements_df, platforms_used_df, selected_platform, 'front'), use_container_width=True, key=f'ansicht_front_{selected_platform}')
 
     with tab7:
+        if 'bsd_header_df' not in locals() or 'bsd_matrix_df' not in locals():
+            bsd_header_df, bsd_matrix_df = create_all_bsd_matrices(
+                display_placements_df, platforms_used_df, edited_summary_df,
+                warnings_plan_df, project_meta=project_meta)
+        diagnostic_plan = (
+            st.session_state.get('automatic_loading_plan_v84', {})
+            if verladeart == 'Automatisch' else {}
+        )
+        render_diagnostic_download(
+            st, snapshot=diagnostic_plan.get('diagnostic_snapshot'),
+            current_settings=diagnostic_current_settings,
+            tables={
+                'positionen_aktuell': edited_placements_df,
+                'positionen_pdf_bsd': display_placements_df,
+                'positionen_automatik': diagnostic_plan.get('placements'),
+                'verladeeinheiten': units_df,
+                'pritschen_verwendet': platforms_used_df,
+                'zusammenfassung': edited_summary_df,
+                'fuhren': fuhren_log_df,
+                'warnungen': warnings_plan_df,
+                'variantenentscheidungen': diagnostic_plan.get('longitudinal_diagnostic_report'),
+                'bsd_matrix': bsd_matrix_df,
+                'aktuelle_eingabeteile': sorted_parts_for_loading,
+                'aktuelle_pritschenkonfiguration': pritschen_edit,
+                'aktuelle_fuhrenoptionen': options_edit,
+            },
+            checks={
+                'geometriekonflikte': lambda: find_geometry_conflicts(
+                    edited_placements_df, platforms_used_df),
+                'auflagekette': lambda: _pinned_manual_support_chain_issues(
+                    edited_placements_df, platforms_used_df),
+                'physische_kollisionen': lambda: _pinned_manual_physical_conflicts(
+                    edited_placements_df),
+                'ladeplanwarnungen': lambda: compute_loading_warnings(
+                    edited_placements_df, platforms_used_df),
+                'auflage_je_einheit': lambda: support_diagnostic_table(
+                    edited_placements_df, platforms_used_df,
+                    init_platform_state, _support_metrics_for_candidate),
+            },
+            metadata={
+                'settings_changed_since_calculation': bool(plan_is_stale),
+                'calculation_seconds_total': diagnostic_plan.get('diagnostic_elapsed_seconds'),
+                'search_runs': diagnostic_plan.get('diagnostic_runs', {}),
+                'variant_decision': diagnostic_plan.get('comparison_text', ''),
+                'input_signature_calculation': diagnostic_plan.get('signature'),
+                'input_signature_current': automatic_input_signature,
+                'plan_mode': verladeart,
+            },
+        )
+        st.divider()
         # Falls der Ladeplan-BSD-Tab nicht angezeigt wurde, trotzdem für den Export erstellen.
         if 'bsd_header_df' not in locals() or 'bsd_matrix_df' not in locals():
             bsd_header_df, bsd_matrix_df = create_all_bsd_matrices(display_placements_df, platforms_used_df, edited_summary_df, warnings_plan_df, project_meta=project_meta)
