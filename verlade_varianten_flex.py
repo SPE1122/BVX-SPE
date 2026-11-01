@@ -403,6 +403,11 @@ def calculate_flexible_loading(
             and p[0] <= half_width + 0.01
             and p[1] <= half_width + 0.01
         ]
+    # Keep all legacy profiles. Add full-width-per-half placement as a separate
+    # candidate, not a replacement: upper members need not fit a narrow base lane.
+    transverse_profile = (deck_width / 2., deck_width / 2.)
+    if flexible_width and prefer_side_balance and transverse_profile not in profiles:
+        profiles.append(transverse_profile)
     if not profiles:
         trace_event('Keine_Breitenprofile', Pritsche=str(platform_row.get('Pritsche', '')))
         return empty, empty, 'Keine passende Breitenaufteilung'
@@ -464,6 +469,10 @@ def calculate_flexible_loading(
                 state['max_unsupported_length_percent'] = float(max_unsupported_length_percent)
                 state['max_unsupported_side_percent'] = float(max_unsupported_side_percent)
                 state['prefer_support_quality'] = bool(prefer_support_quality)
+                transverse_candidate = (
+                    flexible_width and prefer_side_balance and profile == transverse_profile
+                )
+                state['allow_transverse_supports'] = bool(transverse_candidate)
 
                 # Breitenbahnen gehen von der festen Pritschenmitte aus.
                 # Links und rechts bleiben getrennte Haelften.
@@ -498,6 +507,9 @@ def calculate_flexible_loading(
                     weight = float(unit['Gewicht_kg'])
                     x = round(anchors[stack_index] + (x_lengths[stack_index] - length) / 2.0, 1)
                     y = round(y_lanes[lane] + (profile[lane] - width) / 2.0, 1)
+                    if transverse_candidate:
+                        # Fixed centre reference, member-specific width on each layer.
+                        y = round(center_y - width if lane == 0 else center_y, 1)
                     if not can_place_stable(state, unit, x, y, z, length, width, height, weight):
                         trace_event('Auflage_oder_Platzierung_abgelehnt',
                                     Pritsche=str(platform_row.get('Pritsche', '')),
@@ -516,6 +528,35 @@ def calculate_flexible_loading(
                 candidate = pd.DataFrame(state['placements'])
                 if candidate.empty:
                     continue
+                if transverse_candidate:
+                    trace_event(
+                        'Lagenweise_Breitenbelegung',
+                        Pritsche=str(platform_row.get('Pritsche', '')),
+                        Einheiten=len(records),
+                        Seitliche_Ausgleichshölzer=int(
+                            candidate.Einheit_ID.astype(str).str.startswith('UBY_').sum()
+                        ),
+                    )
+                    # Translate the complete candidate in X only. Supports and
+                    # their loads remain aligned; Y stays tied to the fixed centre.
+                    real = candidate[~candidate.Typ.isin(
+                        ['Unterbau', 'Kantholz', 'Einlage', 'Bundeinlage', 'Lagenholz']
+                    )]
+                    masses = pd.to_numeric(real.Gewicht_kg).clip(lower=0)
+                    if masses.sum() > 0:
+                        center_x = ((real.X_mm + real.Länge_mm / 2.) * masses).sum() / masses.sum()
+                        dx = deck_back + deck_len / 2. - center_x
+                        lower_dx = -float(candidate.X_mm.min())
+                        upper_dx = effective_length - float((candidate.X_mm + candidate.Länge_mm).max())
+                        grounded = candidate[
+                            candidate.Typ.eq('Unterbau') & candidate.Z_mm.le(base_z + .1)
+                        ]
+                        if not grounded.empty:
+                            lower_dx = max(lower_dx, deck_back - float(grounded.X_mm.min()))
+                            upper_dx = min(upper_dx, deck_back + deck_len -
+                                           float((grounded.X_mm + grounded.Länge_mm).max()))
+                        if lower_dx <= upper_dx:
+                            candidate['X_mm'] = candidate.X_mm + min(max(dx, lower_dx), upper_dx)
                 if not find_geometry_conflicts(candidate, platform_df).empty:
                     diagnostics['Geometrie'] += 1
                     continue

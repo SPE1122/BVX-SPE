@@ -27,6 +27,7 @@ import time
 import json
 import hashlib
 from compaction_runtime import compaction_budget, with_compaction_budget
+from transverse_loading_supports import transverse_support_rows
 from pdf_bundle_display import expand_bundle_display_rows, bundle_spacer_pdf_note
 from loading_diagnostics import (
     traced_loading_run, make_snapshot, render_diagnostic_download, support_diagnostic_table,
@@ -1876,7 +1877,9 @@ def _planned_support_rows_for_candidate(
     Unterkante der neuen Einheit. Bereiche, in denen bereits ein unteres
     Bauteil steht, werden nicht überbrückt; dort ist nur die direkte Tragfläche
     zulässig. So können Auflager vor/nach unteren Elementen entstehen, aber
-    niemals frei in der Luft.
+    niemals frei in der Luft. Die zusätzliche lagenweise Breitensuche darf
+    seitliche Ausgleichshölzer auf der Pritsche oder auf unteren Tragflächen
+    ergänzen; auch diese werden als reale Unterbau-Geometrie gespeichert.
     """
     if not bool(state.get('consider_generated_supports', False)):
         return None
@@ -1986,6 +1989,16 @@ def _planned_support_rows_for_candidate(
         remaining_area = max(0.0, target_area - current_area)
 
     if current_area + 1e-6 < target_area:
+        if bool(state.get('allow_transverse_supports', False)):
+            # Separate fallback: include already planned supports as obstacles.
+            # Never weaken the existing area/length or physical collision checks.
+            extra_state = dict(state, placements=list(state.get('placements', [])) + planned)
+            extra = transverse_support_rows(
+                extra_state, unit, float(x), float(y), float(z), float(length), float(width),
+                target_area, covered_rects, _rect_union_area, _row_box_values,
+            )
+            if extra is not None:
+                return planned + extra
         return None
     return planned
 
@@ -12044,6 +12057,15 @@ def create_loading_pdf(
             c.setFont('Helvetica', 7)
             c.setFillColor(colors.black)
             c.drawString(margin, 24, 'Darstellung: Einzelteile im Bund am Bundursprung bündig; individuelle Innenversätze sind nicht hinterlegt.')
+        required_transverse = placements_df[
+            placements_df.get('Pritsche', pd.Series(dtype=str)).astype(str).eq(str(platform.get('Pritsche')))
+            & placements_df.get('Einheit_ID', pd.Series(dtype=str)).astype(str).str.startswith('UBY_')
+        ]
+        if not required_transverse.empty:
+            c.setFont('Helvetica-Bold', 7)
+            c.setFillColor(colors.black)
+            c.drawString(margin, 36,
+                         f'Seitlicher Ausgleich erforderlich: {len(required_transverse)} eingezeichnete Auflager einsetzen. Zusätzliches Holzgewicht nicht enthalten.')
         c.showPage()
 
         # Zweite Seite: Ladeplan BSD Matrix je Pritsche, exakt gleicher Bezug wie PDF-Ansichten.
@@ -15869,16 +15891,27 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
         fuhren_log_df = accepted_pin['fuhren_log_df'].copy(deep=True)
     platforms_used_df = _clean_manual_platforms_dataframe(st.session_state['manual_platforms_df'])
     edited_placements_df = clean_placements_dataframe(st.session_state['manual_placements_df'])
-    loaded_count = int((edited_placements_df['Pritsche'] != 'NICHT VERLADEN').sum()) if not edited_placements_df.empty and 'Pritsche' in edited_placements_df.columns else 0
+    load_mask = edited_placements_df.get('Typ', pd.Series(dtype=str)).apply(_is_real_load_type_value)
+    loaded_count = int((load_mask & (edited_placements_df['Pritsche'] != 'NICHT VERLADEN')).sum()) if not edited_placements_df.empty and 'Pritsche' in edited_placements_df.columns else 0
     not_loaded_count = int((edited_placements_df['Pritsche'] == 'NICHT VERLADEN').sum()) if not edited_placements_df.empty and 'Pritsche' in edited_placements_df.columns else 0
     fuhren_count = int(platforms_used_df['Fuhre_Nr'].nunique()) if platforms_used_df is not None and not platforms_used_df.empty and 'Fuhre_Nr' in platforms_used_df.columns else (int(fuhren_log_df['Fuhre_Nr'].nunique()) if not fuhren_log_df.empty else 0)
 
     col1, col2, col3, col4, col5 = st.columns(5)
-    col1.metric('Verladeeinheiten', len(edited_placements_df) if not edited_placements_df.empty else len(units_df))
+    col1.metric('Verladeeinheiten', int(load_mask.sum()) if not edited_placements_df.empty else len(units_df))
     col2.metric('Fuhren erzeugt', fuhren_count)
     col3.metric('Verladen', loaded_count)
     col4.metric('Nicht verladen', not_loaded_count)
     col5.metric('Pritschen genutzt', len(platforms_used_df) if not platforms_used_df.empty else 0)
+    transverse_timbers = edited_placements_df[
+        edited_placements_df.get('Einheit_ID', pd.Series(dtype=str)).astype(str).str.startswith('UBY_')
+    ]
+    if not transverse_timbers.empty:
+        st.warning(
+            f'Seitlicher Ausgleich erforderlich: {len(transverse_timbers)} Auflager sind '
+            'für diesen Plan eingeplant und müssen beim Verladen eingesetzt werden. '
+            'Positionen und Abmessungen stehen in den Auflagerzeilen und im Diagnosepaket. '
+            'Das zusätzliche Holzgewicht ist nicht im Bauteilgewicht enthalten.'
+        )
 
     manual_plan_ready = bool(st.session_state.get('manual_plan_ready_v84', False)) if verladeart == 'Manuell' else True
     if verladeart == 'Manuell' and not manual_plan_ready:

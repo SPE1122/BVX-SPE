@@ -18,3 +18,13 @@ projecting into open air are a separate practical concern.
 **How to apply:** Consider explicitly required compensating timbers when exploring
 transverse placements. Do not equate willingness to insert timber with verified
 bearing capacity, and do not invent support under an otherwise unsupported end.
+
+Wider elements above narrower elements must be a usable loading arrangement,
+not categorically excluded because the lower layer is narrow.
+
+**Why:** The user explicitly wants this practical arrangement; manually inserting
+transverse compensating timbers is part of their loading process. They requested
+a working correction rather than further theoretical discussion or broad changes.
+
+**How to apply:** Keep the distinction between transverse compensation and free
+longitudinal ends. Preserve bundle membership and the user's prescribed order.
