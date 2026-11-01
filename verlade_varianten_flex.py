@@ -135,7 +135,20 @@ def _width_profiles(records: List[pd.Series], deck_width: float,
                         profiles.add((w, round(other, 1)))
                         profiles.add((round(other, 1), w))
     eligible = [p for p in profiles if rank(p)[0] >= 0.0]
+    if two_lane:
+        # Zwei Pritschenhaelften sind die Y-Bezugsbereiche, keine
+        # Begrenzung auf genau zwei Breitenbahnen. Insbesondere duerfen
+        # vier 600-mm-Bahnen als je zwei Bahnen links/rechts verbleiben.
+        eligible = [p for p in eligible
+                    if len(p) in (2, 4)
+                    and sum(p[:len(p)//2]) <= half + 0.01
+                    and sum(p[len(p)//2:]) <= half + 0.01]
     eligible.sort(key=rank, reverse=True)
+    if two_lane and fixed in eligible:
+        # Die gemeinsame Mittellinie und zwei voll nutzbare Haelften
+        # zuerst pruefen, ohne schmalere passende Alternativen auszuschliessen.
+        eligible.remove(fixed)
+        eligible.insert(0, fixed)
     if not prefer_side_balance:
         return eligible[:12]
     # Auch spiegelverkehrte Belegungen testen: breite Elemente sonst
@@ -384,16 +397,15 @@ def calculate_flexible_loading(
 
     profiles = _width_profiles(records, deck_width, two_lane, flexible_width, prefer_side_balance)
     if two_lane:
-        # Zwei getrennte Spuren links und rechts der festen Mittellinie.
-        # Die Spuren duerfen unterschiedlich breit sein: erzwungene
-        # 1225/1225 mm haben im realen Test A3-24 eine weitere Pritsche
-        # erfordert. Die starre Aufteilung ist deshalb KEINE harte Vorgabe.
+        # Zweigeteilte Y-Flaeche mit variabler Zahl von Bahnen:
+        # zwei breite oder vier schmale, jeweils von der festen
+        # Pritschenmitte nach aussen. Keine starre 1225/1225-Vorgabe.
         half_width = deck_width / 2.0
         profiles = [
             p for p in profiles
-            if len(p) == 2
-            and p[0] <= half_width + 0.01
-            and p[1] <= half_width + 0.01
+            if len(p) in (2, 4)
+            and sum(p[:len(p)//2]) <= half_width + 0.01
+            and sum(p[len(p)//2:]) <= half_width + 0.01
         ]
     if not profiles:
         return empty, empty, 'Keine passende Breitenaufteilung'
@@ -402,7 +414,13 @@ def calculate_flexible_loading(
     best_score: Optional[float] = None
     diagnostics = Counter()
 
-    for profile in profiles:
+    for profile_index, profile in enumerate(profiles):
+        # Nach acht vollstaendig untersuchten Profilen bei Erfolg
+        # abbrechen. Wenn KEIN Profil eine gueltige Verladung ergab,
+        # werden ALLE weiteren Profile geprueft: keine stille
+        # Verringerung der packbaren Bauteilmenge durch ein hartes Limit.
+        if profile_index >= 8 and not best_df.empty:
+            break
         strategies = ('hoehe', 'breite', 'folge', 'seitenbalance') if prefer_side_balance else ('hoehe', 'breite', 'folge')
         for strategy in strategies:
             stacks = _assign_to_stacks(
@@ -550,11 +568,16 @@ def calculate_flexible_loading(
                     best_score = score
                     best_df = candidate
                     best_summary = recompute_summary(candidate, platform_df)
+                # Die gleiche Verteilung nochmals mitten in den Bahnen
+                # zu pruefen ist unnoetig, wenn die gewuenschte Anlage
+                # ab Y-Mitte bereits alle Sicherheitspruefungen besteht.
+                if two_lane and y_mode == 'innen':
+                    break
 
     # Zweiter, unabhaengiger Suchweg: dynamische freie Stellflaechen.
     # Er ersetzt die vorhandenen Bahnen nicht und uebernimmt nur Kandidaten,
     # welche die identischen abschliessenden Sicherheitspruefungen bestehen.
-    if prefer_side_balance and flexible_width and not two_lane:
+    if prefer_side_balance and flexible_width and not two_lane and len(records) <= 12:
         spatial_candidates = _dynamic_spatial_layout(
             records, platform_row,
             init_platform_state=init_platform_state,
