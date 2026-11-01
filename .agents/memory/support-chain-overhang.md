@@ -8,3 +8,13 @@ An overhang must not be classified as unsupported solely because it extends beyo
 **Why:** The loading plans intentionally use load lengths greater than the physical platform length, and overhangs are secured in practice by material inserted underneath.
 
 **How to apply:** Model the physical platform as the final base support. Treat inserts and underlay/support elements as real support geometry at their respective heights, and validate the support chain through all layers. Centre-of-gravity checks remain necessary but must not replace support validation; any post-placement shift must be revalidated.
+
+The user can manually insert compensating timbers in the transverse Y direction:
+«in Y ich kein Problem habe händisch Ausgleichholz einzulegen».
+
+**Why:** This is part of the user's actual loading workflow; longitudinal ends
+projecting into open air are a separate practical concern.
+
+**How to apply:** Consider explicitly required compensating timbers when exploring
+transverse placements. Do not equate willingness to insert timber with verified
+bearing capacity, and do not invent support under an otherwise unsupported end.
