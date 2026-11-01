@@ -25,6 +25,9 @@ not categorically excluded because the lower layer is narrow.
 **Why:** The user explicitly wants this practical arrangement; manually inserting
 transverse compensating timbers is part of their loading process. They requested
 a working correction rather than further theoretical discussion or broad changes.
+The user reviewed the resulting transverse arrangement and confirmed it was
+generally good, while separately flagging a short intermediate element beneath
+longer elements as a remaining longitudinal concern.
 
 **How to apply:** Keep the distinction between transverse compensation and free
 longitudinal ends. Preserve bundle membership and the user's prescribed order.
