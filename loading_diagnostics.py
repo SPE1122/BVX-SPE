@@ -66,7 +66,8 @@ def code_identity():
     root = Path(__file__).resolve().parent
     hashes = {}
     for name in ("bvx_auswertung_streamlit.py", "verlade_varianten_flex.py",
-                 "pdf_bundle_display.py", "loading_diagnostics.py", "transverse_loading_supports.py"):
+                 "pdf_bundle_display.py", "loading_diagnostics.py", "transverse_loading_supports.py",
+                 "loading_shelf_search.py"):
         path = root / name
         if path.is_file():
             hashes[name] = hashlib.sha256(path.read_bytes()).hexdigest()

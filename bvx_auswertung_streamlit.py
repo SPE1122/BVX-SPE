@@ -1842,7 +1842,7 @@ def _support_direct_overlap_rects(
             tops.append(top)
     if not tops:
         return []
-    top_z = max(tops)
+    top_z = float(z) if state.get('exact_support_contact', False) else max(tops)
     x0, x1 = float(x), float(x) + float(length)
     y0, y1 = float(y), float(y) + float(width)
     overlaps: List[Tuple[float, float, float, float]] = []
@@ -1894,6 +1894,14 @@ def _planned_support_rows_for_candidate(
     target_area = target_ratio * footprint
     if current_area + 1e-6 >= target_area:
         return []
+
+    if float(state.get('height_compensation_mm', 0.0)) > .1:
+        # Shared shelves need actual, uniformly thin packing material. Do not
+        # invent a tall pillar where a normal height-compensation strip cannot fit.
+        return transverse_support_rows(
+            state, unit, float(x), float(y), float(z), float(length), float(width),
+            target_area, direct_rects, _rect_union_area, _row_box_values,
+        )
 
     # Ein verankertes Auflager darf nur auf der physischen Pritsche/Kantholz
     # stehen, nicht im vorderen oder hinteren Überhang.

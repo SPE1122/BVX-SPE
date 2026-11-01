@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
 from loading_diagnostics import trace_event
+from loading_shelf_search import try_side_by_side_shelves
 
 
 
@@ -631,6 +632,45 @@ def calculate_flexible_loading(
         trace_event('Flexible_Suche_ohne_Ergebnis', Gründe=dict(diagnostics))
         reason = ', '.join(f'{name}: {n}' for name, n in diagnostics.most_common(3))
         return empty, empty, reason or 'Keine gültige zusätzliche Anordnung'
+    if flexible_width and prefer_side_balance and allow_stack:
+        def shelf_state():
+            state = init_platform_state(platform_row, base_default, layer_default, gap_default)
+            state.update({
+                'prevent_wide_on_narrow': bool(prevent_wide_on_narrow),
+                'min_support_width_ratio': float(min_support_ratio),
+                'max_unsupported_length_mm': float(max_unsupported_length_mm),
+                'max_unsupported_side_mm': float(max_unsupported_side_mm),
+                'max_unsupported_length_percent': float(max_unsupported_length_percent),
+                'max_unsupported_side_percent': float(max_unsupported_side_percent),
+                'prefer_support_quality': bool(prefer_support_quality),
+                'allow_transverse_supports': True,
+            })
+            return state
+
+        def shelf_valid(candidate):
+            real = candidate[~candidate.Typ.isin(
+                ['Unterbau', 'Kantholz', 'Einlage', 'Bundeinlage', 'Lagenholz']
+            )]
+            return (
+                sorted(real.Einheit_ID.astype(str)) == sorted(str(r['Einheit_ID']) for r in records)
+                and find_geometry_conflicts(candidate, platform_df).empty
+                and support_chain_issues(candidate, platform_df).empty
+                and physical_conflicts(candidate).empty
+            )
+
+        shelf_candidate = try_side_by_side_shelves(
+            best_df, platform_row, records, make_state=shelf_state,
+            can_place_stable=can_place_stable, commit_place=commit_place,
+            validate=shelf_valid,
+        )
+        if shelf_candidate is not best_df:
+            best_df = shelf_candidate
+            best_summary = recompute_summary(best_df, platform_df)
+            best_score = (
+                float(load_quality(best_df, platform_row)['score'])
+                + seitenbalance_kennzahl(best_df, platform_row) * 6.
+                + flaechenverteilung_kennzahl(best_df, platform_row) * 2.
+            )
     trace_event('Flexible_Suche_Ergebnis', Gründe=dict(diagnostics), Bewertung=best_score,
                 Pritsche=str(platform_row.get('Pritsche', '')))
     return best_df, best_summary, 'Gültige flexible Anordnung'
