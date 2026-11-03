@@ -189,7 +189,11 @@ class LoadingBlockSupportTests(unittest.TestCase):
         self.assertEqual(app._pinned_manual_identity_signature(source),
                          app._pinned_manual_identity_signature(applied['placements_df']))
 
-    def test_spacers_do_not_split_complete_block_and_supports_are_preserved(self):
+    @patch.object(app, 'improve_loading_area_distribution',
+                  side_effect=lambda placements, *args, **kwargs: placements)
+    def test_spacers_do_not_split_complete_block_and_supports_are_preserved(self, _area):
+        # Isolate legacy block construction: the additional area search may
+        # legitimately remove supports after rebuilding a different geometry.
         for spacer in (0.0, 0.15, 15.0):
             with self.subTest(spacer=spacer):
                 placements, summary, used, log, units = plan(spacer)
@@ -205,6 +209,14 @@ class LoadingBlockSupportTests(unittest.TestCase):
                     self.assertFalse(supports.empty)
                     self.assertTrue(supports['Einheit_ID'].str.startswith('UBP_').all())
                     self.assertTrue(supports['Höhe_mm'].gt(0).all())
+
+    def test_area_search_may_remove_only_obsolete_supports(self):
+        placements, _, used, _, units = plan(15.0)
+        real = placements[placements['Typ'].apply(app._is_real_load_type_value)]
+        self.assertEqual(set(real['Einheit_ID']), set(units['Einheit_ID']))
+        self.assertTrue(app.find_geometry_conflicts(placements, used).empty)
+        self.assertTrue(app._pinned_manual_support_chain_issues(placements, used, .30).empty)
+        self.assertTrue(app._pinned_manual_physical_conflicts(placements).empty)
 
     def test_missing_real_load_is_not_hidden_by_support_row(self):
         original = app.create_loading_plan

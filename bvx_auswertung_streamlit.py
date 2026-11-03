@@ -6073,6 +6073,9 @@ def apply_main_loading_postprocess(
     enable_multilayer_compaction: bool = False,
     bundles_only_compaction: bool = False,
     avoid_unnecessary_overhang: bool = False,
+    enable_area_search: bool = False,
+    area_allow_stack: bool = True,
+    area_prefer_support_quality: bool = True,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """V124: Gemeinsame Nachlogik für Hauptverladung und selektive Neuberechnung.
 
@@ -6183,8 +6186,60 @@ def apply_main_loading_postprocess(
             original_placements['Pritsche'].astype(str).isin(revert_platforms)
         ].copy()
         result = pd.concat([untouched, originals], ignore_index=True)
+    if enable_area_search:
+        result = improve_loading_area_distribution(
+            result, platforms_local, gap_mm=gap_mm, allow_stack=area_allow_stack,
+            prefer_support_quality=area_prefer_support_quality,
+        )
     new_summary = recompute_summary_from_placements(result, platforms_local)
     return result, new_summary
+
+
+def improve_loading_area_distribution(placements, platforms, gap_mm=0., allow_stack=True,
+                                      prefer_support_quality=True):
+    """Additional free-surface search after legacy centering, never before it."""
+    from loading_area_search import try_area_layout
+    import time
+
+    deadline = time.monotonic() + 30.
+    result = placements.copy()
+    for _, deck in platforms.iterrows():
+        budget = min(8., deadline - time.monotonic())
+        if budget <= 0:
+            break
+        mask = result.Pritsche.astype(str).eq(str(deck.Pritsche))
+        source = result.loc[mask].copy()
+        if source.empty:
+            continue
+
+        def make_state():
+            state = init_platform_state(
+                deck, safe_number(deck.get('Kantholz_erste_Lage_mm'), 80.),
+                safe_number(deck.get('Einlage_zwischen_Lagen_mm'), 40.), gap_mm,
+            )
+            state.update(
+                area_allow_stack=allow_stack,
+                prefer_support_quality=prefer_support_quality,
+                max_unsupported_length_percent=safe_number(deck.get('Max_freier_Überhang_Länge_%')),
+                max_unsupported_side_percent=safe_number(deck.get('Max_freier_Überhang_seitlich_%')),
+            )
+            return state
+
+        def validate(candidate):
+            decks = pd.DataFrame([deck])
+            return (
+                find_geometry_conflicts(candidate, decks).empty
+                and _pinned_manual_support_chain_issues(candidate, decks).empty
+                and _pinned_manual_physical_conflicts(candidate).empty
+            )
+
+        candidate = try_area_layout(
+            source, deck, make_state=make_state, can_place=can_place_stable,
+            commit=commit_place, validate=validate, seconds=budget,
+        )
+        if candidate is not source:
+            result = pd.concat([result.loc[~mask], candidate], ignore_index=True)
+    return result
 
 
 def _loaded_block_unit_ids_for_quality(placements_df: pd.DataFrame) -> List[str]:
@@ -8224,6 +8279,9 @@ def create_variant_a_loading_plan(
             enable_multilayer_compaction=enable_multilayer_compaction,
             bundles_only_compaction=bool(use_bundles),
             avoid_unnecessary_overhang=avoid_unnecessary_overhang,
+            enable_area_search=bool(prefer_stable_option and allow_beside),
+            area_allow_stack=allow_stack,
+            area_prefer_support_quality=prefer_support_quality,
         )
 
     fuhren_log_df = pd.DataFrame(fuhren_log)
@@ -15095,7 +15153,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
         'Kompakte Fuhrenplanung bevorzugen',
         value=True,
         key='compact_transport_strategy_v127',
-        help='Die zuletzt gewählte Fuhrenoption wird weiterverwendet, solange sie noch mindestens 70 % der besten Alternative lädt. Erst bei einem deutlichen Vorteil wird gewechselt. So entstehen weniger unnötige Pritschen.'
+        help='Die zuletzt gewählte Fuhrenoption wird weiterverwendet, solange sie noch mindestens 70 % der besten Alternative lädt. Zusätzlich wird bei erlaubtem Nebeneinander eine flächenorientierte Anordnung ohne feste Stapelmitten geprüft. Nur vollständige, gültige Verbesserungen werden übernommen; Teile und Pritschenzuordnung bleiben erhalten.'
     )
 
     # Aktuelle Unterlegholz-Einstellungen global auf alle Pritschen anwenden.
@@ -16189,6 +16247,9 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                                 local_platform_df.reset_index(drop=True),
                                 gap_mm=float(gap_length),
                                 center_geometric=True,
+                                enable_area_search=bool(compact_transport_strategy and recalc_allow_beside),
+                                area_allow_stack=bool(recalc_allow_stack),
+                                area_prefer_support_quality=bool(recalc_prefer_support_quality),
                                 enable_multilayer_compaction=bool(recalc_multilayer_compaction),
                                 bundles_only_compaction=bool(target_has_bundles),
                                 avoid_unnecessary_overhang=bool(recalc_avoid_unnecessary_overhang),

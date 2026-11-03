@@ -13,3 +13,4 @@
 - [Task integration status](task-integration-status.md) — A completed separate task does not prove its changes are present in the running main app.
 - [PDF display scope](pdf-display-scope.md) — Keep bundle PDF corrections minimal and separate from loading, positioning, trip allocation, and weights.
 - [Shared shelves](shared-shelf-planning.md) — Fill free width as an additive search, independent of optional compaction; preserve the accepted plan and model height compensation physically.
+- [Area-oriented loading](area-oriented-loading.md) — Additional free-area packing is approved; retain order, safety and existing platform membership, without recentering into towers afterward.
