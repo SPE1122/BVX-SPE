@@ -7755,6 +7755,35 @@ def create_variant_a_loading_plan(
         platform_df = pd.DataFrame([platform_row]).reset_index(drop=True)
         # Wichtig: logisch ist block_units_top oben -> unten. Physisch wird unten begonnen.
         physical_order = block_units_top.iloc[::-1].copy().reset_index(drop=True)
+        if enable_area_search and allow_beside:
+            from loading_area_search import pack_area_units
+
+            def area_state():
+                state = init_platform_state(platform_row, base_default, layer_default, gap_default)
+                state.update(
+                    area_allow_stack=allow_stack,
+                    prevent_wide_on_narrow=prevent_wide_on_narrow,
+                    min_support_width_ratio=compaction_planning_support_ratio,
+                    max_unsupported_length_mm=max_unsupported_length_mm,
+                    max_unsupported_side_mm=max_unsupported_side_mm,
+                    max_unsupported_length_percent=max_unsupported_length_percent,
+                    max_unsupported_side_percent=max_unsupported_side_percent,
+                    prefer_support_quality=prefer_support_quality,
+                )
+                return state
+
+            def area_valid(candidate):
+                return (find_geometry_conflicts(candidate, platform_df).empty
+                        and _pinned_manual_support_chain_issues(candidate, platform_df).empty
+                        and _pinned_manual_physical_conflicts(candidate).empty)
+
+            area = pack_area_units(
+                block_units_top, platform_row, make_state=area_state,
+                can_place=can_place_stable, commit=commit_place, validate=area_valid,
+                seconds=2.,
+            )
+            if not area.empty:
+                return True, area, recompute_summary_from_placements(area, platform_df)
         placements_try, _summary_try = create_loading_plan(
             physical_order,
             platform_df,
@@ -15213,7 +15242,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
     center_geometric = True
     enable_area_search = st.checkbox(
         'Nach Fläche verladen', value=False, key='enable_area_search',
-        help='Zusätzliche freie Lagenplanung ohne feste Stapelmitten. Nutzt erlaubte Überhänge und bevorzugt zusammenpassende Kanten. Reihenfolge und Auflage bleiben geprüft. Die Pritschenzuordnung bleibt erhalten. Benötigt „Nebeneinander erlauben“. Aus = bisherige Planung.',
+        help='Freie Lagenplanung ohne feste Stapelmitten, bereits bei der Ermittlung der Pritschenbelegung. Prüft größere aufeinanderfolgende Teileblöcke; ohne Gruppengrenze auch gruppenübergreifend. Gewichtsgrenzen, Reihenfolge und Auflage bleiben geprüft. Benötigt „Nebeneinander erlauben“. Aus = bisherige Planung.',
     )
     max_fuhren = col4.number_input('Max. Fuhren Sicherheitslimit', min_value=1, max_value=200, value=50, step=1)
     enable_multilayer_compaction = st.checkbox(

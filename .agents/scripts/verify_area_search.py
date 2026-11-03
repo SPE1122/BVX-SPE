@@ -30,7 +30,7 @@ kwargs.update(min_support_width_ratio=settings["min_support_width_percent"]/100,
 started = time.monotonic()
 rows, summary, decks, trips, units = app.create_variant_a_loading_plan(
     parts, options, config, manifest["calculation"]["standards"], **kwargs)
-assert len(decks) == len(trips) == 5
+assert len(decks) == len(trips) == 4
 assert sorted(rows[rows.Typ.eq("Bauteil")].Einheit_ID) == sorted(old[old.Typ.eq("Bauteil")].Einheit_ID)
 assert app.find_geometry_conflicts(rows, decks).empty
 assert app._pinned_manual_support_chain_issues(rows, decks).empty
@@ -40,16 +40,14 @@ for _, deck in decks.iterrows():
     actual = after[after.Typ.eq("Bauteil")]
     ranks = {str(r.Einheit_ID): -float(r.Logische_Reihenfolge_im_Block) for _, r in actual.iterrows()}
     assert _respects_order(actual, ranks)
-    assert sorted(actual.Einheit_ID) == sorted(before[before.Typ.eq("Bauteil")].Einheit_ID)
     if int(deck.Fuhre_Nr) in (1, 2):
         # The former second-layer zigzag is gone: equal-length members align.
         bottom = actual.sort_values("Logische_Reihenfolge_im_Block", ascending=False)
         assert abs(float(bottom.iloc[0].X_mm)-float(bottom.iloc[2].X_mm)) < .1
     if int(deck.Fuhre_Nr) == 3:
-        assert _metrics(after, deck)["height"] <= 1925.
-        assert actual[actual.Z_mm.eq(1010.)].shape[0] == 2
-        assert actual[actual.Z_mm.eq(1475.)].shape[0] == 2
-    print(deck.Pritsche, _metrics(before, deck), "=>", _metrics(after, deck), flush=True)
+        assert actual.Ansicht_Label.astype(str).str.contains("WP-05").all()
+        assert len(actual) == 20
+    print(deck.Pritsche, _metrics(after, deck), flush=True)
 out = Path("/tmp/area-search-verification")
 out.mkdir(exist_ok=True)
 rows.to_csv(out/"positions.csv", index=False)

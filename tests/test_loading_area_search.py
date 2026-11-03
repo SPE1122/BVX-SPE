@@ -2,7 +2,7 @@ import unittest
 import pandas as pd
 
 import bvx_auswertung_streamlit as app
-from loading_area_search import try_area_layout, _metrics
+from loading_area_search import try_area_layout, pack_area_units, _metrics
 from loading_shelf_search import _respects_order
 from test_flexible_loading_integration import make_platform
 
@@ -82,6 +82,34 @@ class AreaSearchTests(unittest.TestCase):
             s["area_allow_stack"] = False
             return s
         self.assertIs(self.search(old, deck, state), old)
+
+    def test_complete_prefix_fits_without_a_preexisting_tall_plan(self):
+        deck, old, _ = self.fixture()
+        deck["Max_Höhe_mm"] = 400.
+        def state():
+            return app.init_platform_state(deck, 80., 40., 0.)
+        result = pack_area_units(
+            old, deck, make_state=state, can_place=app.can_place_stable,
+            commit=app.commit_place,
+            validate=lambda p: app.find_geometry_conflicts(p, pd.DataFrame([deck])).empty
+            and app._pinned_manual_support_chain_issues(p, pd.DataFrame([deck])).empty,
+        )
+        self.assertEqual(len(result), 4)
+        self.assertLessEqual((result.Z_mm+result.Höhe_mm).max(), 400.)
+
+    def test_failed_prefix_never_returns_seed_coordinates(self):
+        deck, old, state = self.fixture()
+        result = pack_area_units(old, deck, make_state=state,
+                                 can_place=lambda *a: False,
+                                 commit=app.commit_place, validate=lambda p: True)
+        self.assertTrue(result.empty)
+
+    def test_prefix_requires_valid_physical_order(self):
+        deck, old, state = self.fixture()
+        old["Logische_Reihenfolge_im_Block"] = 1
+        self.assertTrue(pack_area_units(
+            old, deck, make_state=state, can_place=app.can_place_stable,
+            commit=app.commit_place, validate=lambda p: True).empty)
 
 
 if __name__ == "__main__":

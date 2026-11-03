@@ -31,7 +31,7 @@ def _metrics(rows, deck):
 
 
 def try_area_layout(rows, deck, *, make_state, can_place, commit, validate,
-                    seconds=8., clock=time.monotonic):
+                    seconds=8., clock=time.monotonic, constructing=False):
     """Keep platform membership, atomic units and physical order unchanged.
 
     Every candidate is built bottom-up in reverse logical unloading order.
@@ -39,25 +39,31 @@ def try_area_layout(rows, deck, *, make_state, can_place, commit, validate,
     heights follow actual overlapping surfaces rather than a fixed tower.
     Only complete, validated, non-worsening improvements are returned.
     """
+    fallback = pd.DataFrame() if constructing else rows
     real = _real(rows).copy()
     rank_col = "Logische_Reihenfolge_im_Block"
     if real.empty or rank_col not in real:
-        return rows
+        return fallback
     ranks = pd.to_numeric(real[rank_col], errors="coerce")
     if ranks.isna().any() or ranks.duplicated().any() or real.Einheit_ID.duplicated().any():
-        return rows
+        return fallback
     # Do not move manual/pinned placements, even if other parts are automatic.
     if ("Manuelle_Zone" in real
             and real.Manuelle_Zone.fillna("").astype(str).str.strip().ne("").any()):
-        return rows
+        return fallback
     if ("Manuelle_Reihenfolge" in real
             and pd.to_numeric(real.Manuelle_Reihenfolge, errors="coerce").fillna(0).ne(0).any()):
-        return rows
+        return fallback
     real[rank_col] = ranks
     units = [r for _, r in real.sort_values(rank_col, ascending=False).iterrows()]
     physical_ranks = {str(r.Einheit_ID): i for i, r in enumerate(units)}
     original = _metrics(rows, deck)
-    best, best_metrics = rows, original
+    if constructing:
+        original = dict(x=float(deck["Länge_mm"]), y=float(deck["Breite_mm"]),
+                        z=float(deck["Max_Höhe_mm"]), height=float(deck["Max_Höhe_mm"]),
+                        overhang=float(deck.get("Überhang_hinten_mm", 0))
+                        + float(deck.get("Überhang_vorne_mm", 0)))
+    best, best_metrics = (pd.DataFrame() if constructing else rows), original
     deadline = clock() + seconds
     back = float(deck.get("Überhang_hinten_mm", 0))
     length, width = float(deck["Länge_mm"]), float(deck["Breite_mm"])
@@ -189,6 +195,24 @@ def try_area_layout(rows, deck, *, make_state, can_place, commit, validate,
                 and validate(candidate)):
             best, best_metrics = candidate, quality
     trace_event("Flächensuche", Pritsche=str(deck.get("Pritsche", "")),
-                übernommen=best is not rows, vorher=original, nachher=best_metrics,
+                übernommen=not best.empty and best is not rows,
+                Kapazitätsprüfung=constructing, vorher=original, nachher=best_metrics,
                 Platzierungsprüfungen=attempts, Zeitbudget_erreicht=clock() >= deadline)
     return best
+
+
+def pack_area_units(units, deck, **kwargs):
+    """Build a whole logical prefix; seed coordinates are never a fallback plan."""
+    if units.empty or units.Einheit_ID.duplicated().any():
+        return pd.DataFrame()
+    seed = units.copy()
+    seed["X_mm"] = float(deck.get("Überhang_hinten_mm", 0))
+    seed["Y_mm"] = 0.
+    seed["Z_mm"] = float(deck.get("Kantholz_erste_Lage_mm", 80))
+    for col in ("Pritsche", "Fuhre_Nr", "Fuhrenoption", "Pritschenname"):
+        seed[col] = deck.get(col, "")
+    if ("Logische_Reihenfolge_im_Block" not in seed
+            or pd.to_numeric(seed.Logische_Reihenfolge_im_Block, errors="coerce").isna().any()
+            or seed.Logische_Reihenfolge_im_Block.duplicated().any()):
+        return pd.DataFrame()
+    return try_area_layout(seed, deck, constructing=True, **kwargs)

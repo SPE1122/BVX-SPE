@@ -11,8 +11,8 @@ stack centres, while retaining unloading order and actual support.
 lower members leave usable floor empty. The previously approved transverse shelf
 search alone cannot solve this longitudinal problem.
 
-**How to apply:** Compare complete valid candidates against the accepted plan,
-without adding trips or changing platform membership. Keep manual positions
+**How to apply:** Compare complete valid candidates against the accepted plan.
+Keep manual positions
 untouched. Do not run legacy per-stack centering after the free-area search:
 that would recreate the constraint being removed. This approval extends the
 earlier narrow shelf-only scope; it does not authorize relaxed safety checks.
@@ -28,3 +28,15 @@ on complete loads rather than chasing the centre after every element.
 An almost perfectly centred old tower must not veto a substantially lower load
 inside a small centre band (2% of deck length); this is a search preference,
 not a transport safety certification. Configured hard support limits still apply.
+
+The user subsequently approved using area search during platform-capacity
+selection, so complete groups can fit on fewer platforms. Without a configured
+group boundary, consecutive elements may cross group labels to use capacity.
+
+**Why:** Postprocessing alone left WP05 split despite available capacity; the
+user also flagged holes when group boundaries were disabled.
+
+**How to apply:** Search complete logical prefixes before fixing the platform
+assignment, retain configured boundaries and weight limits, and never fill a
+hole by skipping ahead in unloading order. This supersedes the earlier
+platform-membership restriction for automatic area-mode planning only.
