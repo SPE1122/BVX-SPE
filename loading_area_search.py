@@ -115,7 +115,11 @@ def try_area_layout(rows, deck, *, make_state, can_place, commit, validate,
                     # overhang. Edge starts leave usable contiguous floor.
                     anchor = (abs(x-(end-l)) if direction == "front" else
                               abs(x-back) if direction == "rear" else balance)
-                    score = (z, overhang, (anchor if not placed else balance)+side*4, x, y)
+                    # Do not chase the partial load's centre after each member.
+                    # Align bearing edges; balance is judged on the complete load.
+                    alignment = min((min(abs(x-p[0]), abs(x+l-p[0]-p[3]))
+                                     for p in overlaps), default=0.)
+                    score = (z, alignment, anchor+side*4, overhang, x, y)
                     options.append((score, x, y, z))
             chosen = None
             for _, x, y, z in sorted(options):
@@ -136,6 +140,9 @@ def try_area_layout(rows, deck, *, make_state, can_place, commit, validate,
             mx += mass*(x+l/2)
             my += mass*(y+w/2)
         if not complete:
+            trace_event("Flächensuche_Kandidat", Richtung=direction,
+                        Pritsche=str(deck.get("Pritsche", "")),
+                        Grund="Unvollständig", Geladen=len(placed))
             continue
         candidate = pd.DataFrame(state["placements"])
         actual = _real(candidate)
@@ -148,10 +155,36 @@ def try_area_layout(rows, deck, *, make_state, can_place, commit, validate,
         for col in ("Fuhre_Nr", "Fuhrenoption", "Pritschenname"):
             if col in rows:
                 candidate[col] = rows.iloc[0][col]
+        # Translate the complete load (supports included), never individual
+        # layers, to balance its final mass within the configured envelope.
+        masses = actual.Gewicht_kg.clip(lower=0)
+        hard_overhang = any(float(state.get(key, 0) or 0) > 0 for key in (
+            "max_unsupported_length_percent", "max_unsupported_side_percent",
+            "max_unsupported_length_mm", "max_unsupported_side_mm",
+        ))
+        if masses.sum() > 0 and not hard_overhang:
+            cx = float(((actual.X_mm+actual.Länge_mm/2)*masses).sum()/masses.sum())
+            dx = back+length/2-cx
+            dx = min(max(dx, -float(candidate.X_mm.min())),
+                     usable-float((candidate.X_mm+candidate.Länge_mm).max()))
+            shifted = candidate.copy()
+            shifted["X_mm"] += dx
+            if validate(shifted):
+                candidate = shifted
         quality = _metrics(candidate, deck)
-        nonworse = all(quality[k] <= original[k]+1. for k in ("x", "z", "height", "overhang"))
+        nonworse = all(quality[k] <= original[k]+1. for k in ("z", "height"))
+        # A virtually exact old X centre must not veto a much lower layout.
+        # Permit a small centre band only for a substantial height reduction;
+        # all hard support, deck, weight and collision limits remain unchanged.
+        x_limit = original["x"]+1.
+        if quality["height"] <= original["height"]-100. and quality["z"] < original["z"]:
+            x_limit = max(x_limit, length*.02)
+        nonworse = nonworse and quality["x"] <= x_limit
         nonworse = nonworse and quality["y"] <= original["y"]+1.
         score = lambda q: q["z"]*2 + q["height"] + q["x"]*2 + q["y"]*4 + q["overhang"]
+        trace_event("Flächensuche_Kandidat", Richtung=direction,
+                    Pritsche=str(deck.get("Pritsche", "")),
+                    Qualität=quality, Vergleich_bestanden=nonworse)
         if (nonworse and score(quality) < score(best_metrics)-1.
                 and validate(candidate)):
             best, best_metrics = candidate, quality

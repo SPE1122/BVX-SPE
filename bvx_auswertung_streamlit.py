@@ -7119,6 +7119,7 @@ def create_variant_a_loading_plan(
     fuhre_split_attr: str = '',
     fill_remainder_next_group: bool = False,
     prefer_stable_option: bool = True,
+    enable_area_search: bool = False,
     prefer_support_quality: bool = True,
     enable_multilayer_compaction: bool = False,
     avoid_unnecessary_overhang: bool = False,
@@ -8279,7 +8280,7 @@ def create_variant_a_loading_plan(
             enable_multilayer_compaction=enable_multilayer_compaction,
             bundles_only_compaction=bool(use_bundles),
             avoid_unnecessary_overhang=avoid_unnecessary_overhang,
-            enable_area_search=bool(prefer_stable_option and allow_beside),
+            enable_area_search=bool(enable_area_search and allow_beside),
             area_allow_stack=allow_stack,
             area_prefer_support_quality=prefer_support_quality,
         )
@@ -13406,7 +13407,7 @@ def _preview_pinned_manual_replan(
             'max_unsupported_length_percent', 'max_unsupported_side_percent',
             'prefer_length_before_stack', 'fuhre_split_attr', 'fill_remainder_next_group',
             'prefer_stable_option', 'prefer_support_quality', 'enable_multilayer_compaction',
-            'avoid_unnecessary_overhang',
+            'avoid_unnecessary_overhang', 'enable_area_search',
         }
         planner_settings = {key: value for key, value in options.items() if key in allowed}
         planner_settings.setdefault('allow_beside', True)
@@ -15153,7 +15154,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
         'Kompakte Fuhrenplanung bevorzugen',
         value=True,
         key='compact_transport_strategy_v127',
-        help='Die zuletzt gewählte Fuhrenoption wird weiterverwendet, solange sie noch mindestens 70 % der besten Alternative lädt. Zusätzlich wird bei erlaubtem Nebeneinander eine flächenorientierte Anordnung ohne feste Stapelmitten geprüft. Nur vollständige, gültige Verbesserungen werden übernommen; Teile und Pritschenzuordnung bleiben erhalten.'
+        help='Die zuletzt gewählte Fuhrenoption wird weiterverwendet, solange sie noch mindestens 70 % der besten Alternative lädt. Die separate Option „Nach Fläche verladen“ steuert die Platzierung.'
     )
 
     # Aktuelle Unterlegholz-Einstellungen global auf alle Pritschen anwenden.
@@ -15210,6 +15211,10 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
              'Aus = bisherige Verladung unverändert.',
     )
     center_geometric = True
+    enable_area_search = st.checkbox(
+        'Nach Fläche verladen', value=False, key='enable_area_search',
+        help='Zusätzliche freie Lagenplanung ohne feste Stapelmitten. Nutzt erlaubte Überhänge und bevorzugt zusammenpassende Kanten. Reihenfolge und Auflage bleiben geprüft. Die Pritschenzuordnung bleibt erhalten. Benötigt „Nebeneinander erlauben“. Aus = bisherige Planung.',
+    )
     max_fuhren = col4.number_input('Max. Fuhren Sicherheitslimit', min_value=1, max_value=200, value=50, step=1)
     enable_multilayer_compaction = st.checkbox(
         'Optionale Mehrlagen-Verdichtung versuchen',
@@ -15472,6 +15477,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
             'consider_generated_supports': bool(consider_generated_supports),
             'support_planning_mode': str(support_planning_mode),
             'compact_transport_strategy': bool(compact_transport_strategy),
+            'enable_area_search': bool(enable_area_search),
             'enable_multilayer_compaction': bool(enable_multilayer_compaction),
             'avoid_unnecessary_overhang': bool(avoid_unnecessary_overhang),
             'effective_fuhre_split_attr': str(effective_fuhre_split_attr),
@@ -15560,6 +15566,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                 fuhre_split_attr=effective_fuhre_split_attr,
                 fill_remainder_next_group=bool(fill_remainder_next_group),
                 prefer_stable_option=bool(compact_transport_strategy),
+                enable_area_search=bool(enable_area_search),
                 prefer_support_quality=bool(prefer_support_quality),
                 enable_multilayer_compaction=bool(enable_multilayer_compaction),
                 avoid_unnecessary_overhang=bool(avoid_unnecessary_overhang),
@@ -15611,6 +15618,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                             fuhre_split_attr=effective_fuhre_split_attr,
                             fill_remainder_next_group=bool(fill_remainder_next_group),
                             prefer_stable_option=bool(compact_transport_strategy),
+                            enable_area_search=bool(enable_area_search),
                             prefer_support_quality=bool(prefer_support_quality),
                             enable_multilayer_compaction=bool(enable_multilayer_compaction),
                             avoid_unnecessary_overhang=bool(avoid_unnecessary_overhang),
@@ -16247,7 +16255,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                                 local_platform_df.reset_index(drop=True),
                                 gap_mm=float(gap_length),
                                 center_geometric=True,
-                                enable_area_search=bool(compact_transport_strategy and recalc_allow_beside),
+                                enable_area_search=bool(enable_area_search and recalc_allow_beside),
                                 area_allow_stack=bool(recalc_allow_stack),
                                 area_prefer_support_quality=bool(recalc_prefer_support_quality),
                                 enable_multilayer_compaction=bool(recalc_multilayer_compaction),
@@ -16411,6 +16419,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
             'fuhre_split_attr': effective_fuhre_split_attr,
             'fill_remainder_next_group': bool(fill_remainder_next_group),
             'prefer_stable_option': bool(compact_transport_strategy),
+            'enable_area_search': bool(enable_area_search),
             'prefer_support_quality': bool(prefer_support_quality),
             'enable_multilayer_compaction': bool(enable_multilayer_compaction),
             'avoid_unnecessary_overhang': bool(avoid_unnecessary_overhang),

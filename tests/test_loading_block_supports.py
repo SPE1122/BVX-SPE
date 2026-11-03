@@ -33,7 +33,7 @@ def platforms():
     }])
 
 
-def plan(spacer, compaction=False):
+def plan(spacer, compaction=False, area=False, stable=True):
     options = pd.DataFrame([{
         'Freigegeben': True, 'Priorität': 1, 'Fuhrenoption': 'Auflieger',
     }])
@@ -49,6 +49,8 @@ def plan(spacer, compaction=False):
         use_bundles=False, general_spacer_height=spacer,
         min_support_width_ratio=0.30,
         enable_multilayer_compaction=compaction,
+        enable_area_search=area,
+        prefer_stable_option=stable,
     )
 
 
@@ -211,12 +213,20 @@ class LoadingBlockSupportTests(unittest.TestCase):
                     self.assertTrue(supports['Höhe_mm'].gt(0).all())
 
     def test_area_search_may_remove_only_obsolete_supports(self):
-        placements, _, used, _, units = plan(15.0)
+        placements, _, used, _, units = plan(15.0, area=True)
         real = placements[placements['Typ'].apply(app._is_real_load_type_value)]
         self.assertEqual(set(real['Einheit_ID']), set(units['Einheit_ID']))
         self.assertTrue(app.find_geometry_conflicts(placements, used).empty)
         self.assertTrue(app._pinned_manual_support_chain_issues(placements, used, .30).empty)
         self.assertTrue(app._pinned_manual_physical_conflicts(placements).empty)
+
+    def test_area_option_is_independent_of_compact_trip_selection(self):
+        original = app.improve_loading_area_distribution
+        with patch.object(app, 'improve_loading_area_distribution', wraps=original) as search:
+            plan(15., area=False, stable=True)
+            self.assertFalse(search.called)
+            plan(15., area=True, stable=False)
+            self.assertTrue(search.called)
 
     def test_missing_real_load_is_not_hidden_by_support_row(self):
         original = app.create_loading_plan

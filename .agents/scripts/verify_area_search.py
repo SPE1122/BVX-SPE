@@ -23,6 +23,7 @@ settings = manifest["calculation"]["settings"]
 accepted = inspect.signature(app.create_variant_a_loading_plan).parameters
 kwargs = {k: v for k, v in settings.items() if k in accepted}
 kwargs.update(min_support_width_ratio=settings["min_support_width_percent"]/100,
+              enable_area_search=True,
               prefer_stable_option=settings["compact_transport_strategy"],
               prefer_length_before_stack=True,
               fuhre_split_attr=settings["effective_fuhre_split_attr"])
@@ -40,6 +41,14 @@ for _, deck in decks.iterrows():
     ranks = {str(r.Einheit_ID): -float(r.Logische_Reihenfolge_im_Block) for _, r in actual.iterrows()}
     assert _respects_order(actual, ranks)
     assert sorted(actual.Einheit_ID) == sorted(before[before.Typ.eq("Bauteil")].Einheit_ID)
+    if int(deck.Fuhre_Nr) in (1, 2):
+        # The former second-layer zigzag is gone: equal-length members align.
+        bottom = actual.sort_values("Logische_Reihenfolge_im_Block", ascending=False)
+        assert abs(float(bottom.iloc[0].X_mm)-float(bottom.iloc[2].X_mm)) < .1
+    if int(deck.Fuhre_Nr) == 3:
+        assert _metrics(after, deck)["height"] <= 1925.
+        assert actual[actual.Z_mm.eq(1010.)].shape[0] == 2
+        assert actual[actual.Z_mm.eq(1475.)].shape[0] == 2
     print(deck.Pritsche, _metrics(before, deck), "=>", _metrics(after, deck), flush=True)
 out = Path("/tmp/area-search-verification")
 out.mkdir(exist_ok=True)
