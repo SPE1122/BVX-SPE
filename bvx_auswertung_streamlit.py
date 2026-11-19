@@ -192,7 +192,8 @@ class BVXParser:
         operations: List[Dict[str, Any]] = []
 
         # RectangularPart mit Inhalt
-        part_matches = re.finditer(r'<RectangularPart\b([^>]*)>([\s\S]*?)</RectangularPart>', file_content, re.IGNORECASE)
+        part_pattern = re.compile(r'<RectangularPart\b([^>]*?)(?<!/)>([\s\S]*?)</RectangularPart>', re.IGNORECASE)
+        part_matches = part_pattern.finditer(file_content)
         for i, match in enumerate(part_matches):
             attrs_text = match.group(1)
             content = match.group(2)
@@ -201,28 +202,9 @@ class BVXParser:
             parts.append(part)
 
             op_pattern = '|'.join(self.OPERATION_TYPES)
-            self_closing = re.findall(rf'<({op_pattern})\s+([^>]*)/>', content, re.IGNORECASE)
-            content_tags = re.findall(rf'<({op_pattern})\s+([^>]*)>[\s\S]*?</\1>', content, re.IGNORECASE)
-
-            for op_type, attrs in self_closing + content_tags:
-                op = self._parse_operation(op_type, f'<{op_type} {attrs}>')
-                operations.append(op)
-
-            # Kappen grob als zwei Sägeschnitte je Bauteil erfassen
-            blade_thickness = 6
-            if part.width and part.height:
-                operations.append({
-                    'type': 'Kappen',
-                    'diameter': blade_thickness,
-                    'length': part.width,
-                    'depth': part.height,
-                })
-                operations.append({
-                    'type': 'Kappen',
-                    'diameter': blade_thickness,
-                    'length': part.width,
-                    'depth': part.height,
-                })
+            for op_match in re.finditer(rf'<({op_pattern})(?=[\s/>])[^>]*>', content, re.IGNORECASE):
+                op_type = op_match.group(1)
+                operations.append(self._parse_operation(op_type, op_match.group(), part))
 
         # Self-closing RectangularPart tags
         self_closing_parts = re.finditer(r'<RectangularPart\b([^>]*)/>', file_content, re.IGNORECASE)
@@ -231,7 +213,8 @@ class BVXParser:
             parts.append(self._make_part_from_tag(full_tag, f'Bauteil_{len(parts) + 1}'))
 
         # Globale Operations-Sektion
-        global_ops_match = re.search(r'<Operations>([\s\S]*?)</Operations>', file_content, re.IGNORECASE)
+        global_content = part_pattern.sub('', file_content)
+        global_ops_match = re.search(r'<Operations\b[^>]*>([\s\S]*?)</Operations>', global_content, re.IGNORECASE)
         if global_ops_match:
             ops_content = global_ops_match.group(1)
             global_ops = re.findall(r'<([A-Z][a-zA-Z]+)\s+([^>]*)/>', ops_content)
@@ -241,7 +224,7 @@ class BVXParser:
 
         return self._build_result(file_name, parts, operations)
 
-    def _parse_operation(self, op_type: str, tag: str) -> Dict[str, Any]:
+    def _parse_operation(self, op_type: str, tag: str, part: Optional[Part] = None) -> Dict[str, Any]:
         """Parst einzelne Operation aus XML-Tag."""
         x = self._safe_float(self._extract_xml_attribute(tag, 'X'))
         y = self._safe_float(self._extract_xml_attribute(tag, 'Y'))
@@ -275,10 +258,11 @@ class BVXParser:
             diameter = dim_x if dim_x > 0 else None
             length = dim_y if dim_y > 0 else None
             depth = dim_z if dim_z > 0 else (depth_attr if depth_attr > 0 else None)
-        elif op_type == 'SawCut':
-            diameter = dim_x if dim_x > 0 else None
-            length = dim_y if dim_y > 0 else None
-            depth = dim_z if dim_z > 0 else (depth_attr if depth_attr > 0 else None)
+        elif op_type.casefold() in ('sawcut', 'kappen'):
+            op_type = 'SawCut' if op_type.casefold() == 'sawcut' else 'Kappen'
+            diameter = 6.0  # Schnittfuge in mm
+            length = dim_y or (part.width if part else None)
+            depth = dim_z or depth_attr or (part.height if part else None)
         else:
             diameter = dim_x if dim_x > 0 else (drill_diam if drill_diam > 0 else None)
             depth = hole_depth if hole_depth > 0 else (depth_attr if depth_attr > 0 else (z if z > 0 else None))
@@ -417,10 +401,7 @@ class BVXParser:
             vol_depth = depth or 10
             volume_mm3 = width * vol_length * vol_depth
         elif op_type in ['Kappen', 'SawCut']:
-            blade_thickness = diameter or 6
-            width = length or 100
-            height = depth or 100
-            volume_mm3 = width * height * blade_thickness
+            volume_mm3 = length * depth * diameter
         else:
             if diameter and depth:
                 radius = diameter / 2
@@ -512,7 +493,7 @@ def read_uploaded_text(uploaded_file) -> str:
 def format_volume(volume: float) -> str:
     """Formatiert Volumen für Anzeige."""
     if volume < 0.001:
-        return f"{volume * 1_000_000:.2f} mm³"
+        return f"{volume * 1_000_000_000:.2f} mm³"
     if volume < 1:
         return f"{volume * 1000:.4f} dm³"
     return f"{volume:.6f} m³"
