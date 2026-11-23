@@ -7945,6 +7945,52 @@ def create_variant_a_loading_plan(
                 else:
                     longitudinal_diag.setdefault('Flexible Verladung', {})[flex_reason] = 1
 
+        # Optionale Kurzteilbasis: zwei kurze Endelemente je Seite hintereinander
+        # statt aufeinander. Keine Aenderung an der Standardverladung.
+        if flexible_lane_compare and allow_stack and allow_beside and len(loaded) >= 6:
+            from loading_longitudinal_pairs import build_paired_short_base
+
+            paired_rows, paired_reason = build_paired_short_base(
+                loaded, platform_row, gap_mm=gap_default
+            )
+            if not paired_rows.empty:
+                paired_platform = pd.DataFrame([platform_row])
+                paired_ok = (
+                    sorted(_loaded_block_unit_ids(paired_rows)) == sorted(wanted_ids)
+                    and find_geometry_conflicts(paired_rows, paired_platform).empty
+                    and _pinned_manual_support_chain_issues(paired_rows, paired_platform).empty
+                    and _pinned_manual_physical_conflicts(paired_rows).empty
+                    and _pinned_manual_unloading_issues(paired_rows, loaded).empty
+                )
+                if paired_ok:
+                    before = _loading_layout_quality(loaded, platform_row)
+                    after = _loading_layout_quality(paired_rows, platform_row)
+                    if (
+                        after['sp_mm'] <= before['sp_mm'] + 1.0
+                        and after['overhang_mm'] <= before['overhang_mm'] + 1.0
+                        and after['height_mm'] < before['height_mm'] - 1.0
+                    ):
+                        loaded = paired_rows
+                        loaded_ids = _loaded_block_unit_ids(loaded)
+                        longitudinal_diag['Entscheidung'] = (
+                            'Flexible Verladung übernommen (kurze Basis hintereinander)'
+                        )
+                        _longitudinal_diag_hit(
+                            longitudinal_diag, 'Kurze Basis hintereinander', 'Gültige Variante gefunden'
+                        )
+                    else:
+                        _longitudinal_diag_hit(
+                            longitudinal_diag, 'Kurze Basis hintereinander', 'Keine Verbesserung bei SP, Überhang und Höhe'
+                        )
+                else:
+                    _longitudinal_diag_hit(
+                        longitudinal_diag, 'Kurze Basis hintereinander', 'Sicherheits- oder Entnahmereihenfolgeprüfung'
+                    )
+            else:
+                _longitudinal_diag_hit(
+                    longitudinal_diag, 'Kurze Basis hintereinander', paired_reason
+                )
+
         ranked_block = block_units_top.copy()
         ranked_block['_terminal_rank'] = pd.to_numeric(
             ranked_block.get('Logische_Reihenfolge_im_Block'), errors='coerce'
@@ -15843,6 +15889,28 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                                 and alt_worst <= std_worst + 1.0
                                 and alt_sp <= std_sp + 1.0
                             )
+                    # Eine nachgewiesene Kurzteilbasis darf auch ohne SP-Gewinn
+                    # gewinnen, wenn alle Pruefungen bestanden sind und die
+                    # Ladehoehe klar sinkt. Keine Bevorzugung anderer Varianten.
+                    alt_has_paired_base = bool(
+                        alt_log is not None and not alt_log.empty
+                        and 'Diagnose_Längsstapel' in alt_log.columns
+                        and alt_log['Diagnose_Längsstapel'].astype(str).str.contains(
+                            'kurze Basis hintereinander', regex=False
+                        ).any()
+                    )
+                    def _max_load_height(df: pd.DataFrame) -> float:
+                        real = _real_load_rows(df)
+                        if real.empty:
+                            return float('inf')
+                        return float((
+                            pd.to_numeric(real['Z_mm'], errors='coerce')
+                            + pd.to_numeric(real['Höhe_mm'], errors='coerce')
+                        ).max())
+                    paired_base_height_gain = (
+                        alt_has_paired_base
+                        and _max_load_height(alt_placements) <= _max_load_height(placements_df) - 50.0
+                    )
                     same_platforms_better_layout = (
                         alternative_platforms > 0
                         and alternative_platforms == standard_platforms
@@ -15857,6 +15925,7 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                             alt_sp <= std_sp - 40.0
                             or alt_alignment <= std_alignment - 40.0
                             or side_balance_gain
+                            or paired_base_height_gain
                         )
                     )
                     passed_safety = (
