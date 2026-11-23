@@ -15611,8 +15611,8 @@ def render_loading_module(uploaded_file, transport_excel_file=None, logo_file=No
                 # Seitenbalance ebenfalls den Variantenvergleich.
                 standard_platform_count = len(platforms_used_df) if platforms_used_df is not None else 0
                 balance_comparison_needed = bool(prefer_side_balance) and standard_platform_count >= 2
-                if standard_fuhren <= 1 and not balance_comparison_needed:
-                    comparison_text = 'Variantenvergleich: Standard hat höchstens eine Fuhre; keine zweite Berechnung nötig.'
+                if standard_fuhren == 0 and not balance_comparison_needed:
+                    comparison_text = 'Variantenvergleich: Standard enthält keine Fuhre; keine zweite Berechnung nötig.'
                 else:
                     with st.spinner('Alternative: zuerst hintereinander versuchen ...'):
                         alternative = create_variant_a_loading_plan(
